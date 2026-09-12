@@ -187,10 +187,26 @@ class ModelRunner:
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
-    def prepare_sample(self, seqs: list[Sequence]):
+    def prepare_sample(self,seqs: list[Sequence],) -> torch.Tensor | None:
         temperatures = [seq.temperature for seq in seqs]
-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        return temperatures
+        is_greedy = temperatures[0] == 0
+
+        if any(
+            (temperature == 0) != is_greedy
+            for temperature in temperatures
+        ):
+            raise ValueError(
+                "mixed greedy and random sampling is not supported"
+            )
+
+        if is_greedy:
+            return None
+
+        return torch.tensor(
+            temperatures,
+            dtype=torch.float32,
+            pin_memory=True,
+        ).cuda(non_blocking=True)
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
