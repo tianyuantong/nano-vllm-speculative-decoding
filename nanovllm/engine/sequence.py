@@ -3,6 +3,7 @@ from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
+from nanovllm.engine.kv_state import KVState
 
 
 class SequenceStatus(Enum):
@@ -22,16 +23,33 @@ class Sequence:
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
+        self.target_kv = KVState()
+        self.draft_kv: KVState | None = None
         self.num_scheduled_tokens = 0
         self.is_prefill = True
-        self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
 
     def __len__(self):
         return self.num_tokens
+
+    # Keep the ordinary scheduler API; it continues to operate on target KV.
+    @property
+    def num_cached_tokens(self):
+        return self.target_kv.num_cached_tokens
+
+    @num_cached_tokens.setter
+    def num_cached_tokens(self, value):
+        self.target_kv.num_cached_tokens = value
+
+    @property
+    def block_table(self):
+        return self.target_kv.block_table
+
+    @block_table.setter
+    def block_table(self, value):
+        self.target_kv.block_table = value
 
     def __getitem__(self, key):
         return self.token_ids[key]
@@ -70,10 +88,14 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
+        if self.draft_kv is not None:
+            raise ValueError("Dual KV requests are TP=1 only; no IPC serialization yet")
         last_state = self.last_token if not self.is_prefill else self.token_ids
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
 
     def __setstate__(self, state):
+        self.target_kv = KVState()
+        self.draft_kv = None
         self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
