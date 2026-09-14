@@ -76,7 +76,7 @@ they are disabled in this candidate because the tested workload showed no useful
 On eight development requests (two batches of four, seed 17011), this candidate took
 10.729660 s versus 11.234017 s for ordinary decoding: 4.49% less generation time.
 It generated 2,078 versus 1,977 tokens: 193.669 versus 175.983 token/s, 10.05% higher.
-Draft length 3 was selected from 2/3/4 on these same inputs; independent confirmation is pending.
+Draft length 3 was selected from 2/3/4 on these same inputs. The expanded retest below did not sustain this advantage.
 Quality was not evaluated and finite-precision equivalence to ordinary decoding remains open.
 
 CPU: `python tools/run_cpu_tests.py` and `python -m pytest -q tests/perf_repair`.
@@ -84,3 +84,25 @@ The updated GPU tools accept `--r2`; the model gate uses all five ablation optio
 so it is not an exact replay of the three-option candidate above.
 [Recorded results and replay materials](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/r3-development-results)
 are distributed separately from the code.
+
+## Expanded fixed-k3 results
+
+The frozen three-option, device-token k=3 candidate was retested against ordinary decoding
+on two previously seen 24-request panels, excluding the original eight requests.
+Each panel used three new seeds (110017, 130031, 170041), six batches of four and two
+repetitions per mode: 72 workers and 144 timed calls. Engine, models and settings were unchanged.
+
+| Panel | Ordinary / speculative time (s) | Ordinary / speculative tokens/s |
+| --- | ---: | ---: |
+| A1 | 112.715 / 115.702 | 210.682 / 203.315 |
+| A2 | 83.531 / 85.816 | 262.538 / 250.139 |
+
+Speculative generation took 2.65% / 2.74% longer, with 3.50% / 4.72% lower throughput.
+Neither panel passed the predeclared criterion; these are previously seen inputs, not a blind test.
+The eight-request result remains local evidence, not a general performance claim.
+The cause of the workload-dependent difference has not been isolated; quality is unmeasured.
+
+The plan stops here: subsequent LM-head graphs, probability graphs and dynamic draft length
+remain unimplemented proposals. No additional optimization benefit is claimed.
+[Full results, frozen protocol and audit tools](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/expanded-k3-results)
+are published as an experiment attachment, outside the code branch.
