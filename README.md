@@ -12,5 +12,8 @@ Install: `pip install -e .` in a compatible CUDA environment.
 Usage and GPU checks: [decoding guide](docs/DECODING.md).
 CPU checks: `python tools/run_cpu_tests.py` (control flow and mathematical reference checks).
 
+R1 reduced dual-model generation time by about 44% versus its previous implementation on eight requests;
+ordinary decoding remained faster. See [results and checks](docs/DECODING.md#r1-results-and-checks).
+
 This is a research implementation; finite-precision equivalence to ordinary decoding remains unproven.
 See [upstream provenance](docs/UPSTREAM.md) and [MIT license](LICENSE).

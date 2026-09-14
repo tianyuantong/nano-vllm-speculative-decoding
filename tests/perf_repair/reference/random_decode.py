@@ -99,11 +99,10 @@ class PrivateKVPool:
 class RandomDecode:
     def __init__(self, backend, *, target_blocks, draft_blocks, block_size,
                  max_model_len, max_num_seqs, vocab_size, eos, k=4, gpu_draft_tokens=False,
-                 ngram=False, performance_mode=False):
+                 ngram=False):
         if type(k) is not int or not 0 <= k <= 4:
             raise ValueError("this controller supports B(k=0) or S0(k=1..4)")
         self.backend = backend
-        self.performance_mode = performance_mode
         self.target_pool = PrivateKVPool(target_blocks, block_size)
         if ngram and (not k or draft_blocks or gpu_draft_tokens):
             raise ValueError("N requires k>0, no draft pool and no device draft continuation")
@@ -125,7 +124,7 @@ class RandomDecode:
         return min(request.max_tokens - (len(request.tokens) - len(request.prompt)),
                    self.max_model_len - len(request.tokens))
 
-    def _forward(self, role, items, *, all_logits=False, device_tokens=None, need_logits=True):
+    def _forward(self, role, items, *, all_logits=False, device_tokens=None):
         if not items:
             return []
         pool = self.target_pool if role == "target" else self.draft_pool
@@ -134,19 +133,11 @@ class RandomDecode:
             kv = getattr(request, role)
             if not kv.num_cached_tokens < len(tokens) <= self.max_model_len:
                 raise ValueError("forward must compute a nonempty uncached suffix")
-            # Cached prefix IDs were checked before the writes that created
-            # that KV. Check EVERY uncached ID before embedding; initial prefill
-            # still checks the entire prompt. Commits keep their full validation.
-            checked = tokens[kv.num_cached_tokens:] if self.performance_mode else tokens
-            if any(type(t) is not int or not 0 <= t < self.vocab_size for t in checked):
+            if any(type(t) is not int or not 0 <= t < self.vocab_size for t in tokens):
                 raise ValueError("out-of-vocabulary token before embedding access")
             pool.reserve(kv, len(tokens))
             queries.append(Query(request, tokens, kv, self.block_size))
-        if not need_logits:
-            if role != "draft" or all_logits or device_tokens is not None:
-                raise ValueError("KV-only is draft prefill/catchup only")
-            result = self.backend.forward_kv_only(role, queries)
-        elif device_tokens is None:
+        if device_tokens is None:
             result = self.backend.forward(role, queries, all_logits=all_logits)
         else:
             if role != "draft" or all_logits or any(q.num_scheduled_tokens != 1 for q in queries):
@@ -198,8 +189,7 @@ class RandomDecode:
                     or not math.isfinite(r.temperature) or r.temperature <= 0
                     or len(r.prompt) >= self.max_model_len):
                 raise ValueError("invalid prompt, output budget or temperature")
-            if (r.tokens != r.prompt or r.stop or r.target.block_table or r.draft.block_table
-                    or r.target.num_cached_tokens or r.draft.num_cached_tokens):
+            if r.tokens != r.prompt or r.stop or r.target.block_table or r.draft.block_table:
                 raise ValueError("fresh requests and fresh RNG streams required")
         self.busy = True
         try:
@@ -210,7 +200,7 @@ class RandomDecode:
                 self._commit(r, [token])
             active = [r for r in requests if not r.stop]
             if self.draft_pool is not None:
-                self._forward("draft", [(r, r.prompt) for r in active], need_logits=not self.performance_mode)
+                self._forward("draft", [(r, r.prompt) for r in active])
             while active:
                 if not self.k:
                     logits = self._forward("target", [(r, r.tokens) for r in active])
@@ -251,7 +241,7 @@ class RandomDecode:
                 raise RuntimeError("target round-entry KV invariant violated")
             if not len(r.tokens) - 2 <= r.draft.num_cached_tokens <= len(r.tokens) - 1:
                 raise RuntimeError("draft round-entry KV invariant violated")
-        self._forward("draft", catchup, need_logits=not self.performance_mode)  # same KV, no RNG
+        self._forward("draft", catchup)  # actual forward, consumes no RNG
         proposals = {r.request_id: [] for r in active}
         probabilities = {r.request_id: [] for r in active}
         for step in range(max(budgets.values(), default=0)):
