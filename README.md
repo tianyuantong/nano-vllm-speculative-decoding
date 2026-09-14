@@ -1,13 +1,16 @@
-# nano-vLLM experiments
+# nano-vLLM speculative decoding
 
-A fork of [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) for studying inference.
+An experimental fork of [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm).
 
-Adds greedy decoding (`temperature=0`) and an `enable_prefix_cache` switch.
-Greedy and random requests must be run in separate batches.
+Adds offline random decoding, n-gram proposals and target/draft speculative decoding.
+The dual-model path supports host or device token continuation with separate KV caches.
 
-Install with `pip install -e .` in a compatible CUDA environment.
-Run `python -m unittest discover -s tests -p "test_serving.py"` for sampling checks,
-and use `test_prefix_cache.py` for prefix-cache checks (same command pattern).
-These checks import the CUDA engine and are not a CPU-only CI suite.
+Scope: single GPU, temperature 1, no sampling filters, prefix cache disabled, draft length 1–4.
+The existing `LLM` entrypoint still requires separate greedy and random batches.
 
-See [upstream provenance](docs/UPSTREAM.md) and the retained [MIT license](LICENSE).
+Install: `pip install -e .` in a compatible CUDA environment.
+Usage and GPU checks: [decoding guide](docs/DECODING.md).
+CPU checks: `python tools/run_cpu_tests.py` (control flow and mathematical reference checks).
+
+This is a research implementation; finite-precision equivalence to ordinary decoding remains unproven.
+See [upstream provenance](docs/UPSTREAM.md) and [MIT license](LICENSE).
