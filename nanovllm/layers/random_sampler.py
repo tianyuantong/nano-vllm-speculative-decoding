@@ -91,7 +91,7 @@ def from_logits(logits: torch.Tensor, temperatures: torch.Tensor) -> Probabiliti
     return Probabilities(probabilities.values, probabilities.mass, probabilities.invalid | bad_temperature)
 
 
-def draw(probabilities: Probabilities, *, generator: torch.Generator) -> Sample:
+def draw(probabilities: Probabilities, *, generator: torch.Generator, compact: bool = False) -> Sample:
     """Exponential-race sample on device, preserving the original probabilities.
 
     Each call consumes a full [batch, vocab] noise tensor, including masked rows.
@@ -100,11 +100,23 @@ def draw(probabilities: Probabilities, *, generator: torch.Generator) -> Sample:
     values = probabilities.values
     _matrix(values)
     _vector(probabilities.invalid, values.shape[0], values.device, torch.bool)
-    safe = torch.where(probabilities.invalid[:, None], _placeholder(values), values)
+    if compact:
+        # Independent scratch, never mutate probabilities/logits/saved q.
+        # Invalid rows become delta_0 without a full V-element placeholder.
+        safe = values.masked_fill(probabilities.invalid[:, None], 0.0)
+        safe[:, 0].add_(probabilities.invalid.to(values.dtype))
+    else:
+        safe = torch.where(probabilities.invalid[:, None], _placeholder(values), values)
     noise = torch.empty_like(values).exponential_(1.0, generator=generator)
     bad_noise = ~torch.isfinite(noise) | (noise <= 0)
-    safe_noise = torch.where(bad_noise, torch.ones_like(noise), noise)
-    scores = safe / safe_noise  # out of place: q remains available to verification
+    if compact:
+        # Same shape/dtype/full exponential draw and division; reuse only new
+        # scratch tensors. Every original invalid/noise/score check remains.
+        noise.masked_fill_(bad_noise, 1.0)
+        scores = safe.div_(noise)
+    else:
+        safe_noise = torch.where(bad_noise, torch.ones_like(noise), noise)
+        scores = safe / safe_noise  # out of place: q remains available to verification
     invalid = probabilities.invalid | bad_noise.any(dim=-1) | ~torch.isfinite(scores).all(dim=-1)
     return Sample(scores.argmax(dim=-1), invalid)
 

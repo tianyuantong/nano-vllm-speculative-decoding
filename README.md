@@ -1,3 +1,5 @@
+> **Project checkpoint — R1 (2026-09-14):** This fork now includes standard randomized speculative decoding (B/N/S0/S1). On a small RTX 5090 development workload, R1 reduced dual-model generation time by about 44% versus its previous implementation; ordinary decoding B remains fastest. [Results, chart, validation and reproduction](docs/experiments/r1-20260914/README.md). This is an intermediate research checkpoint, not a lossless or production speedup claim. The upstream README follows below.
+
 <p align="center">
 <img width="300" src="assets/logo.png">
 </p>

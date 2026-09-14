@@ -1,0 +1,128 @@
+{
+  "status": "PASS",
+  "timed_calls": 32,
+  "processes": 16,
+  "same_mode_cross_build_output_stop_rng": true,
+  "S0_S1_output_stop_rng": true,
+  "timed_compiler_counters_unchanged": true,
+  "timed_graph_capture_absent": true,
+  "source_binding_unchanged": true,
+  "summary": {
+    "reference": {
+      "B": {
+        "seconds": 11.360106967389584,
+        "tokens": 1977.0,
+        "tokens_per_second": 174.03005144891614,
+        "repeat_total_seconds": [
+          11.358990045962855,
+          11.361223888816312
+        ],
+        "repeat_relative_difference_percent": 0.019663924467165875,
+        "max_group_repeat_difference_percent": 0.06380551657188932,
+        "max_reserved_bytes": 21363687424
+      },
+      "N": {
+        "seconds": 26.0975572289899,
+        "tokens": 1921.0,
+        "tokens_per_second": 73.60842178233062,
+        "repeat_total_seconds": [
+          26.0892779789865,
+          26.105836478993297
+        ],
+        "repeat_relative_difference_percent": 0.06344846707875511,
+        "max_group_repeat_difference_percent": 0.18546762712352052,
+        "max_reserved_bytes": 21374173184
+      },
+      "S0": {
+        "seconds": 21.29849051439669,
+        "tokens": 1938.0,
+        "tokens_per_second": 90.99236392785728,
+        "repeat_total_seconds": [
+          21.33113553887233,
+          21.26584548992105
+        ],
+        "repeat_relative_difference_percent": 0.30654777580200043,
+        "max_group_repeat_difference_percent": 0.5446146474314023,
+        "max_reserved_bytes": 24224202752
+      },
+      "S1": {
+        "seconds": 20.87117642373778,
+        "tokens": 1938.0,
+        "tokens_per_second": 92.85533123067374,
+        "repeat_total_seconds": [
+          20.860547160264105,
+          20.881805687211454
+        ],
+        "repeat_relative_difference_percent": 0.10185591130920144,
+        "max_group_repeat_difference_percent": 0.39577016420482747,
+        "max_reserved_bytes": 24224202752
+      }
+    },
+    "repair": {
+      "B": {
+        "seconds": 11.199462756048888,
+        "tokens": 1977.0,
+        "tokens_per_second": 176.52632479466143,
+        "repeat_total_seconds": [
+          11.198140587192029,
+          11.200784924905747
+        ],
+        "repeat_relative_difference_percent": 0.0236112907495513,
+        "max_group_repeat_difference_percent": 0.0869811040244239,
+        "max_reserved_bytes": 21363687424,
+        "repair_time_speedup": 1.0143439212076428,
+        "time_reduction_percent": 1.4141082632570523,
+        "vs_current_B_time_speedup": 1.0,
+        "vs_current_B_throughput_ratio": 1.0
+      },
+      "N": {
+        "seconds": 17.330346080940217,
+        "tokens": 1921.0,
+        "tokens_per_second": 110.84602644564042,
+        "repeat_total_seconds": [
+          17.34614912001416,
+          17.314543041866273
+        ],
+        "repeat_relative_difference_percent": 0.18237418918395581,
+        "max_group_repeat_difference_percent": 0.3130998018356257,
+        "max_reserved_bytes": 21634220032,
+        "repair_time_speedup": 1.505887828615944,
+        "time_reduction_percent": 33.59399146488246,
+        "vs_current_B_time_speedup": 0.6462342242758771,
+        "vs_current_B_throughput_ratio": 0.6279291577308851
+      },
+      "S0": {
+        "seconds": 11.884755586041138,
+        "tokens": 1938.0,
+        "tokens_per_second": 163.0660374939655,
+        "repeat_total_seconds": [
+          11.886635621078312,
+          11.882875551003963
+        ],
+        "repeat_relative_difference_percent": 0.031637756848495166,
+        "max_group_repeat_difference_percent": 0.06547640842296552,
+        "max_reserved_bytes": 24494735360,
+        "repair_time_speedup": 1.7920848569584515,
+        "time_reduction_percent": 44.1990709247322,
+        "vs_current_B_time_speedup": 0.9423385003561084,
+        "vs_current_B_throughput_ratio": 0.9237491217451381
+      },
+      "S1": {
+        "seconds": 11.683675160515122,
+        "tokens": 1938.0,
+        "tokens_per_second": 165.8724650741279,
+        "repeat_total_seconds": [
+          11.684500579955056,
+          11.682849741075188
+        ],
+        "repeat_relative_difference_percent": 0.014129448629720412,
+        "max_group_repeat_difference_percent": 0.10924891709307848,
+        "max_reserved_bytes": 24494735360,
+        "repair_time_speedup": 1.7863537060899928,
+        "time_reduction_percent": 44.02004504534433,
+        "vs_current_B_time_speedup": 0.9585564988914939,
+        "vs_current_B_throughput_ratio": 0.9396471901121473
+      }
+    }
+  }
+}
