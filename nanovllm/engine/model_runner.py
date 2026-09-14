@@ -241,6 +241,25 @@ class ModelRunner:
             context_lens.append(len(seq))
             position = len(seq) - 1
             slot_mapping.append(seq.block_table[position // self.block_size] * self.block_size + position % self.block_size)
+        if getattr(self, "r2_pack_decode", False):
+            n = len(seqs)
+            width = max(len(seq.block_table) for seq in seqs)
+            tables = [block for seq in seqs for block in
+                      seq.block_table + [-1] * (width - len(seq.block_table))]
+            longs = torch.tensor(input_ids + positions, dtype=torch.int64,
+                                 pin_memory=True).cuda(non_blocking=True)
+            ints = torch.tensor(slot_mapping + context_lens + tables, dtype=torch.int32,
+                                pin_memory=True).cuda(non_blocking=True)
+            if device_input_ids is None:
+                input_ids, positions = longs[:n], longs[n:]
+            else:
+                if (device_input_ids.shape != (n,) or device_input_ids.dtype != torch.int64
+                        or device_input_ids.device != next(self.model.parameters()).device):
+                    raise ValueError("invalid device decode input metadata")
+                input_ids, positions = device_input_ids, longs
+            set_context(False, slot_mapping=ints[:n], context_lens=ints[n:2*n],
+                        block_tables=ints[2*n:].view(n, width))
+            return input_ids, positions
         if device_input_ids is None:
             input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         else:

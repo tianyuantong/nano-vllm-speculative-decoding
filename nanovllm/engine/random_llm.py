@@ -17,9 +17,13 @@ class RandomLLM:
     def __init__(self, target_config, draft_config=None, *, k=4, gpu_draft_tokens=False,
                  ngram=False, performance_mode=True, verify_graphs=True,
                  verify_graph_reserve_budget_bytes=2 << 30,
-                 verify_graph_min_free_bytes=1 << 30):
+                 verify_graph_min_free_bytes=1 << 30, r2_options=()):
         if type(performance_mode) is not bool or type(verify_graphs) is not bool:
             raise ValueError("performance_mode and verify_graphs must be bool")
+        r2_options = frozenset(r2_options)
+        if r2_options - {"draw", "softmax", "residual", "pack", "views"}:
+            raise ValueError("unknown R2 experiment option")
+        self.r2_options = r2_options
         self.performance_mode = performance_mode
         if ngram and (draft_config is not None or gpu_draft_tokens or not k):
             raise ValueError("N requires target only, k>0 and no device draft continuation")
@@ -59,6 +63,9 @@ class RandomLLM:
                     reserve_budget_bytes=verify_graph_reserve_budget_bytes,
                     min_free_bytes=verify_graph_min_free_bytes)
             self.backend = CUDARandomBackend(target, draft, performance_mode=performance_mode)
+            self.backend.r2_options = r2_options
+            for runner in [target] + ([draft] if draft is not None else []):
+                runner.r2_pack_decode = "pack" in r2_options
             self.decoder = RandomDecode(self.backend, target_blocks=target_config.num_kvcache_blocks,
                                         draft_blocks=draft_config.num_kvcache_blocks if draft else 0,
                                         block_size=target_config.kvcache_block_size,
@@ -67,6 +74,7 @@ class RandomLLM:
                                         vocab_size=target_config.hf_config.vocab_size,
                                         eos=self.tokenizer.eos_token_id, k=k, gpu_draft_tokens=gpu_draft_tokens,
                                         ngram=ngram, performance_mode=performance_mode)
+            self.decoder.r2_views = "views" in r2_options
         except BaseException as error:
             try:
                 self.close()
@@ -82,7 +90,7 @@ class RandomLLM:
 
     def performance_metadata(self):
         cache = self.backend.runners["target"].verify_graph_cache
-        return {"performance_mode": self.performance_mode,
+        return {"performance_mode": self.performance_mode, "r2_options": sorted(self.r2_options),
                 "rng_version": "nano-request-sha256-v1", "rng_consumption_changed": False,
                 "verify_graph": cache.statistics() if cache is not None else None}
 

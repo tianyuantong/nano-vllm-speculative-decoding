@@ -44,6 +44,7 @@ class CUDARandomBackend:
         self.runners = {"target": target, "draft": draft}
         self.invalid = {}
         self.performance_mode = performance_mode
+        self.r2_options = frozenset()
 
     def synchronize(self):
         torch.cuda.synchronize()
@@ -57,7 +58,7 @@ class CUDARandomBackend:
         return self.runners[role].run_queries(queries, need_logits=False)
 
     def _draw(self, p, *, generator):
-        return sampler.draw(p, generator=generator, compact=self.performance_mode)
+        return sampler.draw(p, generator=generator, compact=self.performance_mode, simplify="draw" in getattr(self, "r2_options", ()))
 
     def forward_draft_device(self, queries, token_ids):
         # Internal only: tokens are independently allocated argmax outputs from
@@ -107,7 +108,7 @@ class CUDARandomBackend:
 
     def _probabilities(self, r, logits):
         temp = torch.full((logits.shape[0],), r.temperature, device=logits.device, dtype=torch.float32)
-        return sampler.from_logits(logits, temp)
+        return sampler.from_logits(logits, temp, simplify="softmax" in getattr(self, "r2_options", ()))
 
     @torch.inference_mode()
     def sample_batch(self, requests, logits, role):
@@ -211,7 +212,7 @@ class CUDARandomBackend:
                 padded_q = (torch.cat([q.values, p.values[-1:]]), torch.cat([q.mass, p.mass[-1:]]),
                             torch.cat([q.invalid, p.invalid[-1:]]))
                 q_selected = sampler.Probabilities(*(t.index_select(0, count) for t in padded_q))
-            correction = self._draw(sampler.residual(p_selected, q_selected, count < k),
+            correction = self._draw(sampler.residual(p_selected, q_selected, count < k, simplify="residual" in getattr(self, "r2_options", ())),
                                       generator=r.rng.streams["correction"])
             bonus_p = sampler.Probabilities(p.values[-1:], p.mass[-1:], p.invalid[-1:])
             bonus = self._draw(bonus_p, generator=r.rng.streams["bonus"])

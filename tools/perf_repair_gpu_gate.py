@@ -65,6 +65,7 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--target',required=True);p.add_argument('--draft',required=True)
     p.add_argument('--output',required=True)
+    p.add_argument("--r2", action="store_true")
     args=p.parse_args()
     out=Path(args.output)
     # Do not overwrite an earlier result, even if this invocation later fails.
@@ -85,7 +86,9 @@ def main():
         common=dict(max_num_seqs=4,max_num_batched_tokens=5328,max_model_len=3328,enable_prefix_cache=False)
         llm=RandomLLM(Config(args.target,kv_cache_memory_bytes=4<<30,**common),
                       Config(args.draft,kv_cache_memory_bytes=1536<<20,**common),
-                      k=4,performance_mode=True,verify_graphs=True)
+                      k=4,performance_mode=True,verify_graphs=True,
+                      r2_options=("draw","softmax","residual","pack","views") if args.r2 else ())
+        report["r2_options"]=sorted(llm.r2_options)
         runner=llm.backend.runners['target'];cache=runner.verify_graph_cache
         pool=llm.decoder.target_pool
         report['environment']={'torch':torch.__version__,'flash_attn':flash_attn.__version__,

@@ -80,18 +80,26 @@ def from_probs(values: torch.Tensor) -> Probabilities:
     return Probabilities(values, mass, ~valid)
 
 
-def from_logits(logits: torch.Tensor, temperatures: torch.Tensor) -> Probabilities:
+def from_logits(logits: torch.Tensor, temperatures: torch.Tensor, *, simplify=False) -> Probabilities:
     """Allocate a distinct FP32 probability tensor; never overwrite logits/q."""
     if logits.ndim != 2 or min(logits.shape) < 1 or not logits.is_floating_point():
         raise ValueError("expected nonempty floating [batch, vocab] logits")
     _vector(temperatures, logits.shape[0], logits.device, torch.float32)
     bad_temperature = ~torch.isfinite(temperatures) | (temperatures <= 0)
     safe_temperature = torch.where(bad_temperature, torch.ones_like(temperatures), temperatures)
-    probabilities = from_probs(torch.softmax(logits.float() / safe_temperature[:, None], dim=-1))
+    values = torch.softmax(logits.float() / safe_temperature[:, None], dim=-1)
+    if simplify:
+        # Only softmax-owned rows: nonnegative or NaN. NaN reaches mass.
+        # Preserve the original FP64 reduction and scalar normalization guard.
+        mass = values.double().sum(dim=-1)
+        valid = torch.isfinite(mass) & ((mass - 1.0).abs() <= NORMALIZATION_ATOL)
+        probabilities = Probabilities(values, mass, ~valid)
+    else:
+        probabilities = from_probs(values)
     return Probabilities(probabilities.values, probabilities.mass, probabilities.invalid | bad_temperature)
 
 
-def draw(probabilities: Probabilities, *, generator: torch.Generator, compact: bool = False) -> Sample:
+def draw(probabilities: Probabilities, *, generator: torch.Generator, compact: bool = False, simplify=False) -> Sample:
     """Exponential-race sample on device, preserving the original probabilities.
 
     Each call consumes a full [batch, vocab] noise tensor, including masked rows.
@@ -100,6 +108,16 @@ def draw(probabilities: Probabilities, *, generator: torch.Generator, compact: b
     values = probabilities.values
     _matrix(values)
     _vector(probabilities.invalid, values.shape[0], values.device, torch.bool)
+    if simplify:
+        # No clamp or RNG change. Min/max replaces V-sized bad-noise masks.
+        # Invalid-row tokens are never committed; score overflow remains checked.
+        safe = values.masked_fill(probabilities.invalid[:, None], 0.0)
+        noise = torch.empty_like(values).exponential_(1.0, generator=generator)
+        minimum, maximum = torch.aminmax(noise, dim=-1)
+        noise_ok = (minimum > 0) & torch.isfinite(maximum)
+        scores = safe.div_(noise)
+        invalid = probabilities.invalid | ~noise_ok | ~torch.isfinite(scores).all(dim=-1)
+        return Sample(scores.argmax(dim=-1), invalid)
     if compact:
         # Independent scratch, never mutate probabilities/logits/saved q.
         # Invalid rows become delta_0 without a full V-element placeholder.
@@ -155,6 +173,7 @@ def residual(
     target: Probabilities,
     draft: Probabilities,
     rejected: torch.Tensor,
+    *, simplify=False,
 ) -> Probabilities:
     """Residual rows for actual first rejections; inactive rows use token 0.
 
@@ -173,6 +192,11 @@ def residual(
     denominator = torch.where(good_mass, mass, torch.ones_like(mass))
     values = weights / denominator[:, None]
     safe_active = rejected & ~invalid
+    if simplify:
+        # Internal residual -> draw only: draw does not consume mass.
+        # Retain exact residual arithmetic, positive-mass and upstream errors.
+        values = values.masked_fill(~safe_active[:, None], 0.0)
+        return Probabilities(values, torch.ones_like(mass), invalid)
     values = torch.where(safe_active[:, None], values, _placeholder(values))
     checked = from_probs(values)
     return Probabilities(checked.values, checked.mass, checked.invalid | invalid)
