@@ -193,3 +193,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# --- NanoServe-Lab ---
+results/raw/
+models/
+*.safetensors
+*.bin
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
