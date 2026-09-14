@@ -34,6 +34,7 @@ class ModelRunner:
         self.runtime = runtime if runtime is not None else DeviceRuntime(rank, self.world_size)
         self._exited = False
         self._cache_initialized = False
+        self.verify_graph_cache = None
         self.runtime.attach(self)
         default_dtype = torch.get_default_dtype()
         default_device = torch.get_default_device()
@@ -96,15 +97,21 @@ class ModelRunner:
                     self.shm.unlink()
             torch.cuda.synchronize()
         finally:
-            # Drop runner-owned references, including Graph/attention tensor views.
-            for name in ("graphs", "graph_vars", "graph_pool", "kv_cache", "model", "sampler"):
-                if hasattr(self, name):
-                    delattr(self, name)
-            reset_context()
-            self.runtime.detach(self)
-            self._exited = True
-            if self._owns_runtime:
-                self.runtime.close()
+            # Graph entries hold model/KV addresses; release them before tensors.
+            try:
+                if self.verify_graph_cache is not None:
+                    self.verify_graph_cache.close()
+            finally:
+                self.verify_graph_cache = None
+                # Drop all references even if CUDA/Graph cleanup failed.
+                for name in ("graphs", "graph_vars", "graph_pool", "kv_cache", "model", "sampler"):
+                    if hasattr(self, name):
+                        delattr(self, name)
+                reset_context()
+                self.runtime.detach(self)
+                self._exited = True
+                if self._owns_runtime:
+                    self.runtime.close()
 
     def loop(self):
         while True:
@@ -234,6 +241,25 @@ class ModelRunner:
             context_lens.append(len(seq))
             position = len(seq) - 1
             slot_mapping.append(seq.block_table[position // self.block_size] * self.block_size + position % self.block_size)
+        if getattr(self, "r2_pack_decode", False):
+            n = len(seqs)
+            width = max(len(seq.block_table) for seq in seqs)
+            tables = [block for seq in seqs for block in
+                      seq.block_table + [-1] * (width - len(seq.block_table))]
+            longs = torch.tensor(input_ids + positions, dtype=torch.int64,
+                                 pin_memory=True).cuda(non_blocking=True)
+            ints = torch.tensor(slot_mapping + context_lens + tables, dtype=torch.int32,
+                                pin_memory=True).cuda(non_blocking=True)
+            if device_input_ids is None:
+                input_ids, positions = longs[:n], longs[n:]
+            else:
+                if (device_input_ids.shape != (n,) or device_input_ids.dtype != torch.int64
+                        or device_input_ids.device != next(self.model.parameters()).device):
+                    raise ValueError("invalid device decode input metadata")
+                input_ids, positions = device_input_ids, longs
+            set_context(False, slot_mapping=ints[:n], context_lens=ints[n:2*n],
+                        block_tables=ints[2*n:].view(n, width))
+            return input_ids, positions
         if device_input_ids is None:
             input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         else:
@@ -270,9 +296,11 @@ class ModelRunner:
         ).cuda(non_blocking=True)
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool,
+                  *, need_logits: bool = True):
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden = self.model(input_ids, positions)
+            return self.model.compute_logits(hidden) if need_logits else hidden
         else:
             bs = input_ids.size(0)
             context = get_context()
@@ -286,7 +314,8 @@ class ModelRunner:
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+            hidden = graph_vars["outputs"][:bs]
+            return self.model.compute_logits(hidden) if need_logits else hidden
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
@@ -296,16 +325,25 @@ class ModelRunner:
         reset_context()
         return token_ids
 
-    @torch.inference_mode()
-    def run_queries(self, queries, *, all_logits=False, device_input_ids=None):
-        """TP1 offline random path. VERIFY returns every uncached position.
+    def enable_verify_graphs(self, *, reserve_budget_bytes=2 << 30, min_free_bytes=1 << 30):
+        if self.verify_graph_cache is not None:
+            raise RuntimeError("VERIFY graphs already configured")
+        from nanovllm.engine.verify_graph import VerifyGraphCache
+        self.verify_graph_cache = VerifyGraphCache(
+            self, reserve_budget_bytes=reserve_budget_bytes, min_free_bytes=min_free_bytes)
 
-        Single-token queries use ordinary model Graph (if configured); variable
-        VERIFY queries use eager paged prefill. This is not the frozen Graph
-        performance path. Sampling and KV commit belong to RandomDecode.
+    @torch.inference_mode()
+    def run_queries(self, queries, *, all_logits=False, device_input_ids=None, need_logits=True):
+        """Offline TP1. Exact uniform q2..5/B1..4 may use paged VERIFY graphs.
+
+        Mixed query lengths retain their original eager route; q1 retains the
+        original decode graph. KV-only calls compute identical hidden/KV, but
+        skip the unused LM head. No sampling, RNG, or commit occurs here.
         """
         if self.world_size != 1 or not queries:
             raise ValueError("nonempty TP1 queries required")
+        if all_logits and not need_logits:
+            raise ValueError("all_logits and KV-only are mutually exclusive")
         lengths = [q.num_scheduled_tokens for q in queries]
         if min(lengths) <= 0 or sum(lengths) > self.config.max_num_batched_tokens:
             raise ValueError("query token budget exceeded; chunking is not implemented")
@@ -313,12 +351,21 @@ class ModelRunner:
             if all(n == 1 for n in lengths) and all(q.num_cached_tokens for q in queries):
                 ids, positions = (self.prepare_decode(queries) if device_input_ids is None
                                   else self.prepare_decode(queries, device_input_ids))
+                if not need_logits:
+                    self.run_model(ids, positions, False, need_logits=False)
+                    return [None] * len(queries)
                 logits = self.run_model(ids, positions, False)
                 return list(logits.split(1))
             if device_input_ids is not None:
                 raise ValueError("device token continuation requires cached single-token queries")
+            if all_logits and self.verify_graph_cache is not None:
+                result = self.verify_graph_cache.run(queries)
+                if result is not None:
+                    return result
             ids, positions = self.prepare_prefill(queries)
             hidden = self.model(ids, positions)
+            if not need_logits:
+                return [None] * len(queries)
             logits = self.model.compute_logits(hidden, all_logits=all_logits)
             return list(logits.split(lengths if all_logits else 1))
         finally:

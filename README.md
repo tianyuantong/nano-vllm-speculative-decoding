@@ -12,5 +12,9 @@ Install: `pip install -e .` in a compatible CUDA environment.
 Usage and GPU checks: [decoding guide](docs/DECODING.md).
 CPU checks: `python tools/run_cpu_tests.py` (control flow and mathematical reference checks).
 
+With three sampling fast paths and draft length 3, generation took 4.49% less time than ordinary decoding
+on eight development requests. This is a selected configuration, not an independently confirmed result.
+See [configuration and evidence](docs/DECODING.md#sampling-fast-paths-and-draft-length).
+
 This is a research implementation; finite-precision equivalence to ordinary decoding remains unproven.
 See [upstream provenance](docs/UPSTREAM.md) and [MIT license](LICENSE).

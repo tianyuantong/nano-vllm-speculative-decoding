@@ -191,6 +191,7 @@ def main():
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--compact", action="store_true", help="exercise the R1 production draw scratch path")
+    parser.add_argument("--r2", action="store_true", help="exercise approved R2 GPU primitives")
     args = parser.parse_args()
     args.result.parent.mkdir(parents=True, exist_ok=True)
     # Refuse to replace any previous attempt, including a failed one.
@@ -204,7 +205,7 @@ def main():
         "case_definitions_sha256": hashlib.sha256(json.dumps(CASES, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "functions": ["from_logits", "from_probs", "draw", "accept", "residual", "require_valid_boundary"],
         "backend_required": "CUDA", "cpu_fallback": False,
-        "draw_compact": args.compact,
+        "draw_compact": args.compact, "r2_simplify": args.r2,
         "compile_mode": "eager torch tensor kernels, no torch.compile or CUDA Graph",
         "dtypes": {"p_q": "FP32", "row_mass_accept_uniform_residual": "FP64"},
         "qwen_loaded": False, "sampler_integration_covered": False,
@@ -229,6 +230,10 @@ def main():
             if args.compact:
                 from functools import partial
                 sampler.draw = partial(sampler.draw, compact=True)
+            if args.r2:
+                from functools import partial
+                for name in ("draw", "from_logits", "residual"):
+                    setattr(sampler, name, partial(getattr(sampler, name), simplify=True))
             total_categories = sum(len(expected_distribution(case)) for case in CASES)
             bound = math.sqrt(math.log(2 * total_categories / ALPHA) / (2 * DRAWS))
             result["family"] = {"cases": len(CASES), "categories": total_categories, "alpha": ALPHA, "bound": bound}
