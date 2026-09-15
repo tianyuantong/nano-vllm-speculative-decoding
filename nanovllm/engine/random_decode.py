@@ -24,6 +24,7 @@ class Request:
     target: KVState = field(default_factory=KVState, init=False)
     draft: KVState = field(default_factory=KVState, init=False)
     stop: str | None = field(default=None, init=False)
+    used: bool = field(default=False, init=False)
 
     def __post_init__(self):
         self.prompt = list(self.prompt)
@@ -129,10 +130,13 @@ class PrivateKVPool:
 class RandomDecode:
     def __init__(self, backend, *, target_blocks, draft_blocks, block_size,
                  max_model_len, max_num_seqs, vocab_size, eos, k=4, gpu_draft_tokens=False,
-                 ngram=False, performance_mode=False):
+                 ngram=False, performance_mode=False, sampling_mode="random"):
         if type(k) is not int or not 0 <= k <= 4:
             raise ValueError("this controller supports B(k=0) or S0(k=1..4)")
         self.backend = backend
+        if sampling_mode not in ("random", "greedy") or (ngram and sampling_mode != "random"):
+            raise ValueError("known sampling mode required; N is random only")
+        self.sampling_mode = sampling_mode
         self.performance_mode = performance_mode
         self.target_pool = PrivateKVPool(target_blocks, block_size)
         if ngram and (not k or draft_blocks or gpu_draft_tokens):
@@ -216,7 +220,7 @@ class RandomDecode:
         if self.draft_pool is not None:
             self.draft_pool.truncate(request.draft, 0)
 
-    def generate(self, requests):
+    def validate_requests(self, requests):
         if self.poisoned or self.busy:
             raise RuntimeError("engine is aborted or already generating")
         if not requests or len(requests) > self.max_num_seqs:
@@ -225,12 +229,18 @@ class RandomDecode:
             raise ValueError("request IDs must be unique within a batch")
         for r in requests:
             if (not r.prompt or type(r.max_tokens) is not int or r.max_tokens <= 0
-                    or not math.isfinite(r.temperature) or r.temperature <= 0
+                    or not math.isfinite(r.temperature)
+                    or (r.temperature <= 0 if self.sampling_mode == "random" else r.temperature != 0)
                     or len(r.prompt) >= self.max_model_len):
                 raise ValueError("invalid prompt, output budget or temperature")
+            if any(type(t) is not int or not 0 <= t < self.vocab_size for t in r.prompt):
+                raise ValueError("out-of-vocabulary prompt before allocation")
             if (r.tokens != r.prompt or r.stop or r.target.block_table or r.draft.block_table
                     or r.target.num_cached_tokens or r.draft.num_cached_tokens):
                 raise ValueError("fresh requests and fresh RNG streams required")
+
+    def generate(self, requests):
+        self.validate_requests(requests)
         self.busy = True
         try:
             logits = self._forward("target", [(r, r.prompt) for r in requests])
@@ -289,7 +299,7 @@ class RandomDecode:
                 raise RuntimeError("draft round-entry KV invariant violated")
         self._forward("draft", catchup, need_logits=not self.performance_mode)  # same KV, no RNG
         proposals = {r.request_id: [] for r in active}
-        probabilities = {r.request_id: [] for r in active}
+        probabilities = {r.request_id: [] for r in active} if self.sampling_mode == "random" else None
         for step in range(max(budgets.values(), default=0)):
             rows = [r for r in active if step < budgets[r.request_id]]
             if self.gpu_draft_tokens:
@@ -304,9 +314,11 @@ class RandomDecode:
             else:
                 logits = self._forward("draft", [(r, self._history(r, proposals[r.request_id])) for r in rows])
                 tokens, saved_q = self.backend.propose(rows, logits)
-            for r, token, q in zip(rows, tokens, saved_q, strict=True):
+            for r, token in zip(rows, tokens, strict=True):
                 proposals[r.request_id].append(token)
-                probabilities[r.request_id].append(q)
+            if probabilities is not None:
+                for r, q in zip(rows, saved_q, strict=True):
+                    probabilities[r.request_id].append(q)
         if self.gpu_draft_tokens:
             proposals = self.backend.materialize_proposals(proposals)
         self._verify_proposals(active, proposals, probabilities)
@@ -328,7 +340,7 @@ class RandomDecode:
                 if probabilities is not None:
                     del probabilities[r.request_id][length:]
         logits = self._forward("target", [(r, self._history(r, proposals[r.request_id])) for r in active], all_logits=True)
-        if probabilities is None:
+        if self.ngram and probabilities is None:
             probabilities = self.backend.point_mass_proposals(active, logits, proposals)
         pending = self.backend.verify(active, logits, proposals, probabilities)
         # Backend checks the entire batch before returning; no post-reject suffix.

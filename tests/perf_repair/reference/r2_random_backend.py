@@ -192,22 +192,6 @@ class CUDARandomBackend:
             qrows = saved_q[r.request_id]
             q = sampler.Probabilities(torch.cat([q.values for q in qrows]),
                                       torch.cat([q.mass for q in qrows]), torch.cat([q.invalid for q in qrows]))
-            verifier = getattr(self, "post_pq_verifier", None)
-            if k == 3 and verifier is not None:
-                # Preserve all three role draws, including the inactive tail.
-                token_ids = torch.tensor(ds, dtype=torch.int64, device=values.device)
-                u = torch.rand(k, dtype=torch.float64, device=values.device, generator=r.rng.streams["accept"])
-                correction_noise = torch.empty_like(p.values[-1:], dtype=torch.float64).exponential_(
-                    1.0, generator=r.rng.streams["correction"])
-                bonus_noise = torch.empty_like(p.values[-1:]).exponential_(1.0, generator=r.rng.streams["bonus"])
-                prior = self.invalid.get(r.request_id)
-                if prior is None:
-                    prior = torch.zeros(1, dtype=torch.bool, device=values.device)
-                count, tail, invalid = verifier(p.values, p.mass, p.invalid, q.values, q.mass, q.invalid,
-                                               token_ids, u, correction_noise, bonus_noise, prior)
-                self.invalid[r.request_id] = invalid
-                pending.append((ds, torch.cat([count, tail])))
-                continue
             p_proposal = sampler.Probabilities(p.values[:k], p.mass[:k], p.invalid[:k])
             token_ids = torch.tensor(ds, dtype=torch.int64, device=values.device)
             u = torch.rand(k, dtype=torch.float64, device=values.device, generator=r.rng.streams["accept"])
