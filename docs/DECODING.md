@@ -106,3 +106,38 @@ The plan stops here: subsequent LM-head graphs, probability graphs and dynamic d
 remain unimplemented proposals. No additional optimization benefit is claimed.
 [Full results, frozen protocol and audit tools](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/expanded-k3-results)
 are published as an experiment attachment, outside the code branch.
+
+## Greedy and verification graphs
+
+This version adds an offline greedy backend and an opt-in random k=3 post-p/q
+verification graph. Request RNG stays outside the graph; returned count/token/error tensors
+own their storage. Defaults remain random sampling with this graph disabled.
+
+```python
+# Greedy: prepare_requests(..., temperature=0.0)
+llm = RandomLLM(target, draft, k=4, gpu_draft_tokens=True, sampling_mode="greedy")
+# Random: prepare_requests(..., temperature=1.0)
+llm = RandomLLM(target, draft, k=3, gpu_draft_tokens=True,
+                r2_options=("draw", "softmax", "residual"), verify_sampling="graph")
+```
+
+These are alternative constructors; use and close one engine before creating another.
+For random Graph timing, finish natural warmup and call `freeze_performance_caches()`
+before creating fresh timed requests. Greedy requests carry no sampling RNG.
+
+The predeclared target was at least 15% more actual output tokens/s than contemporaneous
+ordinary `RandomLLM(k=0)` in the same mode. This is not an upstream/production serving comparison.
+A1 gains were 12.6634% greedy and 5.4033% random; the fixed A2 stress group changed
+by -0.0639% and -8.6053%. Neither line met the target; G3/R4 confirmation was not triggered.
+Random old/new S1 outputs, stops and RNG matched in the measured cases. Only 6/28 greedy
+ordinary/speculative outputs matched exactly, so greedy is not claimed token-identical.
+Quality is unmeasured and the strict finite-precision relationship to ordinary B remains open.
+
+CPU checks: `python tools/run_cpu_tests.py` and `python -m pytest -q tests/perf_repair`.
+On an allocated CUDA GPU with the project dependencies installed:
+`PYTHONPATH=. python tools/greedy_gpu_gate.py --output /path/to/new-greedy.json` or
+`PYTHONPATH=. python tools/verify_sampling_gpu_gate.py --output /path/to/new-random.json`.
+These gates are not throughput benchmarks or complete real-model KV validation.
+
+[Full plans](plans/README.md) and [recorded evidence](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/greedy-verify-sampling-results)
+separate the earlier proposal, executed stages, extra warmups and untriggered work.
