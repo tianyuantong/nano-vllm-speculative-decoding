@@ -23,8 +23,5 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "transformers>=4.51" xxhash numpy pytest
 
-      - name: Control-flow and reference checks
-        run: python tools/run_cpu_tests.py
-
-      - name: Sampler and regression checks
-        run: python -m pytest -q tests/perf_repair
+      - name: CPU tests
+        run: python -m pytest -q tests

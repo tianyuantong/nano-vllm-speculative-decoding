@@ -2,7 +2,7 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.sequence import KVState, Sequence
 
 
 class Block:
@@ -24,14 +24,19 @@ class Block:
 
 
 class BlockManager:
+    """Block allocation for one model's KV cache; `role` selects which KVState of a sequence it owns."""
 
-    def __init__(self, num_blocks: int, block_size: int, enable_prefix_cache: bool):
+    def __init__(self, num_blocks: int, block_size: int, enable_prefix_cache: bool, role: str = "target"):
         self.block_size = block_size
         self.enable_prefix_cache = enable_prefix_cache
+        self.role = role
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
+
+    def _kv(self, seq: Sequence) -> KVState:
+        return seq.kv(self.role)
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -77,7 +82,8 @@ class BlockManager:
         return num_cached_blocks
 
     def allocate(self, seq: Sequence, num_cached_blocks: int):
-        assert not seq.block_table
+        kv = self._kv(seq)
+        assert not kv.block_table
         h = -1
         for i in range(num_cached_blocks):
             token_ids = seq.block(i)
@@ -90,37 +96,43 @@ class BlockManager:
                 block.ref_count = 1
                 self.free_block_ids.remove(block_id)
                 self.used_block_ids.add(block_id)
-            seq.block_table.append(block_id)
+            kv.block_table.append(block_id)
         for i in range(num_cached_blocks, seq.num_blocks):
-            seq.block_table.append(self._allocate_block())
-        seq.num_cached_tokens = num_cached_blocks * self.block_size
+            kv.block_table.append(self._allocate_block())
+        kv.num_cached_tokens = num_cached_blocks * self.block_size
 
     def deallocate(self, seq: Sequence):
-        for block_id in reversed(seq.block_table):
+        kv = self._kv(seq)
+        for block_id in reversed(kv.block_table):
             block = self.blocks[block_id]
             block.ref_count -= 1
             if block.ref_count == 0:
                 self._deallocate_block(block_id)
-        seq.num_cached_tokens = 0
-        seq.block_table.clear()
+        kv.num_cached_tokens = 0
+        kv.block_table.clear()
 
-    def can_append(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+    def _blocks_needed(self, seq: Sequence, num_tokens: int) -> int:
+        return (num_tokens + self.block_size - 1) // self.block_size - len(self._kv(seq).block_table)
 
-    def may_append(self, seq: Sequence):
-        if len(seq) % self.block_size == 1:
-            seq.block_table.append(self._allocate_block())
+    def can_reserve(self, seq: Sequence, num_tokens: int) -> bool:
+        return len(self.free_block_ids) >= self._blocks_needed(seq, num_tokens)
+
+    def reserve(self, seq: Sequence, num_tokens: int):
+        """Grow the block table until it covers `num_tokens` positions."""
+        kv = self._kv(seq)
+        for _ in range(self._blocks_needed(seq, num_tokens)):
+            kv.block_table.append(self._allocate_block())
 
     def hash_blocks(self, seq: Sequence):
         if not self.enable_prefix_cache:
             return
-
-        start = seq.num_cached_tokens // self.block_size
-        end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
+        kv = self._kv(seq)
+        start = kv.num_cached_tokens // self.block_size
+        end = (kv.num_cached_tokens + kv.num_scheduled_tokens) // self.block_size
         if start == end: return
-        h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
+        h = self.blocks[kv.block_table[start - 1]].hash if start > 0 else -1
         for i in range(start, end):
-            block = self.blocks[seq.block_table[i]]
+            block = self.blocks[kv.block_table[i]]
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h)
             block.update(h, token_ids)
