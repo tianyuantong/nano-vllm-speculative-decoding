@@ -42,7 +42,8 @@ decode batches:
 ```
 decode batch of B sequences, each with k drafts
   1. draft catch-up   sequences whose draft KV lags len-1 get that one token
-                      computed (only sequences fully accepted last round)
+                      computed with one draft decode-graph step (only sequences
+                      fully accepted last round)
   2. k draft steps    upstream decode CUDA graph on the draft runner;
                       logits [B,V] -> sample -> d[:, j], q[:, j] stay on GPU
   3. verification     one target forward, per sequence [last_token, d1..dk],
@@ -198,12 +199,14 @@ Device-to-host traffic: the single `[B, k+2]` tensor.
 Draft steps use the upstream decode graph of the draft runner: step `j`
 feeds `d[:, j-1]` (or the last committed token for `j = 0`) at position
 `len - 1 + j`, context length `len + j`, slot of that position in the draft
-block table. Catch-up and draft prefill go through the draft runner's
-prefill path with `need_logits=False`. For catch-up, `run_round` sets
-`draft_kv.num_scheduled_tokens = len(seq) - 1 - draft_kv.num_cached_tokens`
-on the lagging sequences, runs the forward, then sets their
-`draft_kv.num_cached_tokens = len(seq) - 1` and `num_scheduled_tokens = 0`
-before the draft steps.
+block table. Draft prefill goes through the draft runner's prefill path with
+`need_logits=False`. Catch-up is, by the round-entry invariant, always exactly
+one token (position `len-2`, input `seq[len-2]`), so it runs as one decode-graph
+step of the draft for the lagging sequences (`decode_metadata(...,
+position_offset=-1)`), after which `draft_kv.num_cached_tokens = len(seq) - 1`.
+An earlier version ran it through the eager prefill path; at `B >= 2` almost
+every round has a lagging sequence and the eager forward cost ≈ 10 ms per
+round, which is why the decode graph is used.
 
 ### 4.8 New `nanovllm/layers/spec_sampler.py`
 
@@ -369,6 +372,6 @@ requires it.
   exercised by the previous implementation on the RTX 5090; low risk.
 - Padding rows attending to a zero block: finite by construction; asserted
   once in G1 by comparing padded and unpadded verification of the same batch.
-- Mixed-length draft catch-up runs eagerly; it is one token per fully
-  accepted sequence per round on a 0.6B model, expected below 1 ms.
+- Catch-up runs through the draft's decode graph (≈ 1.8–2.3 ms per round when
+  needed); the eager variant was measured at ≈ 10 ms and rejected.
 - Memory for `q` and `p` at `B = 16, k = 4, V = 151936`: ≈ 90 MB fp32; fine.
