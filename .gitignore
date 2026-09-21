@@ -202,3 +202,9 @@ models/
 *.ncu-rep
 *.qdrep
 *.sqlite
+# --- benchmark inputs and results (downloaded / generated) ---
+benchmarks/inputs/
+benchmarks/results/
+
+# macOS
+.DS_Store

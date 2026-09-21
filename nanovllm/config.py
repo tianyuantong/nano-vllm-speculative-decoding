@@ -18,6 +18,11 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     kv_cache_memory_bytes: int | None = None
+    draft_model: str | None = None            # enables speculative decoding
+    num_speculative_tokens: int = 0           # k: drafts proposed per round; >= 1 iff draft_model is set
+    draft_kv_cache_memory_bytes: int | None = None
+    seed: int | None = None                   # seed of the engine's sampling generator
+    record_step_timings: bool = False         # record a pair of CUDA events per engine step
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
@@ -26,5 +31,23 @@ class Config:
         if self.kv_cache_memory_bytes is not None:
             if type(self.kv_cache_memory_bytes) is not int or self.kv_cache_memory_bytes <= 0:
                 raise ValueError("kv_cache_memory_bytes must be a positive integer")
+        if self.draft_model is not None:
+            self._validate_speculative()
+        elif self.num_speculative_tokens != 0:
+            raise ValueError("num_speculative_tokens requires draft_model")
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
+
+    def _validate_speculative(self) -> None:
+        if not os.path.isdir(self.draft_model):
+            raise ValueError(f"draft_model is not a directory: {self.draft_model}")
+        if self.num_speculative_tokens < 1:
+            raise ValueError("num_speculative_tokens must be >= 1 with a draft model")
+        if self.tensor_parallel_size != 1:
+            raise ValueError("speculative decoding supports tensor_parallel_size=1 only")
+        if self.enable_prefix_cache:
+            raise ValueError("speculative decoding requires enable_prefix_cache=False")
+        if self.kv_cache_memory_bytes is None or self.draft_kv_cache_memory_bytes is None:
+            raise ValueError("speculative decoding requires explicit kv_cache_memory_bytes and draft_kv_cache_memory_bytes")
+        if type(self.draft_kv_cache_memory_bytes) is not int or self.draft_kv_cache_memory_bytes <= 0:
+            raise ValueError("draft_kv_cache_memory_bytes must be a positive integer")

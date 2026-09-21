@@ -1,15 +1,26 @@
 from copy import copy
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
-from nanovllm.engine.kv_state import KVState
 
 
 class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
+
+
+@dataclass
+class KVState:
+    """KV-cache bookkeeping of one sequence in one model; the target and the draft each own one."""
+    num_cached_tokens: int = 0
+    num_scheduled_tokens: int = 0
+    block_table: list[int] = field(default_factory=list)
+
+
+KV_ROLES = ("target", "draft")
 
 
 class Sequence:
@@ -24,32 +35,47 @@ class Sequence:
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.target_kv = KVState()
-        self.draft_kv: KVState | None = None
-        self.num_scheduled_tokens = 0
+        self.draft_kv = KVState()
         self.is_prefill = True
         self.temperature = sampling_params.temperature
+        self.top_k = sampling_params.top_k
+        self.top_p = sampling_params.top_p
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.first_token_step = -1
+        self.finish_step = -1
 
-    def __len__(self):
-        return self.num_tokens
+    def kv(self, role: str) -> KVState:
+        assert role in KV_ROLES, role
+        return self.target_kv if role == "target" else self.draft_kv
 
-    # Keep the ordinary scheduler API; it continues to operate on target KV.
+    # The upstream engine addresses the target KV state through these names.
     @property
-    def num_cached_tokens(self):
+    def num_cached_tokens(self) -> int:
         return self.target_kv.num_cached_tokens
 
     @num_cached_tokens.setter
-    def num_cached_tokens(self, value):
+    def num_cached_tokens(self, value: int) -> None:
         self.target_kv.num_cached_tokens = value
 
     @property
-    def block_table(self):
+    def num_scheduled_tokens(self) -> int:
+        return self.target_kv.num_scheduled_tokens
+
+    @num_scheduled_tokens.setter
+    def num_scheduled_tokens(self, value: int) -> None:
+        self.target_kv.num_scheduled_tokens = value
+
+    @property
+    def block_table(self) -> list[int]:
         return self.target_kv.block_table
 
     @block_table.setter
-    def block_table(self, value):
+    def block_table(self, value: list[int]) -> None:
         self.target_kv.block_table = value
+
+    def __len__(self):
+        return self.num_tokens
 
     def __getitem__(self, key):
         return self.token_ids[key]
@@ -88,14 +114,12 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
-        if self.draft_kv is not None:
-            raise ValueError("Dual KV requests are TP=1 only; no IPC serialization yet")
         last_state = self.last_token if not self.is_prefill else self.token_ids
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
 
     def __setstate__(self, state):
         self.target_kv = KVState()
-        self.draft_kv = None
+        self.draft_kv = KVState()
         self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
