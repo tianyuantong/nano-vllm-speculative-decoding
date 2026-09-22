@@ -1,0 +1,35 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 410' width='760' height='410'>
+<rect width='760' height='410' fill='#1a1a19' rx='8'/>
+<text x='64.0' y='28.0' font-size='18' fill='#ffffff' text-anchor='start' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >More tokens per second, from batch 1 to batch 16</text>
+<text x='64.0' y='49.0' font-size='12' fill='#c3c2b7' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell</text>
+<text x='64.0' y='67.0' font-size='12' fill='#c3c2b7' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >Qwen3 recommended sampling · k=3 · 48 prompts × up to 512 output tokens</text>
+<rect x='64' y='83' width='10' height='10' rx='2' fill='#3987e5'/>
+<text x='80.0' y='92.0' font-size='12' fill='#ffffff' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >Speculative decoding</text>
+<line x1='254' y1='88' x2='276' y2='88' stroke='#ffffff' stroke-width='1.5' stroke-dasharray='6 4'/>
+<text x='284.0' y='92.0' font-size='12' fill='#ffffff' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >Ordinary decoding = 1.0×</text>
+<line x1='64' y1='354.0' x2='736' y2='354.0' stroke='#2c2c2a' stroke-width='1'/>
+<text x='54.0' y='358.0' font-size='12' fill='#c3c2b7' text-anchor='end' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >0.0×</text>
+<line x1='64' y1='282.2' x2='736' y2='282.2' stroke='#2c2c2a' stroke-width='1'/>
+<text x='54.0' y='286.2' font-size='12' fill='#c3c2b7' text-anchor='end' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >0.5×</text>
+<line x1='64' y1='210.5' x2='736' y2='210.5' stroke='#2c2c2a' stroke-width='1'/>
+<text x='54.0' y='214.5' font-size='12' fill='#c3c2b7' text-anchor='end' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.0×</text>
+<line x1='64' y1='138.7' x2='736' y2='138.7' stroke='#2c2c2a' stroke-width='1'/>
+<text x='54.0' y='142.7' font-size='12' fill='#c3c2b7' text-anchor='end' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.5×</text>
+<rect x='98.9' y='138.9' width='64.5' height='215.1' fill='#3987e5' rx='4'/>
+<text x='131.2' y='128.9' font-size='18' fill='#ffffff' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.50×</text>
+<text x='131.2' y='377.0' font-size='13' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >B = 1</text>
+<rect x='233.3' y='157.4' width='64.5' height='196.6' fill='#3987e5' rx='4'/>
+<text x='265.6' y='147.4' font-size='18' fill='#ffffff' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.37×</text>
+<text x='265.6' y='377.0' font-size='13' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >B = 2</text>
+<rect x='367.7' y='175.9' width='64.5' height='178.1' fill='#3987e5' rx='4'/>
+<text x='400.0' y='165.9' font-size='18' fill='#ffffff' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.24×</text>
+<text x='400.0' y='377.0' font-size='13' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >B = 4</text>
+<rect x='502.1' y='186.4' width='64.5' height='167.6' fill='#3987e5' rx='4'/>
+<text x='534.4' y='176.4' font-size='18' fill='#ffffff' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.17×</text>
+<text x='534.4' y='377.0' font-size='13' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >B = 8</text>
+<rect x='636.5' y='204.3' width='64.5' height='149.7' fill='#3987e5' rx='4'/>
+<text x='668.8' y='194.3' font-size='18' fill='#ffffff' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >1.04×</text>
+<text x='668.8' y='377.0' font-size='13' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >B = 16</text>
+<text x='400.0' y='398.0' font-size='12' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif' >Concurrent requests (max_num_seqs)</text>
+<line x1='64' y1='210.5' x2='736' y2='210.5' stroke='#ffffff' stroke-width='1.5' stroke-dasharray='6 4'/>
+</svg>

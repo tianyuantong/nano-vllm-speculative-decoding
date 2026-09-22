@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass
 from transformers import AutoConfig
 
+MAX_SPECULATIVE_BATCH_SIZE = 512   # the largest decode/verification CUDA-graph batch size
+
 
 @dataclass(slots=True)
 class Config:
@@ -45,6 +47,8 @@ class Config:
             raise ValueError("num_speculative_tokens must be >= 1 with a draft model")
         if self.tensor_parallel_size != 1:
             raise ValueError("speculative decoding supports tensor_parallel_size=1 only")
+        if self.max_num_seqs > MAX_SPECULATIVE_BATCH_SIZE:
+            raise ValueError(f"speculative decoding captures verification graphs for at most {MAX_SPECULATIVE_BATCH_SIZE} sequences")
         if self.enable_prefix_cache:
             raise ValueError("speculative decoding requires enable_prefix_cache=False")
         if self.kv_cache_memory_bytes is None or self.draft_kv_cache_memory_bytes is None:

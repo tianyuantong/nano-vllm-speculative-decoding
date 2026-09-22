@@ -1,143 +1,65 @@
-# Offline decoding
-
-Use local model directories with identical target/draft tokenizers and vocabularies.
-The measured setup used Qwen3-8B and Qwen3-0.6B, BF16, PyTorch 2.9.1+cu130 and FlashAttention 2.8.3.
+# Using speculative decoding
 
 ```python
-from nanovllm.config import Config
-from nanovllm.engine.random_llm import RandomLLM
+from nanovllm import LLM, SamplingParams
 
-common = dict(max_num_seqs=4, max_model_len=3328,
-              max_num_batched_tokens=5328, enable_prefix_cache=False)
-target = Config("/path/to/Qwen3-8B", kv_cache_memory_bytes=4 << 30, **common)
-draft = Config("/path/to/Qwen3-0.6B", kv_cache_memory_bytes=1536 << 20, **common)
-llm = RandomLLM(target, draft, k=4)
+llm = LLM(
+    "/path/to/Qwen3-8B",
+    draft_model="/path/to/Qwen3-0.6B",
+    num_speculative_tokens=3,
+    enable_prefix_cache=False,           # required with a draft model
+    kv_cache_memory_bytes=10 << 30,      # explicit budgets: two models share the GPU
+    draft_kv_cache_memory_bytes=6 << 30,
+    max_num_seqs=8,
+    seed=0,                              # optional: reproducible sampling
+)
+params = SamplingParams(temperature=0.7, top_k=20, top_p=0.8, max_tokens=256)
 try:
-    requests = llm.prepare_requests(["Explain KV caching."], request_ids=["example"],
-                                    seed=7, max_tokens=64, temperature=1.0)
-    print(llm.generate(requests))
+    outputs = llm.generate(["Explain KV caching."], params)
+    print(outputs[0]["text"])
 finally:
-    llm.close()
+    llm.exit()
 ```
 
-Omit `draft` for ordinary decoding. Use `RandomLLM(target, ngram=True, k=4)` for n-gram proposals.
-Set `gpu_draft_tokens=True` with a draft model for device token continuation.
-KV budgets exclude weights, activations and graph memory; they are not a total-memory guarantee.
+For ordinary decoding leave out both `draft_model` and `num_speculative_tokens` (a `k > 0` without a draft is rejected); everything else is unchanged. Greedy
+decoding is `temperature=0`. `top_p` requires `top_k` (the nucleus is computed over the
+top-k candidates).
 
-Run `python tools/run_cpu_tests.py` for independent CPU checks. Each file runs in its own
-process because several tests replace Torch/model imports with test doubles.
-These checks do not establish GPU numerics, physical KV contents or performance.
-GPU scripts in `tests/` are separate, explicit acceptance tools; inspect their `--help`.
+## What a round does
 
-## R1 results and checks
+For every sequence in a decode batch: the draft recomputes at most one missing KV entry
+(one decode-graph step), proposes `k` tokens (one decode-graph step each), the target
+scores `[last token, d1..dk]` in one forward through the paged varlen-attention path (a
+CUDA graph per padded batch size), rejection sampling accepts a prefix and draws one more
+token, and a single `[B, k+2]` copy brings the result to the host. Round-entry invariants:
+target KV covers `len-1` positions, draft KV covers `len-2` or `len-1`. The design is in
+`docs/design/batched-speculative-decoding.md`.
 
-R1 caches supported multi-position verification graphs, skips unused draft logits and
-reduces host checks and probability temporaries. Disable with
-`performance_mode=False, verify_graphs=False`; this is not a substitute for the frozen old implementation.
+## Reproducibility
 
-Run `python -m pytest -q tests/perf_repair` with Torch and pytest installed.
-Controller tests compare token IDs, RNG states and forward events using a CPU test runner;
-probability tests compare the frozen sampler on available devices. Other checks cover
-metadata, routing and memory admission. This is not a universal bit-exactness proof.
+One `torch.Generator` per engine, seeded from `seed`. A run is reproducible given the
+seed and the same batch composition; which requests share a batch changes the draws.
+The measured greedy outputs differ across batch sizes and between speculative and
+ordinary decoding. Most first divergences occur at small top-2 logit margins; the
+per-divergence results and identical-KV probe are in `docs/RESULTS.md`, gate G3 and its control.
 
-For real-model acceptance on an allocated CUDA GPU:
+## Limits (v1)
 
-```bash
-PERF_REPAIR_REQUIRE_CUDA=1 python -m pytest -q tests/perf_repair
-python tools/perf_repair_gpu_gate.py --target /path/to/Qwen3-8B --draft /path/to/Qwen3-0.6B --output /path/to/new-result.json
-```
+TP = 1; prefix cache off with a draft; no n-gram proposals; a batch is all-greedy or
+all-random; `prompt + max_tokens + k <= max_model_len`.
 
-The recorded run used one RTX 5090, eight requests in two batches of four, seed 17011,
-maximum 512 new tokens, natural EOS and two timed repetitions after warmup.
-Generation time includes the complete `generate` call, excluding model loading and warmup.
-R1 S0/S1 took 11.8848/11.6837 s versus 21.2985/20.8712 s before optimization;
-ordinary decoding took 11.1995 s. Same-mode before/after outputs, stops and RNG states matched
-in this recorded run. Only one seed was measured; task quality was not evaluated.
+## Timing
 
-[Archived inputs, timings, validation and reproduction instructions](https://github.com/tianyuantong/serve-nano-vllm/tree/8796a52/docs/experiments/r1-20260914)
-remain at the original fixed commit. Their source hashes describe that historical run,
-not a new GPU validation of these reorganized branches. No new GPU run is implied.
+`record_step_timings=True` records a pair of CUDA events per engine step and one event
+per phase of every speculative round; `llm.step_timings()` and `llm.phase_timings()`
+return them after `generate()`. `bench_spec.py`, `tools/summarize_bench.py` and
+`tools/report_matrix.py` build throughput, TTFT, TPOT, per-round costs and the
+break-even check from them.
 
-## Sampling fast paths and draft length
+## Gates
 
-The opt-in fast paths reduce noise-validation masks, repeated softmax validation and
-residual-probability temporaries. Probability arithmetic and RNG consumption retain their
-existing contracts; invalid rows remain blocked from commit. Defaults are unchanged.
-
-```python
-llm = RandomLLM(target, draft, k=3, gpu_draft_tokens=True,
-                r2_options=("draw", "softmax", "residual"))
-```
-
-Use the same `r2_options` on ordinary decoding for a fair comparison.
-`pack` and `views` remain opt-in ablation controls in the measured implementation;
-they are disabled in this candidate because the tested workload showed no useful benefit.
-
-On eight development requests (two batches of four, seed 17011), this candidate took
-10.729660 s versus 11.234017 s for ordinary decoding: 4.49% less generation time.
-It generated 2,078 versus 1,977 tokens: 193.669 versus 175.983 token/s, 10.05% higher.
-Draft length 3 was selected from 2/3/4 on these same inputs. The expanded retest below did not sustain this advantage.
-Quality was not evaluated and finite-precision equivalence to ordinary decoding remains open.
-
-CPU: `python tools/run_cpu_tests.py` and `python -m pytest -q tests/perf_repair`.
-The updated GPU tools accept `--r2`; the model gate uses all five ablation options,
-so it is not an exact replay of the three-option candidate above.
-[Recorded results and replay materials](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/r3-development-results)
-are distributed separately from the code.
-
-## Expanded fixed-k3 results
-
-The frozen three-option, device-token k=3 candidate was retested against ordinary decoding
-on two previously seen 24-request panels, excluding the original eight requests.
-Each panel used three new seeds (110017, 130031, 170041), six batches of four and two
-repetitions per mode: 72 workers and 144 timed calls. Engine, models and settings were unchanged.
-
-| Panel | Ordinary / speculative time (s) | Ordinary / speculative tokens/s |
-| --- | ---: | ---: |
-| A1 | 112.715 / 115.702 | 210.682 / 203.315 |
-| A2 | 83.531 / 85.816 | 262.538 / 250.139 |
-
-Speculative generation took 2.65% / 2.74% longer, with 3.50% / 4.72% lower throughput.
-Neither panel passed the predeclared criterion; these are previously seen inputs, not a blind test.
-The eight-request result remains local evidence, not a general performance claim.
-The cause of the workload-dependent difference has not been isolated; quality is unmeasured.
-
-The plan stops here: subsequent LM-head graphs, probability graphs and dynamic draft length
-remain unimplemented proposals. No additional optimization benefit is claimed.
-[Full results, frozen protocol and audit tools](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/expanded-k3-results)
-are published as an experiment attachment, outside the code branch.
-
-## Greedy and verification graphs
-
-This version adds an offline greedy backend and an opt-in random k=3 post-p/q
-verification graph. Request RNG stays outside the graph; returned count/token/error tensors
-own their storage. Defaults remain random sampling with this graph disabled.
-
-```python
-# Greedy: prepare_requests(..., temperature=0.0)
-llm = RandomLLM(target, draft, k=4, gpu_draft_tokens=True, sampling_mode="greedy")
-# Random: prepare_requests(..., temperature=1.0)
-llm = RandomLLM(target, draft, k=3, gpu_draft_tokens=True,
-                r2_options=("draw", "softmax", "residual"), verify_sampling="graph")
-```
-
-These are alternative constructors; use and close one engine before creating another.
-For random Graph timing, finish natural warmup and call `freeze_performance_caches()`
-before creating fresh timed requests. Greedy requests carry no sampling RNG.
-
-The predeclared target was at least 15% more actual output tokens/s than contemporaneous
-ordinary `RandomLLM(k=0)` in the same mode. This is not an upstream/production serving comparison.
-A1 gains were 12.6634% greedy and 5.4033% random; the fixed A2 stress group changed
-by -0.0639% and -8.6053%. Neither line met the target; G3/R4 confirmation was not triggered.
-Random old/new S1 outputs, stops and RNG matched in the measured cases. Only 6/28 greedy
-ordinary/speculative outputs matched exactly, so greedy is not claimed token-identical.
-Quality is unmeasured and the strict finite-precision relationship to ordinary B remains open.
-
-CPU checks: `python tools/run_cpu_tests.py` and `python -m pytest -q tests/perf_repair`.
-On an allocated CUDA GPU with the project dependencies installed:
-`PYTHONPATH=. python tools/greedy_gpu_gate.py --output /path/to/new-greedy.json` or
-`PYTHONPATH=. python tools/verify_sampling_gpu_gate.py --output /path/to/new-random.json`.
-These gates are not throughput benchmarks or complete real-model KV validation.
-
-[Full plans](plans/README.md) and [recorded evidence](https://github.com/tianyuantong/serve-nano-vllm/releases/tag/greedy-verify-sampling-results)
-separate the earlier proposal, executed stages, extra warmups and untriggered work.
+`tools/gate_smoke.py`, `tools/gate_verify_logits.py` (G1: verification logits vs decode
+logits), `tools/gate_sampler_distribution.py` (G2: sampler distribution),
+`tools/gate_greedy_equivalence.py` (G3: greedy match rate with per-divergence logit
+margins) and `tools/gate_divergence_probe.py` (decode vs verify logits on identical KV
+at G3 divergence points) run on a CUDA machine with both models.
