@@ -1,30 +1,14 @@
 import torch
 from torch import nn
+
+from nanovllm.layers.spec_sampler import SamplingTensors, probs_from_logits, sample
+
+
 class Sampler(nn.Module):
+    """Ordinary (k = 0) sampling; shares truncation and the exponential race with speculation."""
 
-    def forward(
-        self,
-        logits: torch.Tensor,
-        temperatures: torch.Tensor | None,
-    ):
-        if temperatures is None:
+    def forward(self, logits: torch.Tensor, sampling: SamplingTensors,
+                generator: torch.Generator | None = None) -> torch.Tensor:
+        if sampling.temperatures is None:
             return logits.argmax(dim=-1)
-
-        return self.random_sample(logits, temperatures)
-
-    @torch.compile
-    def random_sample(
-        self,
-        logits: torch.Tensor,
-        temperatures: torch.Tensor,
-    ):
-        logits = logits.float().div_(
-            temperatures.unsqueeze(dim=1)
-        )
-        probs = torch.softmax(logits, dim=-1)
-        sample_tokens = probs.div_(
-            torch.empty_like(probs)
-            .exponential_(1)
-            .clamp_min_(1e-10)
-        ).argmax(dim=-1)
-        return sample_tokens
+        return sample(probs_from_logits(logits, sampling), generator)
