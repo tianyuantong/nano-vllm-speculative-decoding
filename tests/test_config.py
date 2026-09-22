@@ -39,3 +39,11 @@ def test_draft_requires_k_prefix_cache_off_and_budgets(model_dir):
 def test_speculative_tokens_without_draft_is_rejected(model_dir):
     with pytest.raises(ValueError):
         Config(model_dir, num_speculative_tokens=2)
+
+
+def test_draft_rejects_batch_sizes_beyond_the_graph_table(model_dir):
+    kwargs = dict(draft_model=model_dir, num_speculative_tokens=3, enable_prefix_cache=False,
+                  kv_cache_memory_bytes=1 << 20, draft_kv_cache_memory_bytes=1 << 20)
+    Config(model_dir, max_num_seqs=512, **kwargs)
+    with pytest.raises(ValueError):
+        Config(model_dir, max_num_seqs=513, **kwargs)

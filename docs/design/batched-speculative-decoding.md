@@ -1,6 +1,6 @@
 # Design: batched speculative decoding on the upstream engine
 
-Status: approved design, not yet implemented. Supersedes the `RandomLLM`
+Status: implemented and measured (see `docs/RESULTS.md`). Supersedes the `RandomLLM`
 offline controller (PRs #3–#7) and the plans under `docs/plans/`.
 
 ## 1. Goal and success criterion
