@@ -1,0 +1,78 @@
+{
+  "version": "2.0",
+  "frozen": false,
+  "gpu": {"node": "gpu-pro6000-7", "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+  "models": {
+    "target": "Qwen3-8B",
+    "dtype": "bfloat16",
+    "drafts": {
+      "model_0p6b": "Qwen3-0.6B",
+      "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
+      "dspark": "dspark_qwen3_8b_block7-03326e504381",
+      "eagle3": "eagle3_qwen3_8b_ttt7-f6485ba8d21e"
+    }
+  },
+  "sampling": {"temperature": 0.7, "top_k": 20, "top_p": 0.8, "max_tokens": 512, "ignore_eos": false},
+  "lines": {
+    "k0": {"drafter": null, "k": 0},
+    "model_k3": {"drafter": "model_0p6b", "k": 3},
+    "dflash_k7": {"drafter": "dflash", "k": 7}
+  },
+  "max_model_len": 4096,
+  "concurrency": [1, 2, 4, 8, 16, 32, 64],
+  "seeds": {
+    "dev": [17011, 110017, 130031, 170041, 210011],
+    "confirm": [17011, 110017, 130031],
+    "gate_g5": [17011, 110017],
+    "external": [17011, 110017]
+  },
+  "order": "all lines of one (C, seed) run back to back in one job; the i-th dev seed (0-based) starts with lines[i mod 3] and continues in listed order",
+  "panels": {
+    "D48": {"file": "benchmarks/inputs/panel-48.json", "sha256": null, "take": "full_cycles"},
+    "K128": {
+      "file": "benchmarks/inputs/panel-K128.json",
+      "sha256": null,
+      "take": "prefix",
+      "salt": "bench-v2-confirm:",
+      "quotas": {"code_completion": 40, "NIAH": 43, "open_books": 37, "creative_writing": 8},
+      "max_formatted_tokens": 2816
+    }
+  },
+  "kv_budget": "C * ceil((max_prompt_len + max_tokens + 7) / 256) target blocks for every line; the 0.6B draft pool gets the same block count; the DFlash cache mirrors the target's blocks",
+  "warmup": {"requests": "first C of the panel, cycled", "max_tokens": 64},
+  "metrics": {"primary": "Q_steady", "secondary": "Q_full"},
+  "timing_noise": {"concurrency": [1, 8, 32], "seed": 17011, "repeats": 2},
+  "decision": {
+    "faster": "all seeds R > 1 + 2*N_t",
+    "a_beats_b": "all paired gains same sign and abs(median) > 2*N_t",
+    "report": "median (min-max), two decimals; range only if max-min > 0.05",
+    "crossover": "smallest C with median R < 1"
+  },
+  "invalid_if": [
+    "gpu name mismatch",
+    "preemption > 0",
+    "non-finite value or assertion failure",
+    "decode step or round > 3 x median",
+    "lines of one (C, seed) split across jobs",
+    "timing-noise repeats differ in tokens"
+  ],
+  "gates": {
+    "G2_multi": {"trials": 100000, "delta": 0.001, "k": [2, 3, 7]},
+    "G2_real": {"scan_rounds": 64, "accept_mass": [0.2, 0.9], "accept_trials": 16384, "accept_tolerance": 0.02, "emit_trials": 100000, "delta": 0.001},
+    "G1_wide": {"prompts": 8, "block_crossing_lengths": [1022, 2046], "batch": [1, 4, 16], "max_abs_delta": 0.5, "margin": 0.5},
+    "G5": {"dataset": "openai/grade-school-math test.jsonl", "commit": null, "sha256": null, "rows": 1319, "concurrency": 32, "ci_low_min": -0.03, "max_unparseable": 0.02, "min_k0_accuracy": 0.80}
+  },
+  "external": {
+    "upstream": {"commit": "bb823b3", "mode": "offline", "temperature": 1.0, "batch": [1, 8, 32], "metric": "decode step p50 at full batch", "max_slowdown": 0.02},
+    "vllm": {
+      "python": "/projects/nanovllm/envs/vllm-ngram-5090/bin/python",
+      "version": "0.1.1.dev52+g372477d2d",
+      "lines": ["k0", "draft_model_k3", "eagle3_k7", "dflash_k7", "dspark_k7", "dspark_k7_adaptive"],
+      "concurrency": [1, 8, 32],
+      "metric": "wall-clock Q_full",
+      "fallback": "flat sampling for every line if any draft path rejects top_k/top_p"
+    },
+    "cost_curve": {"batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 1024, "warmup": 25, "iters": 100, "report": ["median", "p95"]}
+  },
+  "confirm": {"panel": "K128", "concurrency": [1, 8, 32, 64], "versions": ["k0", "model_k3", "dflash_k7"], "date": "end of M2"}
+}
