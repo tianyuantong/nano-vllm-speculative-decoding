@@ -19,7 +19,7 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
         orig_dtype = x.dtype
-        x = x.float()
+        x = x.to(torch.float32, copy=True)    # x.float() is x itself for fp32 input, and the in-place ops below would overwrite it
         var = x.pow(2).mean(dim=-1, keepdim=True)
         x.mul_(torch.rsqrt(var + self.eps))
         x = x.to(orig_dtype).mul_(self.weight)
@@ -32,8 +32,8 @@ class RMSNorm(nn.Module):
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
-        x = x.float().add_(residual.float())
-        residual = x.to(orig_dtype)
+        x = x.float() + residual.float()            # out of place, for the same reason as rms_forward
+        residual = x.to(orig_dtype, copy=True)      # in fp32, x.to(orig_dtype) would alias x, which is scaled in place next
         var = x.pow(2).mean(dim=-1, keepdim=True)
         x.mul_(torch.rsqrt(var + self.eps))
         x = x.to(orig_dtype).mul_(self.weight)
