@@ -160,6 +160,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
+    aux_layer_ids: tuple[int, ...] = ()    # layers whose outputs a feature-based draft reads; set from the DFlash config
 
     def __init__(
         self,
@@ -174,11 +175,18 @@ class Qwen3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        aux_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """aux_out [T, len(aux_layer_ids) * H], when given, receives the output of each aux layer, in order.
+        A layer returns its output in two parts, so the output is hidden_states + residual."""
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        for layer in self.layers:
+        for layer_id, layer in enumerate(self.layers):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if aux_out is not None and layer_id in self.aux_layer_ids:
+                width = hidden_states.shape[-1]
+                segment = self.aux_layer_ids.index(layer_id)
+                aux_out[:, segment * width:(segment + 1) * width].copy_(hidden_states + residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -206,8 +214,9 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        aux_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions)
+        return self.model(input_ids, positions, aux_out)
 
     def compute_logits(
         self,

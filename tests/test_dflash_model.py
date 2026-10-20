@@ -40,9 +40,17 @@ def data_config(name: str) -> Qwen3Config:
     return Qwen3Config(**json.loads((DATA / f"{name}.config.json").read_text()))
 
 
-def test_parameters_match_the_checkpoint():
+def meta_model(config: Qwen3Config) -> DFlashDraftModel:
+    """Built on the meta device, which holds no memory. get_rope caches one RotaryEmbedding: clear it, or a model
+    built later with the same RoPE arguments would get this one, whose cos/sin cache is on the meta device too."""
     with torch.device("meta"):
-        model = DFlashDraftModel(data_config("dflash_qwen3_8b_block7"))
+        model = DFlashDraftModel(config)
+    get_rope.cache_clear()
+    return model
+
+
+def test_parameters_match_the_checkpoint():
+    model = meta_model(data_config("dflash_qwen3_8b_block7"))
     expected = defaultdict(lambda: [0, None])            # parameter -> [rows, row shape]
     for name, shape in json.loads((DATA / "dflash_qwen3_8b_block7.tensors.json").read_text()).items():
         packed = next((key for key in model.packed_modules_mapping if key in name), None)
@@ -63,8 +71,7 @@ def test_config_is_read_as_deepspec_reads_it(name, monkeypatch):
         return get_rope(head_size, rotary_dim, max_position, base)
 
     monkeypatch.setattr(qwen3, "get_rope", recording_get_rope)
-    with torch.device("meta"):
-        model = DFlashDraftModel(data_config(name))
+    model = meta_model(data_config(name))
     assert bases == [1e6] * 5    # the base in effect: the config has rope_parameters, not rope_theta
     assert model.layers[0].self_attn.head_dim == 128
     assert (model.block_size, model.mask_token_id, model.aux_layer_ids) == (7, MASK, (1, 9, 17, 25, 33))

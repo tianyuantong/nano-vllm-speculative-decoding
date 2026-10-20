@@ -89,6 +89,28 @@ def decode_metadata(seqs: list[Sequence], role: str, block_size: int, num_steps:
     return metadata
 
 
+@dataclass
+class DraftBlockMetadata:
+    """One DFlash draft block per row: the last committed token (the anchor, at position len-1) and
+    query_len - 1 mask tokens after it, in the target's block table."""
+    input_ids: list[int] = field(default_factory=list)
+    positions: list[int] = field(default_factory=list)
+    slot_mapping: list[int] = field(default_factory=list)
+    context_lens: list[int] = field(default_factory=list)   # len-1 + query_len: the context below the anchor and the block
+
+
+def draft_block_metadata(seqs: list[Sequence], block_size: int, query_len: int, mask_token_id: int) -> DraftBlockMetadata:
+    metadata = DraftBlockMetadata()
+    for seq in seqs:
+        anchor = len(seq) - 1
+        metadata.input_ids.extend([seq.last_token] + [mask_token_id] * (query_len - 1))
+        metadata.positions.extend(range(anchor, anchor + query_len))
+        metadata.slot_mapping.extend(slot_of(seq.target_kv.block_table, block_size, position)
+                                     for position in range(anchor, anchor + query_len))
+        metadata.context_lens.append(anchor + query_len)
+    return metadata
+
+
 def padded_block_tables(seqs: list[Sequence], role: str) -> list[list[int]]:
     tables = [seq.kv(role).block_table for seq in seqs]
     width = max(len(table) for table in tables)
