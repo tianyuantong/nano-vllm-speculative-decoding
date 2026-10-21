@@ -76,6 +76,8 @@
       "concurrency": [1, 8, 32],
       "repeats": 2,
       "seed_rule": "seeds.external[0] seeds the engine; requests carry no seed, so each repeat draws new random numbers",
+      "supplement": {"sampling": {"temperature": 0.7}, "lines": ["k0_v2", "dflash_k7", "dspark_k7"], "concurrency": [1, 8],
+                     "rule": "the rec temperature without top-k/top-p: vLLM samples drafts with temperature only, so this shows what that costs it under rec"},
       "kv_cache_bytes": 34359738368,
       "metric": "wall-clock Q_full"
     },
