@@ -4,7 +4,7 @@
 
 为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现批量投机解码。
 
-**B=1 吞吐提升至 1.50 倍 · B=8 提升至 1.17 倍**
+**B=1 吞吐约 1.5 倍 · B=8 为 1.1–1.2 倍**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -20,9 +20,9 @@
 
 </div>
 
-Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell。相较同一引擎的普通解码，
-B=1 的吞吐从 **81.4 提升到 122.0 tokens/s**，B=8 从 **507.7 提升到 592.8 tokens/s**。
-[完整性能结果与复现 →](docs/RESULTS.md)
+Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell。相较同一引擎的普通解码，四次测量中
+B=1 的吞吐倍数为 1.47–1.50，B=8 为 1.09–1.17（Server 版 1 个 seed，Max-Q 工作站版 3 个 seed）；
+图中是 Server 版的单次结果。[完整性能结果、重复性与复现 →](docs/RESULTS.md)
 
 ## 核心改进
 

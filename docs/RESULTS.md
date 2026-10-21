@@ -31,8 +31,10 @@ release asset `results-batched-v1`:
 - Timing: one pair of CUDA events per engine step and one event per phase of every round,
   read once after `generate()`; one warm-up `generate()` on 4 prompts excluded. Throughput
   `Q` = completion tokens ÷ GPU timeline of the measured `generate()`; `R = Q(k) / Q(k=0)`.
-  TTFT/TPOT/E2E per request are reconstructed from the step a request got its first token
-  and the step it finished; p50/p95 are nearest-rank percentiles over the 48 requests.
+  Per-request TTFT and TPOT are not reported as latency: nano-vLLM's scheduler caps the
+  number of sequences prefilled per step, not the number running, so all 48 requests are
+  prefilled before the first decode step and per-request TPOT mostly measures the wait
+  behind earlier requests (362 ms at `B = 1`, where one decode step takes 12 ms).
 
 ## Headline
 
@@ -46,7 +48,7 @@ release asset `results-batched-v1`:
 
 `R ≥ 1.15` holds for `B ≤ 8` on the recommended and the T = 1.0 lines, and for `B ≤ 4` on the
 greedy line (greedy `B = 8` is 1.135); at `B = 16` speculation is within ±6 % of ordinary
-decoding. Each configuration is one seed and one timed call. The ratio of raw `generate()` wall
+decoding. Each configuration is one seed and one timed call ([Repeatability](#repeatability) has three seeds at `B ∈ {1, 4, 8}`). The ratio of raw `generate()` wall
 times (the earlier project's primary metric) for the recommended line is 1.51 / 1.38 / 1.30 /
 1.19 / 1.07 at `B = 1 … 16`. Speculative calls emit fewer completion tokens in all five pairs:
 14949 / 14716 / 14443 / 14708 / 14841, versus 15023 / 14817 / 15165 / 14995 / 15166
@@ -56,11 +58,31 @@ the wall timer has a slightly different boundary. Across `k ∈ {2, 3, 4}` on th
 The previous implementation (`docs/PERFORMANCE.md`) measured −2.7 % … +5.4 % at `B ≤ 4`
 on the same models and panel.
 
-TPOT over the 48-request offline batch (time per output token, p50 over requests; it includes
-the scheduling waits a request sees after its first token, so it is not a pure inter-token
-interval) falls from 362 → 243 ms at `B = 1` and from 52 → 48 ms at `B = 8` (rec, k = 3); p95
-from 900 → 584 ms and 119 → 97 ms. Recorded active speculative rounds take 19–31 ms,
-against 12–14 ms for one ordinary decode step.
+Recorded active speculative rounds take 19–31 ms, against 12–14 ms for one ordinary decode
+step: a request receives 2–3 tokens per round instead of one per step, so the gap between
+two deliveries grows from one step to one round.
+
+## Repeatability
+
+On 2026-09-22 the rec line was rerun at `B ∈ {1, 4, 8}` with three seeds on an RTX PRO 6000
+Blackwell **Max-Q Workstation Edition** (job `spec-repeats-166061`, commit `02000a9`); every
+`k = 0` / `k = 3` pair ran back to back in one job.
+
+| B | published (Server, seed 17011) | Max-Q seed 17011 | Max-Q seed 110017 | Max-Q seed 130031 | range |
+|---:|---:|---:|---:|---:|---|
+| 1 | 1.499 | 1.496 | 1.488 | 1.475 | 1.47–1.50 |
+| 4 | 1.241 | 1.228 | 1.206 | 1.207 | 1.21–1.24 |
+| 8 | 1.168 | 1.150 | 1.095 | 1.093 | 1.09–1.17 |
+
+- With the same seed, both GPUs produced identical tokens in all six calls; the differences are timing only.
+- At `B = 8` the spread across seeds (0.058) is larger than the difference between the GPUs (0.018):
+  different seeds generate different lengths, which changes the batch occupancy while the batch drains.
+- The editions differ by phase. Median step times, Server → Max-Q, at `B = 1 / 4 / 8`: decode
+  12.10 / 12.32 / 12.83 → 11.68 / 11.80 / 12.39 ms and speculative rounds 19.01 / 23.02 / 25.91 →
+  18.31 / 22.09 / 25.27 ms (2.5–4 % faster on the Max-Q); prefill 58.7 / 204.1 / 416.0 →
+  73.2 / 257.0 / 530.9 ms (25–28 % slower). Decode is limited by memory bandwidth and prefill by
+  compute, which the Max-Q's lower power limit constrains.
+- `B = 2` and `B = 16` have one measurement each.
 
 ## Throughput, latency and the break-even ratio
 
@@ -68,33 +90,33 @@ against 12–14 ms for one ordinary decode step.
 (1 + accepted drafts). `round p50 / step p50` are the median durations at the full batch
 size; their ratio is the cost side of the break-even inequality.
 
-| line | B | k | tok/s k=0 | tok/s k | R | tokens/row/round | round p50 / step p50 | ratio | TPOT p50 k=0 → k (ms) | TPOT p95 k=0 → k |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| flat | 1 | 3 | 82.7 | 120.3 | **1.454** | 2.32 | 18.3 / 11.9 | 1.54 | 349.1 → 231.4 | 818.6 → 484.8 |
-| flat | 2 | 3 | 159.1 | 213.6 | **1.342** | 2.31 | 20.1 / 12.2 | 1.64 | 179.9 → 136.4 | 437.4 → 312.2 |
-| flat | 4 | 3 | 305.4 | 382.9 | **1.254** | 2.38 | 22.2 / 12.1 | 1.83 | 90.9 → 72.7 | 213.8 → 157.6 |
-| flat | 8 | 3 | 503.2 | 605.3 | **1.203** | 2.28 | 25.0 / 12.6 | 1.98 | 48.9 → 44.5 | 103.9 → 93.5 |
-| flat | 16 | 3 | 805.0 | 831.1 | **1.032** | 2.27 | 30.0 / 13.9 | 2.15 | 29.8 → 28.5 | 66.5 → 59.9 |
-| greedy | 1 | 4 | 83.3 | 127.8 | **1.534** | 2.67 | 19.9 / 11.8 | 1.68 | 345.8 → 220.7 | 806.4 → 526.5 |
-| greedy | 2 | 4 | 159.6 | 218.1 | **1.366** | 2.59 | 21.6 / 12.1 | 1.78 | 178.8 → 146.0 | 442.7 → 301.9 |
-| greedy | 4 | 4 | 305.8 | 386.2 | **1.263** | 2.64 | 24.3 / 12.0 | 2.02 | 97.1 → 72.3 | 217.9 → 151.3 |
-| greedy | 8 | 4 | 549.1 | 623.3 | **1.135** | 2.68 | 27.0 / 12.5 | 2.16 | 51.7 → 45.0 | 107.3 → 96.2 |
-| greedy | 16 | 4 | 803.7 | 850.9 | **1.059** | 2.62 | 33.2 / 13.8 | 2.41 | 31.2 → 28.6 | 58.0 → 52.2 |
-| rec | 1 | 2 | 81.4 | 113.2 | **1.390** | 2.07 | 17.3 / 12.1 | 1.43 | 362.2 → 261.3 | 899.6 → 578.2 |
-| rec | 1 | 3 | 81.4 | 122.0 | **1.499** | 2.45 | 19.0 / 12.1 | 1.57 | 362.2 → 242.6 | 899.6 → 584.4 |
-| rec | 1 | 4 | 81.4 | 114.6 | **1.408** | 2.53 | 21.2 / 12.1 | 1.75 | 362.2 → 260.1 | 899.6 → 592.7 |
-| rec | 2 | 2 | 156.3 | 205.1 | **1.313** | 2.11 | 19.7 / 12.4 | 1.58 | 190.5 → 152.2 | 432.0 → 314.3 |
-| rec | 2 | 3 | 156.3 | 214.1 | **1.370** | 2.44 | 21.9 / 12.4 | 1.76 | 190.5 → 138.3 | 432.0 → 337.9 |
-| rec | 2 | 4 | 156.3 | 205.3 | **1.314** | 2.52 | 22.9 / 12.4 | 1.85 | 190.5 → 136.1 | 432.0 → 315.8 |
-| rec | 4 | 2 | 301.5 | 364.0 | **1.207** | 2.10 | 20.6 / 12.3 | 1.67 | 93.5 → 84.5 | 205.2 → 165.4 |
-| rec | 4 | 3 | 301.5 | 374.2 | **1.241** | 2.43 | 23.0 / 12.3 | 1.87 | 93.5 → 83.7 | 205.2 → 184.3 |
-| rec | 4 | 4 | 301.5 | 346.0 | **1.148** | 2.49 | 25.8 / 12.3 | 2.09 | 93.5 → 93.1 | 205.2 → 169.4 |
-| rec | 8 | 2 | 507.7 | 594.7 | **1.172** | 2.08 | 23.1 / 12.8 | 1.80 | 52.2 → 45.0 | 119.1 → 106.0 |
-| rec | 8 | 3 | 507.7 | 592.8 | **1.168** | 2.36 | 25.9 / 12.8 | 2.02 | 52.2 → 47.6 | 119.1 → 96.7 |
-| rec | 8 | 4 | 507.7 | 581.1 | **1.145** | 2.55 | 28.7 / 12.8 | 2.23 | 52.2 → 47.3 | 119.1 → 91.4 |
-| rec | 16 | 2 | 793.1 | 835.2 | **1.053** | 2.12 | 27.0 / 14.1 | 1.91 | 31.7 → 28.8 | 61.1 → 54.5 |
-| rec | 16 | 3 | 793.1 | 827.0 | **1.043** | 2.38 | 31.1 / 14.1 | 2.20 | 31.7 → 29.2 | 61.1 → 53.7 |
-| rec | 16 | 4 | 793.1 | 784.5 | **0.989** | 2.53 | 34.9 / 14.1 | 2.47 | 31.7 → 31.8 | 61.1 → 50.8 |
+| line | B | k | tok/s k=0 | tok/s k | R | tokens/row/round | round p50 / step p50 | ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| flat | 1 | 3 | 82.7 | 120.3 | **1.454** | 2.32 | 18.3 / 11.9 | 1.54 |
+| flat | 2 | 3 | 159.1 | 213.6 | **1.342** | 2.31 | 20.1 / 12.2 | 1.64 |
+| flat | 4 | 3 | 305.4 | 382.9 | **1.254** | 2.38 | 22.2 / 12.1 | 1.83 |
+| flat | 8 | 3 | 503.2 | 605.3 | **1.203** | 2.28 | 25.0 / 12.6 | 1.98 |
+| flat | 16 | 3 | 805.0 | 831.1 | **1.032** | 2.27 | 30.0 / 13.9 | 2.15 |
+| greedy | 1 | 4 | 83.3 | 127.8 | **1.534** | 2.67 | 19.9 / 11.8 | 1.68 |
+| greedy | 2 | 4 | 159.6 | 218.1 | **1.366** | 2.59 | 21.6 / 12.1 | 1.78 |
+| greedy | 4 | 4 | 305.8 | 386.2 | **1.263** | 2.64 | 24.3 / 12.0 | 2.02 |
+| greedy | 8 | 4 | 549.1 | 623.3 | **1.135** | 2.68 | 27.0 / 12.5 | 2.16 |
+| greedy | 16 | 4 | 803.7 | 850.9 | **1.059** | 2.62 | 33.2 / 13.8 | 2.41 |
+| rec | 1 | 2 | 81.4 | 113.2 | **1.390** | 2.07 | 17.3 / 12.1 | 1.43 |
+| rec | 1 | 3 | 81.4 | 122.0 | **1.499** | 2.45 | 19.0 / 12.1 | 1.57 |
+| rec | 1 | 4 | 81.4 | 114.6 | **1.408** | 2.53 | 21.2 / 12.1 | 1.75 |
+| rec | 2 | 2 | 156.3 | 205.1 | **1.313** | 2.11 | 19.7 / 12.4 | 1.58 |
+| rec | 2 | 3 | 156.3 | 214.1 | **1.370** | 2.44 | 21.9 / 12.4 | 1.76 |
+| rec | 2 | 4 | 156.3 | 205.3 | **1.314** | 2.52 | 22.9 / 12.4 | 1.85 |
+| rec | 4 | 2 | 301.5 | 364.0 | **1.207** | 2.10 | 20.6 / 12.3 | 1.67 |
+| rec | 4 | 3 | 301.5 | 374.2 | **1.241** | 2.43 | 23.0 / 12.3 | 1.87 |
+| rec | 4 | 4 | 301.5 | 346.0 | **1.148** | 2.49 | 25.8 / 12.3 | 2.09 |
+| rec | 8 | 2 | 507.7 | 594.7 | **1.172** | 2.08 | 23.1 / 12.8 | 1.80 |
+| rec | 8 | 3 | 507.7 | 592.8 | **1.168** | 2.36 | 25.9 / 12.8 | 2.02 |
+| rec | 8 | 4 | 507.7 | 581.1 | **1.145** | 2.55 | 28.7 / 12.8 | 2.23 |
+| rec | 16 | 2 | 793.1 | 835.2 | **1.053** | 2.12 | 27.0 / 14.1 | 1.91 |
+| rec | 16 | 3 | 793.1 | 827.0 | **1.043** | 2.38 | 31.1 / 14.1 | 2.20 |
+| rec | 16 | 4 | 793.1 | 784.5 | **0.989** | 2.53 | 34.9 / 14.1 | 2.47 |
 
 At a fixed full batch, `tokens/row/round > round/step` is a rough break-even check.
 The estimate `tokens/row/round ÷ ratio` differs from measured `R` by −0.053 to +0.105
@@ -175,7 +197,9 @@ p50 within 1–2 ms).
   GPU: total variation between emitted and target distributions ≤ 0.0031 (max 0.00302). On a real
   (p, q) pair from the target/draft at T 0.7 / top-p 0.8 / top-k 20 the analytic
   acceptance rate Σ min(p, q) and the observed rate agreed (both 1.0: the distributions
-  coincided after truncation at that position).
+  coincided after truncation at that position). These checks use one draft per round (k = 1),
+  so the truncation at the first rejection, which exists only for k ≥ 2, was not exercised,
+  and the real pair did not exercise rejection at all.
 - **G3 — greedy equivalence** (a measurement, not a pass/fail gate): greedy k = 4 vs greedy
   k = 0 on the 48 prompts: 7 exact matches, 41 divergences; 35 of the 41 divergences sit at a
   top-2 logit margin below the G1 noise floor (median margin 0.000, i.e. exact bf16 ties).
@@ -221,10 +245,11 @@ stands.
 
 ## Limitations
 
-- One GPU model (the Server Edition of the RTX PRO 6000; a Max-Q unit in the same cluster
-  runs decode steps ≈ 4 % slower), one model pair, one seed per configuration.
-- Offline throughput; TTFT includes queueing in the 48-request batch and is not a serving
-  number.
+- One GPU model in two editions (Repeatability: the Max-Q Workstation Edition decodes
+  2.5–4 % faster and prefills 25–28 % slower than the Server Edition), one model pair, one
+  seed per configuration in the main matrix (three seeds at `B ∈ {1, 4, 8}` on the Max-Q).
+- Offline throughput with every request prefilled before decoding; no per-request latency
+  is reported (see Setup).
 - No output-quality evaluation beyond the greedy repetition shares; strict finite-precision
   equivalence to ordinary decoding is not claimed (G3 and its control show why it cannot
   be, for greedy).

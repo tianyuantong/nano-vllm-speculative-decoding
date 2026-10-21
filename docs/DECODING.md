@@ -53,8 +53,8 @@ all-random; `prompt + max_tokens + k <= max_model_len`.
 `record_step_timings=True` records a pair of CUDA events per engine step and one event
 per phase of every speculative round; `llm.step_timings()` and `llm.phase_timings()`
 return them after `generate()`. `bench_spec.py`, `tools/summarize_bench.py` and
-`tools/report_matrix.py` build throughput, TTFT, TPOT, per-round costs and the
-break-even check from them.
+`tools/report_matrix.py` build throughput, per-round costs and the break-even check
+from them.
 
 ## Gates
 
