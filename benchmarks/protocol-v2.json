@@ -1,15 +1,14 @@
 {
   "version": "2.0",
   "frozen": false,
-  "gpu": {"node": "gpu-pro6000-7", "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+  "gpu": {"node": "computeinstance-e05tx5fq894r0ntfw0", "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
   "models": {
     "target": "Qwen3-8B",
     "dtype": "bfloat16",
     "drafts": {
       "model_0p6b": "Qwen3-0.6B",
       "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
-      "dspark": "dspark_qwen3_8b_block7-03326e504381",
-      "eagle3": "eagle3_qwen3_8b_ttt7-f6485ba8d21e"
+      "dspark": "dspark_qwen3_8b_block7-03326e504381"
     }
   },
   "sampling": {"temperature": 0.7, "top_k": 20, "top_p": 0.8, "max_tokens": 512, "ignore_eos": false},
@@ -24,7 +23,7 @@
     "dev": [17011, 110017, 130031, 170041, 210011],
     "confirm": [17011, 110017, 130031],
     "gate_g5": [17011, 110017],
-    "external": [17011, 110017]
+    "external": [17011]
   },
   "order": "all lines of one (C, seed) run back to back in one job; the i-th dev seed (0-based) starts with lines[i mod 3] and continues in listed order",
   "panels": {
@@ -67,10 +66,18 @@
     "vllm": {
       "python": "/projects/nanovllm/envs/vllm-ngram-5090/bin/python",
       "version": "0.1.1.dev52+g372477d2d",
-      "lines": ["k0", "draft_model_k3", "eagle3_k7", "dflash_k7", "dspark_k7", "dspark_k7_adaptive"],
+      "lines": ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"],
+      "runner_rule": "draft_model runs only on the v1 model runner and dspark only on v2; every R divides by the k0 line of the same runner",
+      "dflash_rule": "DeepSpec's DFlash checkpoint is a Qwen3DSparkModel without the Markov head, so dflash_k7 runs through vLLM's dspark method",
+      "adaptive_rule": "adaptive verification needs TRITON_ATTN on sm_120; its gain is dspark_k7_adaptive over dspark_k7_triton, both on TRITON_ATTN",
+      "adaptive_profile_context_len": 2048,
+      "draft_sample_method": "probabilistic",
       "concurrency": [1, 8, 32],
-      "metric": "wall-clock Q_full",
-      "fallback": "flat sampling for every line if any draft path rejects top_k/top_p"
+      "repeats": 2,
+      "seed_rule": "seeds.external[0] seeds the engine; requests carry no seed, so each repeat draws new random numbers",
+      "kv_cache_bytes": 34359738368,
+      "max_num_batched_tokens": 4096,
+      "metric": "wall-clock Q_full"
     },
     "cost_curve": {"batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 1024, "warmup": 25, "iters": 100, "report": ["median", "p95"]}
   },

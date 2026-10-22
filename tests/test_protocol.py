@@ -7,7 +7,7 @@ PROTOCOL = json.loads((Path(__file__).resolve().parents[1] / "benchmarks" / "pro
 TOP_LEVEL = {"version", "frozen", "gpu", "models", "sampling", "lines", "max_model_len", "concurrency", "seeds",
              "order", "panels", "kv_budget", "warmup", "metrics", "timing_noise", "decision", "invalid_if",
              "gates", "external", "confirm"}
-VLLM_LINES = ["k0", "draft_model_k3", "eagle3_k7", "dflash_k7", "dspark_k7", "dspark_k7_adaptive"]
+VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
