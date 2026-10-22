@@ -6,8 +6,10 @@
   rounds  tokens per round of the whole nano engine with the DFlash draft (eager, C=1, temperature-only) on the
           reference's prompts, against the reference's. Its per-run pass (|difference| <= 2 x the combined per-round
           standard error) is a diagnostic; the gate is `alignment` over several runs.
-  graphs  the verify graph (it exports the aux features) against the eager verification on the same rows and drafts.
-          Pass: logits and aux bit-identical at a captured batch size; a batch padded up to one is reported only.
+  graphs  the verify graph (it exports the aux features) and the draft block graph against their eager paths on the
+          same rows. Pass: verify logits and aux, block logits and the block K/V stored in the draft's KV bit-identical
+          at a captured batch size, a batch padded up to one reported only; at both, no other slot of the draft's KV
+          written.
   alignment  the protocol's dflash_alignment rule over several `rounds` results (one per seed): per sampling, the mean
           of nano's runs against the mean of DeepSpec's. Pass: |difference| <= 2 x the standard error of that
           difference, computed from the per-run means.
@@ -114,6 +116,7 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
 
 def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
     from nanovllm import LLM, SamplingParams
+    from nanovllm.engine.batch_metadata import draft_block_metadata
 
     llm = LLM(target, draft_model=draft, draft_type="dflash", max_num_seqs=8, enable_prefix_cache=False,
               kv_cache_memory_bytes=8 * GIB, seed=seed)
@@ -124,6 +127,8 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
         llm.step()                                 # prefill: context K/V and the first tokens
     seqs, _ = llm.scheduler.schedule()             # a decode schedule reserves the blocks one round writes
     generator = torch.Generator(device=spec.device).manual_seed(seed)
+    drafter = spec.drafter
+    cache = drafter.kv_cache.flatten(2, 3)    # [K/V, layer, slot, head, dim]
     rows = []
     for batch_size in (4, 3):
         batch, query_len = seqs[:batch_size], spec.num_drafts + 1
@@ -134,14 +139,32 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
             eager = spec.target.model.compute_logits(spec._verify_eager(batch, drafts, eager_aux), all_logits=True)
             graph = spec.target.model.compute_logits(spec._verify_graph(batch, drafts), all_logits=True)
             graph_aux = spec.graph_vars["aux"][:batch_size * query_len]
+            slots = torch.tensor(draft_block_metadata(batch, spec.block_size, spec.num_drafts, drafter.model.mask_token_id,
+                                                      batch_size, spec.target.pad_block_id, spec.max_num_blocks).slot_mapping,
+                                 device=spec.device)
+            before = cache.clone()
+            eager_block = drafter.model.compute_logits(drafter._forward_eager(batch))
+            eager_kv = cache[:, :, slots].clone()
+            cache[:, :, slots] = 0                                          # the graph must write them again
+            graph_block = drafter.model.compute_logits(drafter._forward_graph(batch))
+            graph_kv = cache[:, :, slots].clone()
+            cache[:, :, slots] = before[:, :, slots]
+            other_slots_unchanged = torch.equal(cache, before)
         rows.append({"batch": batch_size, "captured_size": batch_size in spec.graph_batch_sizes,
                      "logits_equal": torch.equal(eager, graph), "aux_equal": torch.equal(eager_aux, graph_aux),
+                     "block_logits_equal": torch.equal(eager_block, graph_block),
+                     "block_kv_equal": torch.equal(eager_kv, graph_kv), "other_slots_unchanged": other_slots_unchanged,
                      "logits_max_abs_diff": float((eager.float() - graph.float()).abs().max()),
-                     "aux_max_abs_diff": float((eager_aux.float() - graph_aux.float()).abs().max())})
+                     "aux_max_abs_diff": float((eager_aux.float() - graph_aux.float()).abs().max()),
+                     "block_logits_max_abs_diff": float((eager_block.float() - graph_block.float()).abs().max()),
+                     "block_kv_max_abs_diff": float((eager_kv.float() - graph_kv.float()).abs().max())})
     llm.exit()
-    passed = all(row["logits_equal"] and row["aux_equal"] for row in rows if row["captured_size"])
-    return {"gate": "verify graph against eager", "passed": passed,
-            "threshold": "bit-identical logits and aux at a captured batch size", "rows": rows}
+    exact = ("logits_equal", "aux_equal", "block_logits_equal", "block_kv_equal")
+    passed = (all(row["other_slots_unchanged"] for row in rows)
+              and all(row[key] for row in rows if row["captured_size"] for key in exact))
+    return {"gate": "verify and draft block graphs against eager", "passed": passed,
+            "threshold": "bit-identical verify logits, aux, block logits and block K/V at a captured batch size; "
+                         "no other draft KV slot written at any batch size", "rows": rows}
 
 
 def check_alignment(paths: list[Path]) -> dict:
