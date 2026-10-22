@@ -16,6 +16,10 @@ from nanovllm.utils.loader import load_model
 
 MAX_GRAPH_BATCH_SIZE = 512
 EAGER_DECODE_BATCH_THRESHOLD = 512
+# RMSNorm and RoPE are torch.compile'd methods shared by every layer of the target and the draft, called with
+# 2-D and 3-D inputs, 32 or 8 heads, and every batch length. Past the default limit of 8 recompiles, dynamo runs
+# new shapes uncompiled: slower, and numerically unlike the compiled kernels inside the CUDA graphs.
+torch._dynamo.config.recompile_limit = 64
 
 
 def blocks_for_budget(budget_bytes: int, block_bytes: int) -> int:
