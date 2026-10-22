@@ -2,7 +2,9 @@
 import argparse
 import json
 import math
+import statistics
 from collections import defaultdict
+from itertools import pairwise
 from pathlib import Path
 
 REPEATED_NGRAM = 8
@@ -71,6 +73,120 @@ def summarize(result: dict) -> dict:
     if phases:
         summary["phase_ms_p50"] = {phase: percentile(values, 50) for phase, values in phases.items()}
     return summary
+
+
+# ---------------------------------------------------------------- bench-v2 (closed loop, bench-v2 design §1.5)
+# MBU constants of Qwen3-8B in bf16: 6.946 B parameters in the 36 layers plus 0.622 B in lm_head; K and V of
+# 36 layers × 8 heads × 128 per token; RTX PRO 6000 Blackwell Server Edition peak bandwidth.
+WEIGHT_BYTES = (6.946e9 + 0.622e9) * 2
+KV_BYTES_PER_TOKEN = 2 * 36 * 8 * 128 * 2
+PEAK_BYTES_PER_S = 1.79e12
+
+
+def _end_ms(step: dict) -> float:
+    return step["start_ms"] + step["duration_ms"]
+
+
+def steady_window(steps: list[dict], concurrency: int) -> tuple[int, int]:
+    """First and last step that is not a prefill and runs a full batch of C requests."""
+    full = [step["step"] for step in steps if step["kind"] != "prefill" and step["batch_size"] == concurrency]
+    return full[0], full[-1]
+
+
+def q_steady(steps: list[dict], requests: list[dict], concurrency: int) -> float:
+    """Tokens delivered inside the steady window over the window's length; prefills inside it count."""
+    first, last = steady_window(steps, concurrency)
+    tokens = sum(n for request in requests for step, n in request["deliveries"] if first <= step <= last)
+    return tokens / ((_end_ms(steps[last]) - steps[first]["start_ms"]) / 1000)
+
+
+def q_full(steps: list[dict], requests: list[dict]) -> float:
+    tokens = sum(n for request in requests for _, n in request["deliveries"])
+    return tokens / ((_end_ms(steps[-1]) - steps[0]["start_ms"]) / 1000)
+
+
+def ttft_ms(steps: list[dict], requests: list[dict]) -> list[float]:
+    """Per request, in request order: end of its first delivery's step minus start of its submit step.
+    A list, not a dict by id: a panel cycled for large C repeats ids."""
+    return [_end_ms(steps[request["deliveries"][0][0]]) - steps[request["submit_step"]]["start_ms"]
+            for request in requests]
+
+
+def itl_ms(steps: list[dict], requests: list[dict], window: tuple[int, int]) -> list[float]:
+    """Gaps between consecutive deliveries of a request, when both ends lie in the window."""
+    return [_end_ms(steps[b]) - _end_ms(steps[a])
+            for request in requests for (a, _), (b, _) in pairwise(request["deliveries"])
+            if window[0] <= a and b <= window[1]]
+
+
+def round_ms(steps: list[dict], window: tuple[int, int]) -> list[float]:
+    return [step["duration_ms"] for step in steps[window[0]:window[1] + 1] if step["kind"] != "prefill"]
+
+
+def tokens_per_round(requests: list[dict]) -> list[float | None]:
+    """Per request, in request order: tokens per delivery after the prefill's; None when the prefill finished it."""
+    return [statistics.fmean(n for _, n in request["deliveries"][1:]) if len(request["deliveries"]) > 1 else None
+            for request in requests]
+
+
+def excess_prefill_tokens(steps: list[dict], requests: list[dict]) -> int:
+    """Prefilled tokens beyond the prompts submitted; above 0 means a request was preempted and recomputed."""
+    return (sum(step["tokens_out"] for step in steps if step["kind"] == "prefill")
+            - sum(request["prompt_len"] for request in requests))
+
+
+def full_batch_share(steps: list[dict], concurrency: int) -> float:
+    batches = [step["batch_size"] for step in steps if step["kind"] != "prefill"]
+    return sum(batch == concurrency for batch in batches) / len(batches)
+
+
+def prefill_share(steps: list[dict]) -> float:
+    return (sum(step["duration_ms"] for step in steps if step["kind"] == "prefill")
+            / sum(step["duration_ms"] for step in steps))
+
+
+def mbu(steps: list[dict], requests: list[dict], weight_bytes: float, kv_bytes_per_token: int,
+        peak_bytes_per_s: float) -> list[float]:
+    """Per decode step: (weights + context of the requests it decodes × KV per token) / step time / peak bandwidth.
+    A request's context at a step is its prompt plus the tokens delivered before that step."""
+    context = defaultdict(int)
+    for request in requests:
+        delivered = 0
+        for step, n in request["deliveries"]:
+            context[step] += request["prompt_len"] + delivered
+            delivered += n
+    return [(weight_bytes + context[step["step"]] * kv_bytes_per_token) / (step["duration_ms"] / 1000) / peak_bytes_per_s
+            for step in steps if step["kind"] == "decode"]
+
+
+def summarize_v2(result: dict) -> dict:
+    steps, requests = result["steps"], result["requests"]
+    concurrency = result["config"]["concurrency"]
+    window = steady_window(steps, concurrency)
+    ttft, itl, rounds = ttft_ms(steps, requests), itl_ms(steps, requests, window), round_ms(steps, window)
+    by_category = defaultdict(list)
+    for request, value in zip(requests, tokens_per_round(requests)):
+        if value is not None:
+            by_category[request["category"]].append(value)
+    decode_steps = [step["step"] for step in steps if step["kind"] == "decode"]
+    window_mbu = [value for step, value in zip(decode_steps, mbu(steps, requests, WEIGHT_BYTES, KV_BYTES_PER_TOKEN,
+                                                                 PEAK_BYTES_PER_S))
+                  if window[0] <= step <= window[1]]
+    completion_tokens = sum(n for request in requests for _, n in request["deliveries"])
+    return {
+        "q_steady": q_steady(steps, requests, concurrency),
+        "q_full": q_full(steps, requests),
+        "q_full_wall": completion_tokens / result["wall_seconds"],
+        "window": window,
+        "ttft_ms": {"p50": percentile(ttft, 50), "p99": percentile(ttft, 99)},
+        "itl_ms": {"p50": percentile(itl, 50), "p99": percentile(itl, 99)} if itl else None,
+        "round_ms": {"p50": percentile(rounds, 50), "p99": percentile(rounds, 99)},
+        "tokens_per_round": {category: statistics.median(values) for category, values in sorted(by_category.items())},
+        "excess_prefill_tokens": excess_prefill_tokens(steps, requests),
+        "full_batch_share": full_batch_share(steps, concurrency),
+        "prefill_share": prefill_share(steps),
+        "mbu_p50": statistics.median(window_mbu) if window_mbu else None,
+    }
 
 
 def main():
