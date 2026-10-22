@@ -187,7 +187,6 @@ class SpeculativeDecoder:
         self.vocab_size = config.hf_config.vocab_size
         self.device = target.device
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.ctx_graphs: dict[int, torch.cuda.CUDAGraph] = {}    # DFlash: the context store, per padded batch size
         self.graph_batch_sizes: list[int] = []
         self.graph_vars: dict[str, torch.Tensor] = {}
         self.stats: Counter = Counter()
@@ -250,10 +249,7 @@ class SpeculativeDecoder:
         target_logits = self.verify_logits(seqs, drafts, aux)
         mark = self._mark("verify", mark)
         if aux is not None:
-            if self.ctx_graphs:
-                self.ctx_graphs[self._padded_batch_size(len(seqs))].replay()
-            else:
-                self.drafter.after_verify(seqs, aux)
+            self.drafter.after_verify(seqs, aux)
             mark = self._mark("ctx_store", mark)
         if sampling.temperatures is None:
             n_accept, tail = accept_greedy(target_logits, drafts)
@@ -308,7 +304,7 @@ class SpeculativeDecoder:
 
     def _verify_graph(self, seqs: list[Sequence], drafts: torch.Tensor) -> torch.Tensor:
         batch_size, query_len = len(seqs), self.num_drafts + 1
-        padded = self._padded_batch_size(batch_size)
+        padded = next(size for size in self.graph_batch_sizes if size >= batch_size)
         metadata = verify_metadata(seqs, self.num_drafts, self.block_size, padded, self.target.pad_block_id, self.max_num_blocks)
         num_tokens = padded * query_len
         buffers = self.graph_vars
@@ -325,8 +321,7 @@ class SpeculativeDecoder:
     # ------------------------------------------------------------------ graphs
     @torch.inference_mode()
     def capture_graphs(self) -> None:
-        """One verification graph per batch size of the target's decode-graph table; query length fixed to k+1.
-        DFlash also gets one context-store graph per batch size."""
+        """One verification graph per batch size of the target's decode-graph table; query length fixed to k+1."""
         query_len = self.num_drafts + 1
         self.graph_batch_sizes = list(self.target.graph_bs)
         max_batch_size = self.graph_batch_sizes[-1]
@@ -356,29 +351,6 @@ class SpeculativeDecoder:
                 self.graphs[batch_size] = graph
                 torch.cuda.synchronize()
                 reset_context()
-        if isinstance(self.drafter, DFlashDrafter):
-            self._capture_ctx_graphs()
-
-    def _padded_batch_size(self, batch_size: int) -> int:
-        return next(size for size in self.graph_batch_sizes if size >= batch_size)
-
-    def _capture_ctx_graphs(self) -> None:
-        """DFlash: per padded batch size, the context store of a verification, reading the verify graph's aux,
-        positions and slot mapping. Padding rows carry slot -1, so their K/V are never stored."""
-        query_len = self.num_drafts + 1
-        for batch_size in reversed(self.graph_batch_sizes):
-            rows = batch_size * query_len
-            graph = torch.cuda.CUDAGraph()
-            self._ctx_store_forward(rows)    # warm-up
-            with torch.cuda.graph(graph, self.target.graph_pool):
-                self._ctx_store_forward(rows)
-            self.ctx_graphs[batch_size] = graph
-            torch.cuda.synchronize()
-
-    def _ctx_store_forward(self, rows: int) -> None:
-        model, buffers = self.drafter.model, self.graph_vars
-        model.store_context_kv(model.context_features(buffers["aux"][:rows]), buffers["positions"][:rows],
-                               buffers["slot_mapping"][:rows])
 
     def _graph_forward(self, rows: int) -> torch.Tensor:
         aux = self.graph_vars["aux"][:rows] if "aux" in self.graph_vars else None
@@ -393,7 +365,6 @@ class SpeculativeDecoder:
 
     def close(self) -> None:
         self.graphs.clear()
-        self.ctx_graphs.clear()
         self.graph_vars.clear()
 
     # ------------------------------------------------------------------ tensors
