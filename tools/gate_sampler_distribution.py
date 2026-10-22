@@ -46,7 +46,7 @@ def real_distribution_case(args) -> dict:
     llm.scheduler.schedule()                                       # reserves the round's blocks
     decoder = llm.speculative
     sampling = sampling_tensors([seq], decoder.device)
-    drafts, draft_probs = decoder._propose([seq], sampling)
+    drafts, draft_probs = decoder.drafter.propose([seq], sampling)
     target_probs = probs_from_logits(decoder.verify_logits([seq], drafts), sampling)
     p0, q0 = target_probs[0, 0], draft_probs[0, 0]
     expected_accept = torch.minimum(p0, q0).sum().item()

@@ -23,6 +23,75 @@ if TYPE_CHECKING:
     from nanovllm.engine.model_runner import ModelRunner
 
 
+class ModelDrafter:
+    """A draft model with its own KV cache and decode path (the 0.6B line).
+
+    At round entry its KV covers len-2 or len-1 positions: catch_up fills the missing one, then propose
+    runs k single-token decode steps.
+    """
+
+    def __init__(self, draft: ModelRunner, decoder: SpeculativeDecoder):
+        self.draft = draft
+        self.decoder = decoder    # block size, k, vocabulary, device, the target's generator and the round stats
+
+    @torch.inference_mode()
+    def prefill(self, seqs: list[Sequence]) -> None:
+        """Run the draft over the chunk the target just prefilled; the scheduler set draft_kv.num_scheduled_tokens."""
+        input_ids, positions = self.draft.prepare_prefill(seqs)
+        self.draft.run_model(input_ids, positions, True, need_logits=False)
+        reset_context()
+
+    def catch_up(self, seqs: list[Sequence]) -> None:
+        """Recompute the one draft KV entry (position len-2) a fully accepted round left missing.
+
+        By the round-entry invariant the gap is exactly one token, so this is a single decode
+        step of the draft through its decode graph; no logits are needed.
+        """
+        decoder = self.decoder
+        lagging = [seq for seq in seqs if seq.draft_kv.num_cached_tokens < len(seq) - 1]
+        if not lagging:
+            return
+        metadata = decode_metadata(lagging, "draft", decoder.block_size, num_steps=1, position_offset=-1)
+        set_context(False,
+                    slot_mapping=decoder._device_tensor(metadata.slot_mapping[0], torch.int32),
+                    context_lens=decoder._device_tensor(metadata.context_lens, torch.int32),
+                    block_tables=decoder._device_tensor(padded_block_tables(lagging, "draft"), torch.int32))
+        self.draft.run_model(decoder._device_tensor(metadata.input_ids, torch.int64),
+                             decoder._device_tensor(metadata.positions, torch.int64), False, need_logits=False)
+        reset_context()
+        for seq in lagging:
+            seq.draft_kv.num_cached_tokens = len(seq) - 1
+        decoder.stats["catch_up_forwards"] += 1
+
+    @torch.inference_mode()
+    def propose(self, seqs: list[Sequence], sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """k draft steps through the draft's decode path; returns drafts [B, k] and probabilities [B, k, V] (None when greedy)."""
+        decoder = self.decoder
+        batch_size, k = len(seqs), decoder.num_drafts
+        metadata = decode_metadata(seqs, "draft", decoder.block_size, num_steps=k)
+        input_ids = decoder._device_tensor(metadata.input_ids, torch.int64)
+        positions = decoder._device_tensor(metadata.positions, torch.int64)
+        context_lens = decoder._device_tensor(metadata.context_lens, torch.int32)
+        slot_mapping = decoder._device_tensor(metadata.slot_mapping, torch.int32)          # [k, B]
+        block_tables = decoder._device_tensor(padded_block_tables(seqs, "draft"), torch.int32)
+        drafts = torch.empty(batch_size, k, dtype=torch.int64, device=decoder.device)
+        draft_probs = None
+        if sampling.temperatures is not None:
+            draft_probs = torch.empty(batch_size, k, decoder.vocab_size, dtype=torch.float32, device=decoder.device)
+        for step in range(k):
+            set_context(False, slot_mapping=slot_mapping[step], context_lens=context_lens + step, block_tables=block_tables)
+            logits = self.draft.run_model(input_ids, positions + step, False)
+            if draft_probs is None:
+                tokens = logits.argmax(dim=-1)
+            else:
+                draft_probs[:, step] = probs_from_logits(logits, sampling)
+                tokens = sample(draft_probs[:, step], decoder.target.generator)
+            drafts[:, step] = tokens
+            input_ids = tokens
+        reset_context()
+        return drafts, draft_probs
+
+
 class SpeculativeDecoder:
     """Draft catch-up, k draft steps, one verification forward, batched acceptance, one D2H copy.
 
@@ -33,7 +102,7 @@ class SpeculativeDecoder:
 
     def __init__(self, target: ModelRunner, draft: ModelRunner, config: Config):
         self.target = target
-        self.draft = draft
+        self.drafter = ModelDrafter(draft, self)
         self.num_drafts = config.num_speculative_tokens
         self.block_size = config.kvcache_block_size
         self.max_model_len = config.max_model_len
@@ -51,34 +120,8 @@ class SpeculativeDecoder:
     # ------------------------------------------------------------------ draft KV only
     @torch.inference_mode()
     def prefill_draft(self, seqs: list[Sequence]) -> None:
-        """Run the draft over the chunk the target just prefilled; the scheduler set draft_kv.num_scheduled_tokens."""
-        self._draft_kv_forward(seqs)
-
-    def _draft_kv_forward(self, seqs: list[Sequence]) -> None:
-        input_ids, positions = self.draft.prepare_prefill(seqs)
-        self.draft.run_model(input_ids, positions, True, need_logits=False)
-        reset_context()
-
-    def _catch_up(self, seqs: list[Sequence]) -> None:
-        """Recompute the one draft KV entry (position len-2) a fully accepted round left missing.
-
-        By the round-entry invariant the gap is exactly one token, so this is a single decode
-        step of the draft through its decode graph; no logits are needed.
-        """
-        lagging = [seq for seq in seqs if seq.draft_kv.num_cached_tokens < len(seq) - 1]
-        if not lagging:
-            return
-        metadata = decode_metadata(lagging, "draft", self.block_size, num_steps=1, position_offset=-1)
-        set_context(False,
-                    slot_mapping=self._device_tensor(metadata.slot_mapping[0], torch.int32),
-                    context_lens=self._device_tensor(metadata.context_lens, torch.int32),
-                    block_tables=self._device_tensor(padded_block_tables(lagging, "draft"), torch.int32))
-        self.draft.run_model(self._device_tensor(metadata.input_ids, torch.int64),
-                             self._device_tensor(metadata.positions, torch.int64), False, need_logits=False)
-        reset_context()
-        for seq in lagging:
-            seq.draft_kv.num_cached_tokens = len(seq) - 1
-        self.stats["catch_up_forwards"] += 1
+        """Run the draft over the chunk the target just prefilled."""
+        self.drafter.prefill(seqs)
 
     # ------------------------------------------------------------------ phase timings
     def enable_phase_timings(self, event_factory=None, synchronize=None) -> None:
@@ -112,10 +155,10 @@ class SpeculativeDecoder:
             assert seq.target_kv.num_cached_tokens == len(seq) - 1
             assert len(seq) - 2 <= seq.draft_kv.num_cached_tokens <= len(seq) - 1
         mark = self._mark("start", None)
-        self._catch_up(seqs)
+        self.drafter.catch_up(seqs)
         mark = self._mark("catch_up", mark)
         sampling = sampling_tensors(seqs, self.device)
-        drafts, draft_probs = self._propose(seqs, sampling)
+        drafts, draft_probs = self.drafter.propose(seqs, sampling)
         mark = self._mark("propose", mark)
         target_logits = self.verify_logits(seqs, drafts)
         mark = self._mark("verify", mark)
@@ -134,33 +177,6 @@ class SpeculativeDecoder:
             self.stats[f"accepted_{count}"] += 1
         self.stats["rounds"] += 1
         return appended
-
-    @torch.inference_mode()
-    def _propose(self, seqs: list[Sequence], sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """k draft steps through the draft's decode path; returns drafts [B, k] and probabilities [B, k, V] (None when greedy)."""
-        batch_size, k = len(seqs), self.num_drafts
-        metadata = decode_metadata(seqs, "draft", self.block_size, num_steps=k)
-        input_ids = self._device_tensor(metadata.input_ids, torch.int64)
-        positions = self._device_tensor(metadata.positions, torch.int64)
-        context_lens = self._device_tensor(metadata.context_lens, torch.int32)
-        slot_mapping = self._device_tensor(metadata.slot_mapping, torch.int32)          # [k, B]
-        block_tables = self._device_tensor(padded_block_tables(seqs, "draft"), torch.int32)
-        drafts = torch.empty(batch_size, k, dtype=torch.int64, device=self.device)
-        draft_probs = None
-        if sampling.temperatures is not None:
-            draft_probs = torch.empty(batch_size, k, self.vocab_size, dtype=torch.float32, device=self.device)
-        for step in range(k):
-            set_context(False, slot_mapping=slot_mapping[step], context_lens=context_lens + step, block_tables=block_tables)
-            logits = self.draft.run_model(input_ids, positions + step, False)
-            if draft_probs is None:
-                tokens = logits.argmax(dim=-1)
-            else:
-                draft_probs[:, step] = probs_from_logits(logits, sampling)
-                tokens = sample(draft_probs[:, step], self.target.generator)
-            drafts[:, step] = tokens
-            input_ids = tokens
-        reset_context()
-        return drafts, draft_probs
 
     @torch.inference_mode()
     def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor) -> torch.Tensor:
