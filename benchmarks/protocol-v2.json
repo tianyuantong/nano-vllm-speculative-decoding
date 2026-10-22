@@ -60,6 +60,9 @@
     "G2_multi": {"trials": 100000, "delta": 0.001, "k": [2, 3, 7]},
     "G2_real": {"scan_rounds": 64, "accept_mass": [0.2, 0.9], "accept_trials": 16384, "accept_tolerance": 0.02, "emit_trials": 100000, "delta": 0.001},
     "G1_wide": {"prompts": 8, "block_crossing_lengths": [1022, 2046], "batch": [1, 4, 16], "max_abs_delta": 0.5, "margin": 0.5},
+    "dflash_alignment": {"prompts": 8, "max_new_tokens": 256, "temperatures": [0.7, 1.0], "seeds": [17011, 110017, 130031],
+                         "rule": "per temperature, |mean of nano's runs - mean of DeepSpec's| <= 2 x the standard error of that difference from the per-run means",
+                         "revised": "2026-10-22 after the first runs: the per-round standard error treated the rounds of one prompt as independent; run-to-run spread (0.2-0.4) is far larger"},
     "G5": {"dataset": "openai/grade-school-math test.jsonl", "commit": null, "sha256": null, "rows": 1319, "concurrency": 32, "ci_low_min": -0.03, "max_unparseable": 0.02, "min_k0_accuracy": 0.80}
   },
   "external": {

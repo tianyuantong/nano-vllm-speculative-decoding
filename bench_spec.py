@@ -72,6 +72,30 @@ def kv_block_bytes(model_dir: str, block_size: int = 256) -> int:
     return 2 * config["num_hidden_layers"] * block_size * config["num_key_value_heads"] * head_dim * 2
 
 
+def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurrency: int, seed: int,
+                  models_root: str) -> tuple[str, str | None, dict]:
+    """Target directory, draft directory and LLM keyword arguments of one protocol line. Every line gets the target
+    KV budget of the largest k; a model draft gets the same block count in its own pool, DFlash's KV mirrors the
+    target's blocks."""
+    max_tokens = protocol["sampling"]["max_tokens"]
+    budget_k = max(spec["k"] for spec in protocol["lines"].values())
+    target = f"{models_root}/{protocol['models']['target']}"
+    kwargs = dict(max_model_len=protocol["max_model_len"], max_num_seqs=concurrency,
+                  max_num_batched_tokens=protocol["max_num_batched_tokens"], enable_prefix_cache=False,
+                  kv_cache_memory_bytes=kv_budget_bytes(panel, concurrency, max_tokens, budget_k, kv_block_bytes(target)),
+                  seed=seed, record_step_timings=True)
+    draft = None
+    if line["drafter"] is not None:
+        draft = f"{models_root}/{protocol['models']['drafts'][line['drafter']]}"
+        kwargs.update(draft_model=draft, num_speculative_tokens=line["k"])
+        if line["drafter"] == "dflash":
+            kwargs.update(draft_type="dflash")
+        else:
+            kwargs.update(draft_kv_cache_memory_bytes=kv_budget_bytes(panel, concurrency, max_tokens, budget_k,
+                                                                      kv_block_bytes(draft)))
+    return target, draft, kwargs
+
+
 def run_closed_loop(llm, panel: list[PanelEntry], params, concurrency: int) -> ClosedLoopRecord:
     """Before every step() top the engine up to C requests; after it, record each in-flight request's new tokens
     as one delivery. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
@@ -160,19 +184,7 @@ def closed_loop(args: argparse.Namespace) -> None:
     panel = load_panel(panel_path, args.concurrency, panel_spec["take"])
     line = protocol["lines"][args.line]
     sampling = protocol["sampling"]
-    budget_k = max(spec["k"] for spec in protocol["lines"].values())    # every line gets the same budget
-    target = f"{args.models_root}/{protocol['models']['target']}"
-    kwargs = dict(max_model_len=protocol["max_model_len"], max_num_seqs=args.concurrency,
-                  max_num_batched_tokens=protocol["max_num_batched_tokens"], enable_prefix_cache=False,
-                  kv_cache_memory_bytes=kv_budget_bytes(panel, args.concurrency, sampling["max_tokens"], budget_k,
-                                                        kv_block_bytes(target)),
-                  seed=args.seed, record_step_timings=True)
-    draft = None
-    if line["drafter"] is not None:
-        draft = f"{args.models_root}/{protocol['models']['drafts'][line['drafter']]}"
-        kwargs.update(draft_model=draft, num_speculative_tokens=line["k"],
-                      draft_kv_cache_memory_bytes=kv_budget_bytes(panel, args.concurrency, sampling["max_tokens"],
-                                                                  budget_k, kv_block_bytes(draft)))
+    target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
     llm = LLM(target, **kwargs)
     rec = dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
                ignore_eos=sampling["ignore_eos"])
@@ -192,7 +204,7 @@ def closed_loop(args: argparse.Namespace) -> None:
               "repeat": args.repeat, "num_requests": len(panel), "sampling": {**rec, "max_tokens": sampling["max_tokens"]},
               "target": target, "draft": draft,
               **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                  "draft_kv_cache_memory_bytes")}}
+                                                  "draft_kv_cache_memory_bytes", "draft_type")}}
     result = build_result(
         protocol_sha256=hashlib.sha256(protocol_text.encode()).hexdigest(),
         manifest={**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
