@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bench_spec import (RESULT_KEYS, assert_gpu, build_result, gpu_state, installed_packages, kv_budget_bytes,
-                        load_panel, run_closed_loop)
+from bench_spec import (ROOT, RESULT_KEYS, assert_gpu, build_result, engine_kwargs, gpu_state, installed_packages,
+                        kv_budget_bytes, load_panel, run_closed_loop)
 
 TARGET_BLOCK, DRAFT_BLOCK = 37_748_736, 29_360_128
 
@@ -144,3 +144,20 @@ def test_installed_packages():
 def test_build_result_has_the_schema_keys():
     result = build_result(**{key: None for key in RESULT_KEYS[1:]})
     assert set(result) == set(RESULT_KEYS) and result["schema"] == "bench-v2"
+
+
+def test_engine_kwargs_follow_the_protocol_lines(tmp_path):
+    protocol = json.loads((ROOT / "benchmarks" / "protocol-v2.json").read_text())
+    for directory in [protocol["models"]["target"], *protocol["models"]["drafts"].values()]:
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "config.json").write_text(
+            json.dumps({"num_hidden_layers": 2, "num_key_value_heads": 1, "head_dim": 2}))
+    panel = [{"prompt_token_ids": [0] * 100}]
+    kwargs = {name: engine_kwargs(protocol, line, panel, 8, 17011, str(tmp_path))[2]
+              for name, line in protocol["lines"].items()}
+    assert len({value["kv_cache_memory_bytes"] for value in kwargs.values()}) == 1    # one target budget for every line
+    assert "draft_model" not in kwargs["k0"]
+    assert kwargs["model_k3"]["num_speculative_tokens"] == 3 and kwargs["model_k3"]["draft_kv_cache_memory_bytes"] > 0
+    assert "draft_type" not in kwargs["model_k3"]
+    assert kwargs["dflash_k7"]["draft_type"] == "dflash" and kwargs["dflash_k7"]["num_speculative_tokens"] == 7
+    assert "draft_kv_cache_memory_bytes" not in kwargs["dflash_k7"]
