@@ -160,4 +160,5 @@ class Scheduler:
             if seq.is_finished:
                 continue
             seq.target_kv.num_cached_tokens = len(seq) - 1
-            seq.draft_kv.num_cached_tokens = min(len_before - 1 + k, len(seq) - 1)
+            if self.draft_block_manager is not None:    # a model draft; DFlash's context K/V follows the target's
+                seq.draft_kv.num_cached_tokens = min(len_before - 1 + k, len(seq) - 1)

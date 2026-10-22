@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from nanovllm.engine.batch_metadata import decode_metadata, padded_block_tables, verify_metadata
+from nanovllm.engine.batch_metadata import (decode_metadata, draft_block_metadata, padded_block_tables,
+                                            prefill_metadata, verify_metadata)
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.spec_sampler import (
     SamplingTensors,
@@ -35,8 +36,9 @@ class ModelDrafter:
         self.decoder = decoder    # block size, k, vocabulary, device, the target's generator and the round stats
 
     @torch.inference_mode()
-    def prefill(self, seqs: list[Sequence]) -> None:
-        """Run the draft over the chunk the target just prefilled; the scheduler set draft_kv.num_scheduled_tokens."""
+    def prefill(self, seqs: list[Sequence], aux: None) -> None:
+        """Run the draft over the chunk the target just prefilled; the scheduler set draft_kv.num_scheduled_tokens.
+        aux is None: this draft reads tokens, not target features."""
         input_ids, positions = self.draft.prepare_prefill(seqs)
         self.draft.run_model(input_ids, positions, True, need_logits=False)
         reset_context()
@@ -48,6 +50,8 @@ class ModelDrafter:
         step of the draft through its decode graph; no logits are needed.
         """
         decoder = self.decoder
+        for seq in seqs:
+            assert len(seq) - 2 <= seq.draft_kv.num_cached_tokens <= len(seq) - 1
         lagging = [seq for seq in seqs if seq.draft_kv.num_cached_tokens < len(seq) - 1]
         if not lagging:
             return
@@ -92,17 +96,90 @@ class ModelDrafter:
         return drafts, draft_probs
 
 
-class SpeculativeDecoder:
-    """Draft catch-up, k draft steps, one verification forward, batched acceptance, one D2H copy.
+class DFlashDrafter:
+    """DeepSpec's DFlash draft: one forward over a block [anchor, mask x (k-1)] proposes k drafts.
 
-    Round-entry invariants (asserted): target KV covers len-1 positions; draft KV covers
-    len-2 or len-1. Every active sequence proposes exactly k drafts, so the verification
-    shape is (B, k+1) and a graph keyed by the padded batch size always matches.
+    Its KV holds context K/V computed from the target's aux features, written for every position the target
+    computes: each prefilled chunk, and all k+1 positions of each verification. A rejected position is
+    overwritten by the next block before any block reads it, so at round entry the context covers len-1
+    positions, like the target's KV. It shares the target's block table: same block count, same pad block.
     """
 
-    def __init__(self, target: ModelRunner, draft: ModelRunner, config: Config):
+    def __init__(self, config: Config, decoder: SpeculativeDecoder):
+        from transformers import AutoConfig
+        from nanovllm.models.dflash import DFlashDraftModel
+        from nanovllm.utils.loader import load_model
+
+        self.decoder = decoder
+        hf_config = AutoConfig.from_pretrained(config.draft_model)
+        default_dtype, default_device = torch.get_default_dtype(), torch.get_default_device()
+        try:
+            torch.set_default_dtype(config.hf_config.dtype)
+            torch.set_default_device(decoder.device)
+            self.model = DFlashDraftModel(hf_config)
+            load_model(self.model, config.draft_model)
+            head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
+            self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks + 1,
+                                        config.kvcache_block_size, hf_config.num_key_value_heads, head_dim)
+        finally:
+            torch.set_default_device(default_device)
+            torch.set_default_dtype(default_dtype)
+        for layer_id, layer in enumerate(self.model.layers):
+            layer.self_attn.attn.k_cache = self.kv_cache[0, layer_id]
+            layer.self_attn.attn.v_cache = self.kv_cache[1, layer_id]
+        decoder.target.model.model.aux_layer_ids = self.model.aux_layer_ids
+        self.aux_width = len(self.model.aux_layer_ids) * hf_config.hidden_size
+        self.aux_dtype = config.hf_config.dtype
+
+    @torch.inference_mode()
+    def prefill(self, seqs: list[Sequence], aux: torch.Tensor) -> None:
+        """Context K/V of the chunk the target just prefilled, from the aux features its forward exported."""
+        decoder = self.decoder
+        metadata = prefill_metadata(seqs, "target", decoder.block_size)
+        self.model.store_context_kv(self.model.context_features(aux),
+                                    decoder._device_tensor(metadata.positions, torch.int64),
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
+
+    @torch.inference_mode()
+    def propose(self, seqs: list[Sequence], sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """One block forward; returns drafts [B, k] and probabilities [B, k, V] (None when greedy)."""
+        decoder, k = self.decoder, self.decoder.num_drafts
+        metadata = draft_block_metadata(seqs, decoder.block_size, k, self.model.mask_token_id)
+        set_context(False, slot_mapping=decoder._device_tensor(metadata.slot_mapping, torch.int32),
+                    context_lens=decoder._device_tensor(metadata.context_lens, torch.int32),
+                    block_tables=decoder._device_tensor(padded_block_tables(seqs, "target"), torch.int32),
+                    query_len_per_seq=k, causal=False)
+        hidden = self.model(decoder._device_tensor(metadata.input_ids, torch.int64),
+                            decoder._device_tensor(metadata.positions, torch.int64))
+        reset_context()
+        logits = self.model.compute_logits(hidden).view(len(seqs), k, -1)
+        if sampling.temperatures is None:
+            return logits.argmax(dim=-1), None
+        draft_probs = probs_from_logits(logits, sampling)
+        return sample(draft_probs, decoder.target.generator), draft_probs
+
+    @torch.inference_mode()
+    def after_verify(self, seqs: list[Sequence], aux: torch.Tensor) -> None:
+        """Context K/V of all k+1 verified positions, from the aux features the verification exported."""
+        decoder = self.decoder
+        width = max(len(seq.target_kv.block_table) for seq in seqs)
+        metadata = verify_metadata(seqs, decoder.num_drafts, decoder.block_size, len(seqs), decoder.target.pad_block_id, width)
+        self.model.store_context_kv(self.model.context_features(aux),
+                                    decoder._device_tensor(metadata.positions, torch.int64),
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
+
+
+class SpeculativeDecoder:
+    """Drafts, one verification forward, batched acceptance, one D2H copy.
+
+    The drafter is a ModelDrafter when a draft ModelRunner is given (draft_type "model"), else a DFlashDrafter.
+    Round-entry invariant (asserted): target KV covers len-1 positions; each drafter asserts its own. Every
+    active sequence proposes exactly k drafts, so the verification shape is (B, k+1) and a graph keyed by the
+    padded batch size always matches.
+    """
+
+    def __init__(self, target: ModelRunner, draft: ModelRunner | None, config: Config):
         self.target = target
-        self.drafter = ModelDrafter(draft, self)
         self.num_drafts = config.num_speculative_tokens
         self.block_size = config.kvcache_block_size
         self.max_model_len = config.max_model_len
@@ -116,12 +193,20 @@ class SpeculativeDecoder:
         self._phase_events: list[tuple[str, object, object]] = []
         self._new_event = None
         self._synchronize = None
+        self.drafter = ModelDrafter(draft, self) if draft is not None else DFlashDrafter(config, self)
 
-    # ------------------------------------------------------------------ draft KV only
+    # ------------------------------------------------------------------ prefill
+    def prefill_aux(self, seqs: list[Sequence]) -> torch.Tensor | None:
+        """The buffer the target's prefill exports aux features into: DFlash only."""
+        if not isinstance(self.drafter, DFlashDrafter):
+            return None
+        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs)
+        return torch.empty(num_tokens, self.drafter.aux_width, dtype=self.drafter.aux_dtype, device=self.device)
+
     @torch.inference_mode()
-    def prefill_draft(self, seqs: list[Sequence]) -> None:
-        """Run the draft over the chunk the target just prefilled."""
-        self.drafter.prefill(seqs)
+    def prefill_draft(self, seqs: list[Sequence], aux: torch.Tensor | None = None) -> None:
+        """Bring the draft's KV up to the chunk the target just prefilled."""
+        self.drafter.prefill(seqs, aux)
 
     # ------------------------------------------------------------------ phase timings
     def enable_phase_timings(self, event_factory=None, synchronize=None) -> None:
@@ -153,15 +238,22 @@ class SpeculativeDecoder:
         """Return, per sequence, the accepted drafts followed by the tail token."""
         for seq in seqs:
             assert seq.target_kv.num_cached_tokens == len(seq) - 1
-            assert len(seq) - 2 <= seq.draft_kv.num_cached_tokens <= len(seq) - 1
         mark = self._mark("start", None)
-        self.drafter.catch_up(seqs)
-        mark = self._mark("catch_up", mark)
+        if isinstance(self.drafter, ModelDrafter):
+            self.drafter.catch_up(seqs)
+            mark = self._mark("catch_up", mark)
         sampling = sampling_tensors(seqs, self.device)
         drafts, draft_probs = self.drafter.propose(seqs, sampling)
         mark = self._mark("propose", mark)
-        target_logits = self.verify_logits(seqs, drafts)
+        aux = None
+        if isinstance(self.drafter, DFlashDrafter):
+            aux = torch.empty(len(seqs) * (self.num_drafts + 1), self.drafter.aux_width, dtype=self.drafter.aux_dtype,
+                              device=self.device)
+        target_logits = self.verify_logits(seqs, drafts, aux)
         mark = self._mark("verify", mark)
+        if aux is not None:
+            self.drafter.after_verify(seqs, aux)
+            mark = self._mark("ctx_store", mark)
         if sampling.temperatures is None:
             n_accept, tail = accept_greedy(target_logits, drafts)
         else:
@@ -179,14 +271,15 @@ class SpeculativeDecoder:
         return appended
 
     @torch.inference_mode()
-    def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor) -> torch.Tensor:
-        """Target logits at the k+1 positions [last token, d1..dk] of every sequence: [B, k+1, V]."""
+    def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None) -> torch.Tensor:
+        """Target logits at the k+1 positions [last token, d1..dk] of every sequence: [B, k+1, V].
+        aux_out [B*(k+1), aux width] receives the target's aux features (DFlash; eager only until its graphs exist)."""
         batch_size, query_len = len(seqs), self.num_drafts + 1
-        hidden = self._verify_graph(seqs, drafts) if self.graphs else self._verify_eager(seqs, drafts)
+        hidden = self._verify_graph(seqs, drafts) if self.graphs else self._verify_eager(seqs, drafts, aux_out)
         logits = self.target.model.compute_logits(hidden, all_logits=True)
         return logits.view(batch_size, query_len, -1)
 
-    def _verify_eager(self, seqs: list[Sequence], drafts: torch.Tensor) -> torch.Tensor:
+    def _verify_eager(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None) -> torch.Tensor:
         batch_size, query_len = len(seqs), self.num_drafts + 1
         width = max(len(seq.target_kv.block_table) for seq in seqs)
         metadata = verify_metadata(seqs, self.num_drafts, self.block_size, batch_size, self.target.pad_block_id, width)
@@ -199,7 +292,7 @@ class SpeculativeDecoder:
                     query_len, self.max_model_len,
                     self._device_tensor(metadata.slot_mapping, torch.int32), None,
                     self._device_tensor(metadata.block_tables, torch.int32))
-        hidden = self.target.run_model(input_ids, positions, True, need_logits=False)
+        hidden = self.target.run_model(input_ids, positions, True, need_logits=False, aux_out=aux_out)
         reset_context()
         return hidden
 
