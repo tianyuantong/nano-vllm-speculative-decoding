@@ -47,3 +47,26 @@ def test_draft_rejects_batch_sizes_beyond_the_graph_table(model_dir):
     Config(model_dir, max_num_seqs=512, **kwargs)
     with pytest.raises(ValueError):
         Config(model_dir, max_num_seqs=513, **kwargs)
+
+
+@pytest.fixture
+def dflash_dir(tmp_path):
+    directory = tmp_path / "dflash"
+    directory.mkdir()
+    (directory / "config.json").write_text(json.dumps({**TINY_QWEN3, "block_size": 7, "mask_token_id": 127,
+                                                       "target_layer_ids": [0]}))
+    return str(directory)
+
+
+def test_dflash_takes_k_from_its_block_and_needs_no_draft_budget(model_dir, dflash_dir):
+    config = Config(model_dir, draft_model=dflash_dir, draft_type="dflash", enable_prefix_cache=False,
+                    kv_cache_memory_bytes=1 << 20, enforce_eager=True)
+    assert config.num_speculative_tokens == 7 and config.draft_kv_cache_memory_bytes is None
+
+
+def test_dflash_rejects_another_k_and_unknown_draft_types(model_dir, dflash_dir):
+    kwargs = dict(draft_model=dflash_dir, enable_prefix_cache=False, kv_cache_memory_bytes=1 << 20, enforce_eager=True)
+    with pytest.raises(ValueError):
+        Config(model_dir, draft_type="dflash", num_speculative_tokens=3, **kwargs)
+    with pytest.raises(ValueError):
+        Config(model_dir, draft_type="DFlash", **kwargs)
