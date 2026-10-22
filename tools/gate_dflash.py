@@ -14,6 +14,7 @@ import json
 import math
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 
 import torch
@@ -84,16 +85,20 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
               enable_prefix_cache=False, kv_cache_memory_bytes=4 * GIB, seed=seed)
     rows = []
     for name, result in reference.items():
-        llm.speculative.stats.clear()
-        llm.generate(prompts, SamplingParams(temperature=result["temperature"], max_tokens=manifest["max_new_tokens"]),
-                     use_tqdm=False)
-        nano = {count + 1: llm.speculative.stats[f"accepted_{count}"] for count in range(llm.speculative.num_drafts + 1)}
-        nano_mean, nano_error, nano_rounds = mean_and_error({k: v for k, v in nano.items() if v})
+        histogram, per_prompt = Counter(), []
+        for prompt in prompts:    # one at a time: generate() restarts the acceptance counts, so they are this prompt's
+            llm.generate([prompt], SamplingParams(temperature=result["temperature"], max_tokens=manifest["max_new_tokens"]),
+                         use_tqdm=False)
+            counts = {count + 1: llm.speculative.stats[f"accepted_{count}"] for count in range(llm.speculative.num_drafts + 1)}
+            histogram.update(counts)
+            per_prompt.append(sum(tokens * rounds for tokens, rounds in counts.items()) / sum(counts.values()))
+        nano_mean, nano_error, nano_rounds = mean_and_error({k: v for k, v in histogram.items() if v})
         ref_mean, ref_error, ref_rounds = mean_and_error({int(k): v for k, v in result["histogram"].items()})
         bound = 2 * math.hypot(nano_error, ref_error)
         rows.append({"sampling": name, "nano": nano_mean, "nano_rounds": nano_rounds, "deepspec": ref_mean,
                      "deepspec_rounds": ref_rounds, "difference": nano_mean - ref_mean, "bound": bound,
-                     "passed": abs(nano_mean - ref_mean) <= bound})
+                     "passed": abs(nano_mean - ref_mean) <= bound, "nano_per_prompt": per_prompt,
+                     "deepspec_per_prompt": [prompt["tokens_per_round"] for prompt in result["per_prompt"]]})
     llm.exit()
     return {"gate": "tokens-per-round alignment", "passed": all(row["passed"] for row in rows),
             "threshold": "|nano - deepspec| <= 2 x combined standard error", "rows": rows}
