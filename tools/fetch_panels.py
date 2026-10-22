@@ -18,12 +18,18 @@ GROUP_SIZE = 4
 DEFAULT_OUTPUT = Path("benchmarks/inputs/panel-48.json")
 
 
+def normalize_category(sub_category: str) -> str:
+    """SPEED-Bench sub-category without the creative-writing topic: "creative_writing_Finance & Business" -> "creative_writing"."""
+    return "creative_writing" if sub_category.startswith("creative_writing") else sub_category
+
+
 def select_panel(a1_samples: list[dict], a2_samples: list[dict]) -> list[dict]:
     chosen = []
     for panel, samples, groups in (("A1", a1_samples, A1_GROUPS), ("A2", a2_samples, A2_GROUPS)):
         for group in groups:
             for sample in samples[group * GROUP_SIZE:(group + 1) * GROUP_SIZE]:
                 chosen.append({"id": sample["question_id"], "panel": panel, "group": group,
+                               "category": normalize_category(sample["sub_category"]),
                                "prompt_token_ids": sample["prompt_token_ids"]})
     return chosen
 
