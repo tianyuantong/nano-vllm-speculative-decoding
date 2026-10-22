@@ -47,8 +47,6 @@ class Config:
         if self.draft_type not in ("model", "dflash"):
             raise ValueError(f"draft_type must be 'model' or 'dflash', not {self.draft_type!r}")
         if self.draft_type == "dflash":
-            if not self.enforce_eager:
-                raise ValueError("the DFlash path has no CUDA graphs yet (port plan Task 14): pass enforce_eager=True")
             block_size = AutoConfig.from_pretrained(self.draft_model).block_size
             if self.num_speculative_tokens not in (0, block_size):
                 raise ValueError(f"a DFlash draft proposes its block size ({block_size}) tokens per round")

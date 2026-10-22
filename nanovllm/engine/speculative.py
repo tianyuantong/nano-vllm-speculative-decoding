@@ -245,10 +245,7 @@ class SpeculativeDecoder:
         sampling = sampling_tensors(seqs, self.device)
         drafts, draft_probs = self.drafter.propose(seqs, sampling)
         mark = self._mark("propose", mark)
-        aux = None
-        if isinstance(self.drafter, DFlashDrafter):
-            aux = torch.empty(len(seqs) * (self.num_drafts + 1), self.drafter.aux_width, dtype=self.drafter.aux_dtype,
-                              device=self.device)
+        aux = self._aux_buffer(len(seqs)) if isinstance(self.drafter, DFlashDrafter) else None
         target_logits = self.verify_logits(seqs, drafts, aux)
         mark = self._mark("verify", mark)
         if aux is not None:
@@ -270,10 +267,19 @@ class SpeculativeDecoder:
         self.stats["rounds"] += 1
         return appended
 
+    def _aux_buffer(self, batch_size: int) -> torch.Tensor:
+        """Where the verification of batch_size rows writes the aux features: the verify graph's buffer when the
+        graphs exist, a new tensor otherwise."""
+        rows = batch_size * (self.num_drafts + 1)
+        if self.graphs:
+            return self.graph_vars["aux"][:rows]
+        return torch.empty(rows, self.drafter.aux_width, dtype=self.drafter.aux_dtype, device=self.device)
+
     @torch.inference_mode()
     def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None) -> torch.Tensor:
         """Target logits at the k+1 positions [last token, d1..dk] of every sequence: [B, k+1, V].
-        aux_out [B*(k+1), aux width] receives the target's aux features (DFlash; eager only until its graphs exist)."""
+        aux_out [B*(k+1), aux width] receives the target's aux features (DFlash). With graphs the verification
+        writes them into its own buffer, so aux_out must be the slice of it that _aux_buffer returns."""
         batch_size, query_len = len(seqs), self.num_drafts + 1
         hidden = self._verify_graph(seqs, drafts) if self.graphs else self._verify_eager(seqs, drafts, aux_out)
         logits = self.target.model.compute_logits(hidden, all_logits=True)
@@ -331,6 +337,9 @@ class SpeculativeDecoder:
             "block_tables": self._device_tensor(all_padding.block_tables, torch.int32),
             "outputs": torch.zeros(max_batch_size * query_len, hf_config.hidden_size, dtype=hf_config.dtype, device=self.device),
         }
+        if isinstance(self.drafter, DFlashDrafter):    # the graphs also export the target's aux features
+            self.graph_vars["aux"] = torch.zeros(max_batch_size * query_len, self.drafter.aux_width,
+                                                 dtype=self.drafter.aux_dtype, device=self.device)
         with torch.device(self.device):
             for batch_size in reversed(self.graph_batch_sizes):
                 rows = batch_size * query_len
@@ -344,7 +353,8 @@ class SpeculativeDecoder:
                 reset_context()
 
     def _graph_forward(self, rows: int) -> torch.Tensor:
-        return self.target.model(self.graph_vars["input_ids"][:rows], self.graph_vars["positions"][:rows])
+        aux = self.graph_vars["aux"][:rows] if "aux" in self.graph_vars else None
+        return self.target.model(self.graph_vars["input_ids"][:rows], self.graph_vars["positions"][:rows], aux)
 
     def _set_graph_context(self, batch_size: int) -> None:
         rows = batch_size * (self.num_drafts + 1)
