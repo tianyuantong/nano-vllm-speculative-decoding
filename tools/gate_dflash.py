@@ -7,17 +7,21 @@
           reference's prompts, against the reference's. Pass: |difference| <= 2 x the combined standard error.
   graphs  the verify graph (it exports the aux features) against the eager verification on the same rows and drafts.
           Pass: logits and aux bit-identical at a captured batch size; a batch padded up to one is reported only.
+  alignment  the protocol's dflash_alignment rule over several `rounds` results (one per seed): per sampling, the mean
+          of nano's runs against the mean of DeepSpec's. Pass: |difference| <= 2 x the standard error of that
+          difference, computed from the per-run means.
 
   python tools/gate_dflash.py draft  --draft DIR --reference DIR --out FILE
   python tools/gate_dflash.py rounds --target DIR --draft DIR --reference DIR --panel FILE --out FILE
   python tools/gate_dflash.py graphs --target DIR --draft DIR --panel FILE --out FILE
+  python tools/gate_dflash.py alignment --runs FILE [FILE ...] --out FILE
 """
 import argparse
 import json
 import math
 import statistics
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
@@ -139,22 +143,46 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
             "threshold": "bit-identical logits and aux at a captured batch size", "rows": rows}
 
 
+def check_alignment(paths: list[Path]) -> dict:
+    runs = defaultdict(lambda: {"nano": [], "deepspec": []})
+    for path in paths:
+        for row in json.loads(path.read_text())["rows"]:
+            runs[row["sampling"]]["nano"].append(row["nano"])
+            runs[row["sampling"]]["deepspec"].append(row["deepspec"])
+    rows = []
+    for sampling, values in sorted(runs.items()):
+        nano, deepspec = values["nano"], values["deepspec"]
+        difference = statistics.fmean(nano) - statistics.fmean(deepspec)
+        row = {"sampling": sampling, "nano_runs": nano, "deepspec_runs": deepspec, "difference": difference}
+        if min(len(nano), len(deepspec)) < 2:
+            rows.append({**row, "bound": None, "passed": False, "note": "needs at least 2 runs per side"})
+            continue
+        error = math.sqrt(statistics.variance(nano) / len(nano) + statistics.variance(deepspec) / len(deepspec))
+        rows.append({**row, "bound": 2 * error, "passed": abs(difference) <= 2 * error})
+    return {"gate": "tokens-per-round alignment over runs", "passed": all(row["passed"] for row in rows),
+            "threshold": "|mean(nano runs) - mean(deepspec runs)| <= 2 x the standard error from the per-run means",
+            "rows": rows}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("check", choices=["draft", "rounds", "graphs"])
+    parser.add_argument("check", choices=["draft", "rounds", "graphs", "alignment"])
     parser.add_argument("--target")
-    parser.add_argument("--draft", required=True)
+    parser.add_argument("--draft")
     parser.add_argument("--reference", type=Path, help="output directory of ref_dflash_deepspec.py (draft, rounds)")
     parser.add_argument("--panel", type=Path)
     parser.add_argument("--seed", type=int, default=17011)
+    parser.add_argument("--runs", type=Path, nargs="+", help="rounds results, one per seed (alignment)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.check == "draft":
         result = check_draft(args.draft, args.reference)
     elif args.check == "rounds":
         result = check_rounds(args.target, args.draft, args.reference, args.panel, args.seed)
-    else:
+    elif args.check == "graphs":
         result = check_graphs(args.target, args.draft, args.panel, args.seed)
+    else:
+        result = check_alignment(args.runs)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
