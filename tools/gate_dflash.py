@@ -5,9 +5,12 @@
           row whose reference top-2 margin exceeds 0.5 (G1-wide's rule), and max |delta| / max |logit| <= 2e-2.
   rounds  tokens per round of the whole nano engine with the DFlash draft (eager, C=1, temperature-only) on the
           reference's prompts, against the reference's. Pass: |difference| <= 2 x the combined standard error.
+  graphs  the verify graph (it exports the aux features) against the eager verification on the same rows and drafts.
+          Pass: logits and aux bit-identical at a captured batch size; a batch padded up to one is reported only.
 
   python tools/gate_dflash.py draft  --draft DIR --reference DIR --out FILE
   python tools/gate_dflash.py rounds --target DIR --draft DIR --reference DIR --panel FILE --out FILE
+  python tools/gate_dflash.py graphs --target DIR --draft DIR --panel FILE --out FILE
 """
 import argparse
 import json
@@ -104,20 +107,54 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
             "threshold": "|nano - deepspec| <= 2 x combined standard error", "rows": rows}
 
 
+def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
+    from nanovllm import LLM, SamplingParams
+
+    llm = LLM(target, draft_model=draft, draft_type="dflash", max_num_seqs=8, enable_prefix_cache=False,
+              kv_cache_memory_bytes=8 * GIB, seed=seed)
+    spec = llm.speculative
+    for entry in json.loads(panel.read_text())[:4]:
+        llm.add_request(entry["prompt_token_ids"], SamplingParams(temperature=1.0, max_tokens=64))
+    while llm.scheduler.waiting:
+        llm.step()                                 # prefill: context K/V and the first tokens
+    seqs, _ = llm.scheduler.schedule()             # a decode schedule reserves the blocks one round writes
+    generator = torch.Generator(device=spec.device).manual_seed(seed)
+    rows = []
+    for batch_size in (4, 3):
+        batch, query_len = seqs[:batch_size], spec.num_drafts + 1
+        drafts = torch.randint(0, spec.vocab_size, (batch_size, spec.num_drafts), device=spec.device, generator=generator)
+        with torch.inference_mode():
+            eager_aux = torch.empty(batch_size * query_len, spec.drafter.aux_width, dtype=spec.drafter.aux_dtype,
+                                    device=spec.device)
+            eager = spec.target.model.compute_logits(spec._verify_eager(batch, drafts, eager_aux), all_logits=True)
+            graph = spec.target.model.compute_logits(spec._verify_graph(batch, drafts), all_logits=True)
+            graph_aux = spec.graph_vars["aux"][:batch_size * query_len]
+        rows.append({"batch": batch_size, "captured_size": batch_size in spec.graph_batch_sizes,
+                     "logits_equal": torch.equal(eager, graph), "aux_equal": torch.equal(eager_aux, graph_aux),
+                     "logits_max_abs_diff": float((eager.float() - graph.float()).abs().max()),
+                     "aux_max_abs_diff": float((eager_aux.float() - graph_aux.float()).abs().max())})
+    llm.exit()
+    passed = all(row["logits_equal"] and row["aux_equal"] for row in rows if row["captured_size"])
+    return {"gate": "verify graph against eager", "passed": passed,
+            "threshold": "bit-identical logits and aux at a captured batch size", "rows": rows}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("check", choices=["draft", "rounds"])
+    parser.add_argument("check", choices=["draft", "rounds", "graphs"])
     parser.add_argument("--target")
     parser.add_argument("--draft", required=True)
-    parser.add_argument("--reference", type=Path, required=True, help="output directory of ref_dflash_deepspec.py")
+    parser.add_argument("--reference", type=Path, help="output directory of ref_dflash_deepspec.py (draft, rounds)")
     parser.add_argument("--panel", type=Path)
     parser.add_argument("--seed", type=int, default=17011)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.check == "draft":
         result = check_draft(args.draft, args.reference)
-    else:
+    elif args.check == "rounds":
         result = check_rounds(args.target, args.draft, args.reference, args.panel, args.seed)
+    else:
+        result = check_graphs(args.target, args.draft, args.panel, args.seed)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
