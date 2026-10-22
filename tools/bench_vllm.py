@@ -64,7 +64,7 @@ def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str)
     target = f"{models_root}/{protocol['models']['target']}"
     kwargs = dict(model=target, tokenizer=target, dtype=protocol["models"]["dtype"], tensor_parallel_size=1,
                   max_model_len=protocol["max_model_len"], max_num_seqs=concurrency,
-                  max_num_batched_tokens=vllm_settings["max_num_batched_tokens"], enable_prefix_caching=False,
+                  max_num_batched_tokens=protocol["max_num_batched_tokens"], enable_prefix_caching=False,
                   enable_chunked_prefill=True, async_scheduling=False, enforce_eager=False,
                   kv_cache_memory_bytes=vllm_settings["kv_cache_bytes"], generation_config="vllm",
                   seed=protocol["seeds"]["external"][0], disable_log_stats=False,

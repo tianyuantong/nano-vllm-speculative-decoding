@@ -18,6 +18,7 @@
     "dflash_k7": {"drafter": "dflash", "k": 7}
   },
   "max_model_len": 4096,
+  "max_num_batched_tokens": 16384,
   "concurrency": [1, 2, 4, 8, 16, 32, 64],
   "seeds": {
     "dev": [17011, 110017, 130031, 170041, 210011],
@@ -76,10 +77,9 @@
       "repeats": 2,
       "seed_rule": "seeds.external[0] seeds the engine; requests carry no seed, so each repeat draws new random numbers",
       "kv_cache_bytes": 34359738368,
-      "max_num_batched_tokens": 4096,
       "metric": "wall-clock Q_full"
     },
-    "cost_curve": {"batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 1024, "warmup": 25, "iters": 100, "report": ["median", "p95"]}
+    "cost_curve": {"batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 2048, "warmup": 25, "iters": 100, "report": ["median", "p95"]}
   },
   "confirm": {"panel": "K128", "concurrency": [1, 8, 32, 64], "versions": ["k0", "model_k3", "dflash_k7"], "date": "end of M2"}
 }

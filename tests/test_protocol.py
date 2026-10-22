@@ -4,7 +4,7 @@ from pathlib import Path
 
 PROTOCOL = json.loads((Path(__file__).resolve().parents[1] / "benchmarks" / "protocol-v2.json").read_text())
 
-TOP_LEVEL = {"version", "frozen", "gpu", "models", "sampling", "lines", "max_model_len", "concurrency", "seeds",
+TOP_LEVEL = {"version", "frozen", "gpu", "models", "sampling", "lines", "max_model_len", "max_num_batched_tokens", "concurrency", "seeds",
              "order", "panels", "kv_budget", "warmup", "metrics", "timing_noise", "decision", "invalid_if",
              "gates", "external", "confirm"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
