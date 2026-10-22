@@ -117,7 +117,7 @@ def make_decoder(is_right):
     decoder = Decoder(target, object(), config)    # builds a ModelDrafter, replaced below
     drafter = object.__new__(DFlashDrafter)
     drafter.decoder, drafter.model = decoder, FakeDFlash(decoder, is_right)
-    drafter.aux_width, drafter.aux_dtype = 2, torch.float32
+    drafter.aux_width, drafter.aux_dtype, drafter.graphs = 2, torch.float32, {}
     decoder.drafter = drafter
     return decoder, target, drafter.model
 
