@@ -84,7 +84,7 @@ class LLMEngine:
         for p in self.ps:
             p.join()
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams) -> Sequence:
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         budget = len(prompt) + sampling_params.max_tokens + self.config.num_speculative_tokens
@@ -92,6 +92,15 @@ class LLMEngine:
             raise ValueError(f"prompt ({len(prompt)}) + max_tokens + num_speculative_tokens exceeds max_model_len ({self.config.max_model_len})")
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+        return seq
+
+    def start_measurement(self) -> None:
+        """Forget earlier step timings, round phases and acceptance counts, and restart the step count."""
+        self.step_timer.reset()
+        if self.speculative is not None:
+            self.speculative.reset_phase_timings()
+            self.speculative.stats.clear()
+        self.num_steps = 0
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
@@ -145,10 +154,7 @@ class LLMEngine:
             sampling_params = [sampling_params] * len(prompts)
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
-        self.step_timer.reset()
-        if self.speculative is not None:
-            self.speculative.reset_phase_timings()
-        self.num_steps = 0
+        self.start_measurement()
         outputs = {}
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
