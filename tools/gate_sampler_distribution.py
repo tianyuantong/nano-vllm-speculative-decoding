@@ -3,7 +3,8 @@ analytic acceptance rate and emit the target distribution (bench-v2 design §3).
 cases (exact distributions, total variation < 0.01).
 
 The pair: prompt by prompt (D48), round by round through the engine, the first verified position whose accept mass
-sum(min(p, q)) lies in [0.2, 0.9]; only that rule picks it. Sliced to the tokens where p or q is positive (no other
+sum(min(p, q)) lies in [0.2, 0.9] and whose draft distribution q is positive on at least 2 tokens; only that rule
+picks it. Sliced to the tokens where p or q is positive (no other
 token can be drawn), k=1 rounds through sample() and accept_random(): (a) 16384 acceptance draws within 0.02 of the
 accept mass; (b) 100000 first emitted tokens, every frequency within the Hoeffding bound sqrt(ln(2M/delta) / 2N) of
 p, M the support size, delta 0.001.
@@ -58,9 +59,10 @@ def reference_cases(device) -> list[dict]:
 
 
 def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, low: float, high: float,
-                       max_rounds: int) -> RealPosition:
+                       max_rounds: int, min_draft_support: int) -> RealPosition:
     """Prompt by prompt, round by round, look at each round's first verified position; return the first whose
-    sum(min(p, q)) lies in [low, high]. Only this rule picks the position; the checks never feed back into it."""
+    sum(min(p, q)) lies in [low, high] and whose q is positive on at least min_draft_support tokens. Only this rule
+    picks the position; the checks never feed back into it."""
     decoder = llm.speculative
     propose, verify = decoder.drafter.propose, decoder.verify_logits
     seen = {}
@@ -88,7 +90,7 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
                     continue
                 p, q = seen["p"], seen["q"]
                 mass = torch.minimum(p, q).sum().item()
-                if low <= mass <= high:
+                if low <= mass <= high and int((q > 0).sum()) >= min_draft_support:
                     support = ((p > 0) | (q > 0)).nonzero().squeeze(1)
                     return RealPosition(prompt_index=prompt_index, round=round_index, accept_mass=mass,
                                         support=support.tolist(), p=p[support].tolist(), q=q[support].tolist())
@@ -96,7 +98,8 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
                 round_index += 1
     finally:
         decoder.drafter.propose, decoder.verify_logits = propose, verify
-    raise RuntimeError(f"no verified position with accept mass in [{low}, {high}] within {max_rounds} rounds")
+    raise RuntimeError(f"no verified position with accept mass in [{low}, {high}] and a draft support of at least "
+                       f"{min_draft_support} within {max_rounds} rounds")
 
 
 def check_real_position(position: RealPosition, accept_trials: int, emit_trials: int, delta: float,
@@ -140,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                               max_tokens=rec["max_tokens"], ignore_eos=rec["ignore_eos"])
     low, high = gate["accept_mass"]
     position = pick_real_position(llm, [entry["prompt_token_ids"] for entry in panel], sampling, low, high,
-                                  gate["scan_rounds"])
+                                  gate["scan_rounds"], gate["min_draft_support"])
     llm.exit()
     device = torch.device("cuda")
     real = check_real_position(position, gate["accept_trials"], gate["emit_trials"], gate["delta"], device)
