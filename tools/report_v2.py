@@ -13,7 +13,7 @@ from itertools import combinations
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from summarize_bench import summarize_v2, tokens_per_round  # noqa: E402
+from summarize_bench import round_weighted_tokens, summarize_v2, tokens_per_round  # noqa: E402
 
 BASELINE = "k0"
 
@@ -69,6 +69,11 @@ def tokens_equal(result_a: dict, result_b: dict) -> bool:
            [request["token_ids"] for request in result_b["requests"]]
 
 
+def _median_or_dash(values: list[float | None]) -> str:
+    values = [value for value in values if value is not None]
+    return f"{statistics.median(values):.2f}" if values else "-"
+
+
 def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
     """runs: (name, result, summary) of every bench-v2 result file."""
     invalid = {name: invalid_reasons(result, summary, protocol) for name, result, summary in runs}
@@ -87,11 +92,13 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
                     invalid[run_name].append("timing-noise repeats differ in tokens")
     noise = timing_noise(pairs) if pairs else None
 
-    q = defaultdict(dict)    # (panel, C, seed) -> line -> (Q_steady, median tokens per round) of valid repeat-1 runs
+    q = defaultdict(dict)    # (panel, C, seed) -> line -> (Q_steady, tokens per round, its per-request median)
     for (panel, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
         if repeat == 1 and not invalid[name]:
-            per_round = [value for value in tokens_per_round(result["requests"]) if value is not None]
-            q[(panel, concurrency, seed)][line] = (summary["q_steady"], statistics.median(per_round) if per_round else None)
+            per_request = [value for value in tokens_per_round(result["requests"]) if value is not None]
+            weighted = round_weighted_tokens(result["speculative_stats"]) if result["speculative_stats"] else None
+            q[(panel, concurrency, seed)][line] = (summary["q_steady"], weighted,
+                                                   statistics.median(per_request) if per_request else None)
     panels = sorted({key[0] for key in q})
     concurrencies = sorted({key[1] for key in q})
     lines = [line for line in protocol["lines"] if line != BASELINE]
@@ -99,7 +106,9 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
     out = ["## Timing noise", "",
            f"N_t = {noise:.4f} from {len(pairs)} repeat pairs" if noise is not None else "N_t unavailable: no repeat pairs",
            "", "## R = Q_steady(line) / Q_steady(k0)", "",
-           "| panel | C | line | seeds | R | faster | tokens/round |", "|---|---:|---|---:|---|---|---:|"]
+           "tokens/round: sum of (accepted + 1) over all rounds ÷ rounds, as vLLM and DeepSpec count it. per-request: "
+           "the median over requests of each request's mean, the column earlier reports showed. Both are medians over seeds.",
+           "", "| panel | C | line | seeds | R | faster | tokens/round | per-request |", "|---|---:|---|---:|---|---|---:|---:|"]
     medians = defaultdict(dict)
     for panel in panels:
         for concurrency in concurrencies:
@@ -109,11 +118,11 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
                 if not runs_by_seed:
                     continue
                 ratios = [by_line[line][0] / by_line[BASELINE][0] for by_line in runs_by_seed.values()]
-                per_round = [by_line[line][1] for by_line in runs_by_seed.values() if by_line[line][1] is not None]
                 medians[(panel, line)][concurrency] = statistics.median(ratios)
                 faster = ("yes" if verdict_faster(ratios, noise) else "no") if noise is not None else "-"
-                tokens = f"{statistics.median(per_round):.2f}" if per_round else "-"
-                out.append(f"| {panel} | {concurrency} | {line} | {len(ratios)} | {format_range(ratios)} | {faster} | {tokens} |")
+                tokens = [_median_or_dash([by_line[line][index] for by_line in runs_by_seed.values()]) for index in (1, 2)]
+                out.append(f"| {panel} | {concurrency} | {line} | {len(ratios)} | {format_range(ratios)} | {faster} | "
+                           f"{tokens[0]} | {tokens[1]} |")
 
     out += ["", "## Crossover (smallest C with median R < 1)", ""]
     for (panel, line), by_concurrency in sorted(medians.items()):
