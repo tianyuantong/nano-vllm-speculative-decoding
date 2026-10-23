@@ -58,8 +58,9 @@
   ],
   "gates": {
     "G2_multi": {"trials": 100000, "delta": 0.001, "k": [2, 3, 7]},
-    "G2_real": {"scan_rounds": 64, "accept_mass": [0.2, 0.9], "min_draft_support": 2, "accept_trials": 16384, "accept_tolerance": 0.02, "emit_trials": 100000, "delta": 0.001,
-                "revised": "2026-10-23 after the first run: both lines picked the same position, where the target split 0.5/0.5 over two tokens and the draft put all its mass on one; a one-hot q tests only the trivial residual, so q must now be positive on at least min_draft_support tokens"},
+    "G2_real": {"scan_rounds": 64, "accept_mass": [0.2, 0.9], "min_draft_support": 2, "min_target_support": 2, "accept_trials": 16384, "accept_tolerance": 0.02, "emit_trials": 100000, "delta": 0.001,
+                "revised": "2026-10-23 after the first run: both lines picked the same position, where the target split 0.5/0.5 over two tokens and the draft put all its mass on one; a one-hot q tests only the trivial residual, so q must now be positive on at least min_draft_support tokens",
+                "revised_again": "2026-10-23 after the second run: both picked positions had a one-hot target p, so every rejection emits the one target token and the output-distribution check passes trivially (gap 0); p must now be positive on at least min_target_support tokens (decision D3)"},
     "G1_wide": {"prompts": 8, "block_crossing_lengths": [1022, 2046], "batch": [1, 4, 16], "floor_multiple": 2, "margin": 0.5,
                 "revised": "2026-10-23 after the first run: decode alone moves logits by up to 1.5 between B=1 and B=16 on these prompts, so the fixed bound 0.5 was below the reference path's own batch-size noise; the bound is now floor_multiple x the decode-only noise floor measured on the same prompts in the same job (the rule G1-aux had)"},
     "dflash_alignment": {"prompts": 8, "max_new_tokens": 256, "temperatures": [0.7, 1.0], "seeds": [17011, 110017, 130031],
