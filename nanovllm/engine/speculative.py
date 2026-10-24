@@ -97,7 +97,8 @@ class ModelDrafter:
 
 
 class DFlashDrafter:
-    """DeepSpec's DFlash draft: one forward over a block [anchor, mask x (k-1)] proposes k drafts.
+    """DeepSpec's block draft: one forward over a block [anchor, mask x (k-1)] proposes k drafts. DFlash samples
+    the k rows at once; DSpark, whose model has a Markov head, samples them left to right.
 
     Its KV holds context K/V computed from the target's aux features, written for every position the target
     computes: each prefilled chunk, and all k+1 positions of each verification. A rejected position is
@@ -150,10 +151,33 @@ class DFlashDrafter:
         decoder, k = self.decoder, self.decoder.num_drafts
         hidden = self._forward_graph(seqs) if self.graphs else self._forward_eager(seqs)
         logits = self.model.compute_logits(hidden).view(len(seqs), k, -1)
+        if self.model.markov_head is not None:
+            return self._sample_markov(seqs, logits, sampling)
         if sampling.temperatures is None:
             return logits.argmax(dim=-1), None
         draft_probs = probs_from_logits(logits, sampling)
         return sample(draft_probs, decoder.target.generator), draft_probs
+
+    def _sample_markov(self, seqs: list[Sequence], logits: torch.Tensor,
+                       sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """DSpark: row j's logits get the Markov bias of the token drawn at row j-1 (the anchor for row 0), so the
+        rows are drawn left to right, and each row's q is its distribution after its bias."""
+        decoder = self.decoder
+        batch_size, k, vocab_size = logits.shape
+        drafts = torch.empty(batch_size, k, dtype=torch.int64, device=decoder.device)
+        draft_probs = None
+        if sampling.temperatures is not None:
+            draft_probs = torch.empty(batch_size, k, vocab_size, dtype=torch.float32, device=decoder.device)
+        prev = decoder._device_tensor([seq.last_token for seq in seqs], torch.int64)
+        for row in range(k):
+            row_logits = logits[:, row] + self.model.markov_head(prev)
+            if draft_probs is None:
+                prev = row_logits.argmax(dim=-1)
+            else:
+                draft_probs[:, row] = probs_from_logits(row_logits, sampling)
+                prev = sample(draft_probs[:, row], decoder.target.generator)
+            drafts[:, row] = prev
+        return drafts, draft_probs
 
     def _forward_eager(self, seqs: list[Sequence]) -> torch.Tensor:
         decoder, k = self.decoder, self.decoder.num_drafts
