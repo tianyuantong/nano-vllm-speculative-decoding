@@ -74,8 +74,10 @@ def _median_or_dash(values: list[float | None]) -> str:
     return f"{statistics.median(values):.2f}" if values else "-"
 
 
-def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
-    """runs: (name, result, summary) of every bench-v2 result file."""
+def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict, list, dict]:
+    """The runs that count: each run's invalid reasons by name, the timing-noise pairs, and per (panel, C, seed) each
+    valid repeat-1 line's (Q_steady, tokens per round, its per-request median). A later run with the same
+    (panel, C, line, seed, repeat) replaces an earlier one, so a rerun directory listed last replaces the runs it repeats."""
     invalid = {name: invalid_reasons(result, summary, protocol) for name, result, summary in runs}
     by_key = {}
     for name, result, summary in runs:
@@ -90,7 +92,6 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
             if not tokens_equal(result, twin[1]):
                 for run_name in (name, twin[0]):
                     invalid[run_name].append("timing-noise repeats differ in tokens")
-    noise = timing_noise(pairs) if pairs else None
 
     q = defaultdict(dict)    # (panel, C, seed) -> line -> (Q_steady, tokens per round, its per-request median)
     for (panel, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
@@ -99,6 +100,13 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
             weighted = round_weighted_tokens(result["speculative_stats"]) if result["speculative_stats"] else None
             q[(panel, concurrency, seed)][line] = (summary["q_steady"], weighted,
                                                    statistics.median(per_request) if per_request else None)
+    return invalid, pairs, q
+
+
+def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
+    """runs: (name, result, summary) of every bench-v2 result file."""
+    invalid, pairs, q = count_runs(runs, protocol)
+    noise = timing_noise(pairs) if pairs else None
     panels = sorted({key[0] for key in q})
     concurrencies = sorted({key[1] for key in q})
     lines = [line for line in protocol["lines"] if line != BASELINE]
@@ -146,19 +154,24 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
     return "\n".join(out)
 
 
+def load_runs(directories: list[Path]) -> list[tuple[str, dict, dict]]:
+    """(path, result, summary) of every bench-v2 result file, in the order of the directories."""
+    runs = []
+    for directory in directories:
+        for path in sorted(directory.glob("*.json")):
+            result = json.loads(path.read_text())
+            if result.get("schema") == "bench-v2":
+                runs.append((str(path), result, summarize_v2(result)))
+    return runs
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--results", type=Path, nargs="+", required=True, help="directories of bench-v2 result files")
     args = parser.parse_args(argv)
     protocol = json.loads(args.protocol.read_text())
-    runs = []
-    for directory in args.results:
-        for path in sorted(directory.glob("*.json")):
-            result = json.loads(path.read_text())
-            if result.get("schema") == "bench-v2":
-                runs.append((str(path), result, summarize_v2(result)))
-    print(report(runs, protocol))
+    print(report(load_runs(args.results), protocol))
 
 
 if __name__ == "__main__":
