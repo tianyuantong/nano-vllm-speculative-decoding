@@ -3,7 +3,7 @@
 This document consolidates the measurements from PRs #3–#7 and adds the
 decomposition that explains them. Every number below is either quoted from a
 PR description or computed from the archived result files with
-[`tools/decompose_timings.py`](../tools/decompose_timings.py); nothing was
+[`tools/v1/decompose_timings.py`](../tools/v1/decompose_timings.py); nothing was
 re-measured for this write-up.
 
 **Short version.** Randomized speculative decoding (Qwen3-0.6B draft,
@@ -63,8 +63,8 @@ follows from the per-request output lengths (a drain batch shrinks as requests
 finish).
 
 ```
-python tools/decompose_timings.py <release>/evidence/clean   # expanded-k3-results
-python tools/decompose_timings.py <release>/execution/clean  # greedy-verify-sampling-results
+python tools/v1/decompose_timings.py <release>/evidence/clean   # expanded-k3-results
+python tools/v1/decompose_timings.py <release>/execution/clean  # greedy-verify-sampling-results
 ```
 
 Fit error is 0.2–1.6 % of wall time across 230 timed calls.
@@ -147,7 +147,7 @@ and came out +6 %.
 
 | Component | ms | Share | Reducible? |
 |---|---:|---:|---|
-| Target VERIFY forward (CUDA graph) | ≈11 | 36 % | No — 8B BF16 weights are 16.4 GB; at 1.79 TB/s the floor is 9.2 ms, this runs at 83 % of it |
+| Target VERIFY forward (CUDA graph) | ≈11 | 36 % | No — a decode step must read ≈ 15.1 GB (36 layers and the LM head in BF16; the embedding table is read only at the batch's rows); at 1.79 TB/s the floor is 8.5 ms, this runs at ≈ 77 % of it |
 | 3 draft steps + catch-up (0.6B, CUDA graph) | ≈5 | 17 % | Partly — `compute_logits` and the per-step sampling run outside the graph; weights alone need 0.67 ms per step |
 | Host syncs, pinned allocations, Python control flow | ≈4 | 13 % | Yes — one D2H per round, preallocated buffers |
 | Per-request sampling, 4 × 2.80 | ≈11 | 37 % | Yes — batch the sampler across requests |
@@ -216,7 +216,7 @@ draft achieves against an 8B target at temperature 1.
    (144 timed calls) and
    [`greedy-verify-sampling-results`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/greedy-verify-sampling-results)
    (86 timed calls) and unzip them.
-2. `python tools/decompose_timings.py <expanded>/evidence/clean <greedy>/execution/clean`
+2. `python tools/v1/decompose_timings.py <expanded>/evidence/clean <greedy>/execution/clean`
    (needs only numpy) prints the tables in §4.
 3. GPU measurements: `tools/perf_repair_gpu_gate.py`, `tools/greedy_gpu_gate.py`
    and `tools/verify_sampling_gpu_gate.py` reproduce the timed calls on a CUDA

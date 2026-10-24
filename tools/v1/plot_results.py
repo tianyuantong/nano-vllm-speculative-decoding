@@ -7,9 +7,11 @@ No plotting dependency: the SVG is written directly so the figures regenerate an
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
-from summarize_bench import summarize
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from summarize_bench import summarize  # noqa: E402
 
 THEMES = {
     "light": {"surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e", "grid": "#e1e0d9",
