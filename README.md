@@ -48,12 +48,6 @@ Key code: `SpeculativeDecoder.run_round` (the five steps of a round), `DFlashDra
 
 Drafts are accepted by the standard rule: keep draft x when u < min(1, p_target(x) / p_draft(x)), otherwise resample from normalize(max(p_target − p_draft, 0)), so the output distribution is the target's. Checked on the GPU: the sampler's multi-step output distribution (29 cases), verification logits against step-by-step decoding (worst gap 0.75 / 0.84 against a bound of 3.0), and GSM8K accuracy (−1.5…+0.9 pt against plain decoding).
 
-## What this is not
-
-- Not an online serving system: the numbers come from an offline closed-loop benchmark.
-- Not a new draft method: the draft is [DFlash](https://github.com/z-lab/dflash), with DeepSpec's `dflash_qwen3_8b_block7` checkpoint.
-- Not a large-scale deployment: one GPU, a dense 8B model.
-
 ## Usage
 
 Python 3.10–3.12 and a CUDA GPU with room for both models and their KV caches.

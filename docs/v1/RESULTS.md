@@ -1,5 +1,7 @@
 # Results: batched speculative decoding vs ordinary decoding
 
+> Superseded by [the DFlash results](../RESULTS.md); this page keeps the September results of the 0.6B draft.
+
 Measured 2026-09-21 on one NVIDIA RTX PRO 6000 Blackwell **Server Edition** (GB202, 96 GB,
 the same silicon and memory bandwidth as the RTX 5090 of the earlier experiments), driver
 580.173.02, torch 2.9.1+cu130, FlashAttention 2.8.3, Triton 3.5.1, Python 3.12.14,

@@ -19,10 +19,9 @@ Which prompts each concurrency uses:
 - C = 32 takes all 128.
 - C = 64 cycles through the panel twice.
 
-One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.7 ms, so the pre-registered rule voids it. The protocol also voids lines of one (C, seed) split across jobs, so all three lines of that group were rerun back to back in one job.
-- The table takes DFlash's value for that seed from the rerun: 2.19.
+One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.7 ms, so the pre-registered rule voids it. Almost all of that time went to the context-store step, 177 ms against a median of 0.26 ms; propose and verify in that round were normal, and the cause is not known. The protocol also voids lines of one (C, seed) split across jobs, so all three lines of that group were rerun back to back in one job.
+- All three lines of that group take their values from the rerun: DFlash 2.19, and the 0.6B line 1.567 against 1.566 in the first run.
 - All 48 requests of all three lines produced the same tokens as the first run.
-- The 0.6B line keeps its original value: 1.566 (1.567 in the rerun).
 
 | C | 0.6B draft (k = 3) | DFlash (k = 7) | DFlash ÷ 0.6B |
 |---:|---|---|---|

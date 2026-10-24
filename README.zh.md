@@ -48,12 +48,6 @@ Qwen3-8B 接 DFlash draft，RTX PRO 6000。输出分布不变（已检验）；G
 
 接受规则是标准的投机采样：u < min(1, p_target(x) / p_draft(x)) 时保留 draft x，否则从 normalize(max(p_target − p_draft, 0)) 重新采样，所以输出分布就是 target 的分布。在 GPU 上检验过：采样器的多步输出分布（29 例）、verify 对逐步 decode 的 logits（最大差 0.75 / 0.84，门槛 3.0）、GSM8K 准确率（与不投机相差 −1.5 … +0.9 个百分点）。
 
-## 这不是什么
-
-- 不是在线服务系统：数字来自离线闭环测量。
-- 不是新的 draft 方法：draft 用的是 [DFlash](https://github.com/z-lab/dflash) 的设计，权重是 DeepSpec 的 `dflash_qwen3_8b_block7`。
-- 不是大规模部署：一张卡、一个 8B 稠密模型。
-
 ## 快速开始
 
 使用 Python 3.10–3.12 和 CUDA GPU，显存需容纳两个模型及其 KV cache。
