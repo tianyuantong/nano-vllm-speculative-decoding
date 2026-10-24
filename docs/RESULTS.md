@@ -11,7 +11,7 @@ line and batch size ran in the same Slurm job on the same GPU; all 40 runs are o
 reports, the input panel, and a snapshot of the measured sources with SHA-256 sums — is the
 release asset `results-batched-v1`:
 <https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-batched-v1>.
-`tools/report_matrix.py` regenerates every table below from the result files.
+`tools/v1/report_matrix.py` regenerates every table below from the result files.
 
 ## Setup
 
@@ -275,24 +275,24 @@ commit being executed; the published run's source snapshot remains in the eviden
   python tools/fetch_panels.py
   test -s benchmarks/inputs/panel-48.json
   BENCH_OUTPUT=$(mktemp -d "${TMPDIR:-/tmp}/nano-vllm-reproduce.XXXXXX")
-  python tools/gate_smoke.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
+  python tools/v1/gate_smoke.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
     --k 3 --output "$BENCH_OUTPUT/smoke.json"
   python tools/gate_verify_logits.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
     --k 3 --output "$BENCH_OUTPUT/g1.json"
   python tools/gate_sampler_distribution.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
     --k 3 --output "$BENCH_OUTPUT/g2.json"
-  python tools/gate_greedy_equivalence.py run --target "$TARGET_MODEL" \
+  python tools/v1/gate_greedy_equivalence.py run --target "$TARGET_MODEL" \
     --k 0 --output "$BENCH_OUTPUT/g3-ordinary.json"
-  python tools/gate_greedy_equivalence.py run --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
+  python tools/v1/gate_greedy_equivalence.py run --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
     --k 4 --output "$BENCH_OUTPUT/g3-speculative.json"
-  python tools/gate_greedy_equivalence.py compare --target "$TARGET_MODEL" \
+  python tools/v1/gate_greedy_equivalence.py compare --target "$TARGET_MODEL" \
     --ordinary "$BENCH_OUTPUT/g3-ordinary.json" --speculative "$BENCH_OUTPUT/g3-speculative.json" \
     --noise-floor 0.34375 --output "$BENCH_OUTPUT/g3.json"
   python bench_spec.py --commit "$MEASURED_COMMIT" --target "$TARGET_MODEL" \
     --max-num-seqs 4 --temperature 0.7 --top-k 20 --top-p 0.8 --output "$BENCH_OUTPUT/rec-B4-k0.json"
   python bench_spec.py --commit "$MEASURED_COMMIT" --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
     --k 3 --max-num-seqs 4 --temperature 0.7 --top-k 20 --top-p 0.8 --output "$BENCH_OUTPUT/rec-B4-k3.json"
-  python tools/report_matrix.py "$BENCH_OUTPUT/rec-B4-k0.json" "$BENCH_OUTPUT/rec-B4-k3.json"
+  python tools/v1/report_matrix.py "$BENCH_OUTPUT/rec-B4-k0.json" "$BENCH_OUTPUT/rec-B4-k3.json"
   printf 'Results: %s\n' "$BENCH_OUTPUT"
 )
 ```

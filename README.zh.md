@@ -91,7 +91,7 @@ finally:
 | [优化历程](docs/PERFORMANCE.md) | 第一版的性能分析，以及推动本次重写的主要瓶颈 |
 
 CPU 测试通过 [GitHub Actions](.github/workflows/cpu-tests.yml) 运行。
-性能测试入口是 [`bench_spec.py`](bench_spec.py)，图表由 [`tools/plot_results.py`](tools/plot_results.py) 生成。
+性能测试入口是 [`bench_spec.py`](bench_spec.py)，图表由 [`tools/v1/plot_results.py`](tools/v1/plot_results.py) 生成。
 
 ## 致谢
 

@@ -96,7 +96,7 @@ Use ordinary decoding by omitting `draft_model` and `num_speculative_tokens`.
 | [Optimization history](docs/PERFORMANCE.md) | Profiling the first implementation and the bottlenecks behind the rewrite |
 
 CPU tests run in [GitHub Actions](.github/workflows/cpu-tests.yml). Benchmarking starts with
-[`bench_spec.py`](bench_spec.py); [`tools/plot_results.py`](tools/plot_results.py) builds the performance figures.
+[`bench_spec.py`](bench_spec.py); [`tools/v1/plot_results.py`](tools/v1/plot_results.py) builds the performance figures.
 
 ## Acknowledgments
 

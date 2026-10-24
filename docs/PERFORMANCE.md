@@ -3,7 +3,7 @@
 This document consolidates the measurements from PRs #3–#7 and adds the
 decomposition that explains them. Every number below is either quoted from a
 PR description or computed from the archived result files with
-[`tools/decompose_timings.py`](../tools/decompose_timings.py); nothing was
+[`tools/v1/decompose_timings.py`](../tools/v1/decompose_timings.py); nothing was
 re-measured for this write-up.
 
 **Short version.** Randomized speculative decoding (Qwen3-0.6B draft,
@@ -63,8 +63,8 @@ follows from the per-request output lengths (a drain batch shrinks as requests
 finish).
 
 ```
-python tools/decompose_timings.py <release>/evidence/clean   # expanded-k3-results
-python tools/decompose_timings.py <release>/execution/clean  # greedy-verify-sampling-results
+python tools/v1/decompose_timings.py <release>/evidence/clean   # expanded-k3-results
+python tools/v1/decompose_timings.py <release>/execution/clean  # greedy-verify-sampling-results
 ```
 
 Fit error is 0.2–1.6 % of wall time across 230 timed calls.
@@ -216,7 +216,7 @@ draft achieves against an 8B target at temperature 1.
    (144 timed calls) and
    [`greedy-verify-sampling-results`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/greedy-verify-sampling-results)
    (86 timed calls) and unzip them.
-2. `python tools/decompose_timings.py <expanded>/evidence/clean <greedy>/execution/clean`
+2. `python tools/v1/decompose_timings.py <expanded>/evidence/clean <greedy>/execution/clean`
    (needs only numpy) prints the tables in §4.
 3. GPU measurements: `tools/perf_repair_gpu_gate.py`, `tools/greedy_gpu_gate.py`
    and `tools/verify_sampling_gpu_gate.py` reproduce the timed calls on a CUDA

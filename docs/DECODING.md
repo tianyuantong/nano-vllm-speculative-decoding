@@ -53,13 +53,13 @@ all-random; `prompt + max_tokens + k <= max_model_len`.
 `record_step_timings=True` records a pair of CUDA events per engine step and one event
 per phase of every speculative round; `llm.step_timings()` and `llm.phase_timings()`
 return them after `generate()`. `bench_spec.py`, `tools/summarize_bench.py` and
-`tools/report_matrix.py` build throughput, per-round costs and the break-even check
+`tools/v1/report_matrix.py` build throughput, per-round costs and the break-even check
 from them.
 
 ## Gates
 
-`tools/gate_smoke.py`, `tools/gate_verify_logits.py` (G1: verification logits vs decode
+`tools/v1/gate_smoke.py`, `tools/gate_verify_logits.py` (G1: verification logits vs decode
 logits), `tools/gate_sampler_distribution.py` (G2: sampler distribution),
-`tools/gate_greedy_equivalence.py` (G3: greedy match rate with per-divergence logit
-margins) and `tools/gate_divergence_probe.py` (decode vs verify logits on identical KV
+`tools/v1/gate_greedy_equivalence.py` (G3: greedy match rate with per-divergence logit
+margins) and `tools/v1/gate_divergence_probe.py` (decode vs verify logits on identical KV
 at G3 divergence points) run on a CUDA machine with both models.

@@ -326,7 +326,7 @@ GPU gates, in order, before any performance number:
   agreement. Establishes the kernel-level noise floor.
 - G2 `tools/gate_sampler_distribution.py`: the §8 frequency test on GPU
   with real target/draft logits.
-- G3 `tools/gate_greedy_equivalence.py`: greedy `k = 0` vs `k = 4` on the
+- G3 `tools/v1/gate_greedy_equivalence.py`: greedy `k = 0` vs `k = 4` on the
   A1 panel; match rate, and for each divergence the top-2 logit margin at
   that position, interpreted against G1.
 
