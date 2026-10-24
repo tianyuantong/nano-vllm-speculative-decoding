@@ -17,7 +17,7 @@ Measurement, gates and analysis for bench-v2 (`benchmarks/protocol-v2.json`). `v
 | `gate_task_accuracy.py` | G5: GSM8K accuracy of a line against k0 |
 | `gate_dflash.py` | DFlash port checks against DeepSpec: block logits, tokens-per-round alignment, CUDA graphs against eager |
 | `ref_dflash_deepspec.py` | Runs DeepSpec's own DFlash inference for those checks |
-| `v1/report_matrix.py` | Tables of the September release's `docs/RESULTS.md` |
+| `v1/report_matrix.py` | Tables of the September release's `docs/v1/RESULTS.md` |
 | `v1/decompose_timings.py` | Per-round and per-step cost decomposition of archived September timings |
 | `v1/plot_results.py` | The README figures of the September release |
 | `v1/gate_smoke.py` | Smoke test: the speculative engine and k = 0 both generate |

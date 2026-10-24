@@ -11,7 +11,7 @@ Batched speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/n
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-**English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Performance](docs/RESULTS.md) · [Design](docs/design/batched-speculative-decoding.md)
+**English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Performance](docs/v1/RESULTS.md) · [Design](docs/design/batched-speculative-decoding.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-dark.svg">
@@ -23,7 +23,7 @@ Batched speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/n
 Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell. Compared with ordinary decoding in the same
 engine, throughput is 1.47–1.50× at batch 1 and 1.09–1.17× at batch 8 across four measurements
 (one seed on the Server Edition, three on a Max-Q Workstation Edition); the figure shows the single
-Server-Edition run. [Full results, repeatability and reproduction →](docs/RESULTS.md)
+Server-Edition run. [Full results, repeatability and reproduction →](docs/v1/RESULTS.md)
 
 ## Highlights
 
@@ -90,7 +90,7 @@ Use ordinary decoding by omitting `draft_model` and `num_speculative_tokens`.
 
 | Document | What's inside |
 |---|---|
-| [Performance](docs/RESULTS.md) | Batch-size comparisons, phase timings, output comparisons and reproduction commands |
+| [Performance](docs/v1/RESULTS.md) | Batch-size comparisons, phase timings, output comparisons and reproduction commands |
 | [Design](docs/design/batched-speculative-decoding.md) | Draft/target execution, KV state, batching and CUDA Graphs |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
 | [Optimization history](docs/PERFORMANCE.md) | Profiling the first implementation and the bottlenecks behind the rewrite |

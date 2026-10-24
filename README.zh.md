@@ -11,7 +11,7 @@
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-[English](README.md) | **简体中文** · [快速开始](#快速开始) · [性能结果](docs/RESULTS.md) · [实现设计](docs/design/batched-speculative-decoding.md)
+[English](README.md) | **简体中文** · [快速开始](#快速开始) · [性能结果](docs/v1/RESULTS.md) · [实现设计](docs/design/batched-speculative-decoding.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-dark.svg">
@@ -22,7 +22,7 @@
 
 Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell。相较同一引擎的普通解码，四次测量中
 B=1 的吞吐倍数为 1.47–1.50，B=8 为 1.09–1.17（Server 版 1 个 seed，Max-Q 工作站版 3 个 seed）；
-图中是 Server 版的单次结果。[完整性能结果、重复性与复现 →](docs/RESULTS.md)
+图中是 Server 版的单次结果。[完整性能结果、重复性与复现 →](docs/v1/RESULTS.md)
 
 ## 核心改进
 
@@ -85,7 +85,7 @@ finally:
 
 | 文档 | 内容 |
 |---|---|
-| [性能结果](docs/RESULTS.md) | 不同 batch size 的性能、阶段耗时、输出对比与复现命令 |
+| [性能结果](docs/v1/RESULTS.md) | 不同 batch size 的性能、阶段耗时、输出对比与复现命令 |
 | [实现设计](docs/design/batched-speculative-decoding.md) | 双模型执行、KV 状态、批处理与 CUDA Graph |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
 | [优化历程](docs/PERFORMANCE.md) | 第一版的性能分析，以及推动本次重写的主要瓶颈 |

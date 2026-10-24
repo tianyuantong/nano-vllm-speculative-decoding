@@ -41,7 +41,7 @@ One `torch.Generator` per engine, seeded from `seed`. A run is reproducible give
 seed and the same batch composition; which requests share a batch changes the draws.
 The measured greedy outputs differ across batch sizes and between speculative and
 ordinary decoding. Most first divergences occur at small top-2 logit margins; the
-per-divergence results and identical-KV probe are in `docs/RESULTS.md`, gate G3 and its control.
+per-divergence results and identical-KV probe are in `docs/v1/RESULTS.md`, gate G3 and its control.
 
 ## Limits (v1)
 

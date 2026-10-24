@@ -259,7 +259,7 @@ stands.
 ## Reproduce
 
 Use Python 3.10–3.12 on a CUDA machine, install the project and GPU dependencies as in
-[Usage](../README.md#usage), and run from the reviewed, committed repository root.
+[Usage](../../README.md#usage), and run from the reviewed, committed repository root.
 In Bash, enter the local model directories when prompted. The new run records the clean
 commit being executed; the published run's source snapshot remains in the evidence package.
 
