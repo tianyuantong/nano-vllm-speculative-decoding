@@ -21,8 +21,9 @@ class Config:
     num_kvcache_blocks: int = -1
     kv_cache_memory_bytes: int | None = None
     draft_model: str | None = None            # enables speculative decoding
-    num_speculative_tokens: int = 0           # k: drafts proposed per round; >= 1 iff draft_model is set
-    draft_kv_cache_memory_bytes: int | None = None
+    draft_type: str = "model"                 # "model": a draft LM with its own KV and decode steps; "dflash": DeepSpec's DFlash
+    num_speculative_tokens: int = 0           # k: drafts proposed per round; >= 1 iff draft_model is set; DFlash: its block size
+    draft_kv_cache_memory_bytes: int | None = None    # the model draft's KV budget; DFlash's KV mirrors the target's blocks
     seed: int | None = None                   # seed of the engine's sampling generator
     record_step_timings: bool = False         # record a pair of CUDA events per engine step
 
@@ -43,6 +44,13 @@ class Config:
     def _validate_speculative(self) -> None:
         if not os.path.isdir(self.draft_model):
             raise ValueError(f"draft_model is not a directory: {self.draft_model}")
+        if self.draft_type not in ("model", "dflash"):
+            raise ValueError(f"draft_type must be 'model' or 'dflash', not {self.draft_type!r}")
+        if self.draft_type == "dflash":
+            block_size = AutoConfig.from_pretrained(self.draft_model).block_size
+            if self.num_speculative_tokens not in (0, block_size):
+                raise ValueError(f"a DFlash draft proposes its block size ({block_size}) tokens per round")
+            self.num_speculative_tokens = block_size
         if self.num_speculative_tokens < 1:
             raise ValueError("num_speculative_tokens must be >= 1 with a draft model")
         if self.tensor_parallel_size != 1:
@@ -51,7 +59,11 @@ class Config:
             raise ValueError(f"speculative decoding captures verification graphs for at most {MAX_SPECULATIVE_BATCH_SIZE} sequences")
         if self.enable_prefix_cache:
             raise ValueError("speculative decoding requires enable_prefix_cache=False")
-        if self.kv_cache_memory_bytes is None or self.draft_kv_cache_memory_bytes is None:
-            raise ValueError("speculative decoding requires explicit kv_cache_memory_bytes and draft_kv_cache_memory_bytes")
+        if self.kv_cache_memory_bytes is None:
+            raise ValueError("speculative decoding requires an explicit kv_cache_memory_bytes")
+        if self.draft_type == "dflash":
+            return
+        if self.draft_kv_cache_memory_bytes is None:
+            raise ValueError("a model draft requires an explicit draft_kv_cache_memory_bytes")
         if type(self.draft_kv_cache_memory_bytes) is not int or self.draft_kv_cache_memory_bytes <= 0:
             raise ValueError("draft_kv_cache_memory_bytes must be a positive integer")

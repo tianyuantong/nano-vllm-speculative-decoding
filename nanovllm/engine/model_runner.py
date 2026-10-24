@@ -16,6 +16,10 @@ from nanovllm.utils.loader import load_model
 
 MAX_GRAPH_BATCH_SIZE = 512
 EAGER_DECODE_BATCH_THRESHOLD = 512
+# RMSNorm and RoPE are torch.compile'd methods shared by every layer of the target and the draft, called with
+# 2-D and 3-D inputs, 32 or 8 heads, and every batch length. Past the default limit of 8 recompiles, dynamo runs
+# new shapes uncompiled: slower, and numerically unlike the compiled kernels inside the CUDA graphs.
+torch._dynamo.config.recompile_limit = 64
 
 
 def blocks_for_budget(budget_bytes: int, block_bytes: int) -> int:
@@ -212,9 +216,10 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool,
-                  *, need_logits: bool = True):
+                  *, need_logits: bool = True, aux_out: torch.Tensor | None = None):
+        """aux_out: the buffer a feature-based draft's aux features go into (Qwen3Model.forward); eager paths only."""
         if is_prefill or self.enforce_eager or input_ids.size(0) > EAGER_DECODE_BATCH_THRESHOLD:
-            hidden = self.model(input_ids, positions)
+            hidden = self.model(input_ids, positions, aux_out)
             return self.model.compute_logits(hidden) if need_logits else hidden
         else:
             bs = input_ids.size(0)
@@ -232,10 +237,10 @@ class ModelRunner:
             hidden = graph_vars["outputs"][:bs]
             return self.model.compute_logits(hidden) if need_logits else hidden
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run(self, seqs: list[Sequence], is_prefill: bool, aux_out: torch.Tensor | None = None) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         sampling = sampling_tensors(seqs, self.device) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill)
+        logits = self.run_model(input_ids, positions, is_prefill, aux_out=aux_out)
         token_ids = self.sampler(logits, sampling, self.generator).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids

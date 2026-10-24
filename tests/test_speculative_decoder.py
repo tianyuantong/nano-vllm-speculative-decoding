@@ -51,7 +51,7 @@ class FakeRunner:
                     metadata.max_seqlen_q, metadata.max_seqlen_k, torch.tensor(metadata.slot_mapping), None, block_tables)
         return torch.tensor(metadata.input_ids), torch.tensor(metadata.positions)
 
-    def run_model(self, input_ids, positions, is_prefill, *, need_logits=True):
+    def run_model(self, input_ids, positions, is_prefill, *, need_logits=True, aux_out=None):
         context = get_context()
         self.calls.append({
             "is_prefill": is_prefill,

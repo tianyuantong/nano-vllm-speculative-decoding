@@ -51,6 +51,14 @@ CASES = [
      "max_tokens": 2, "eos_token_id": 3},
 ]
 
+# The k=7 case of G2-multi, kept out of the frozen CASES. Rows 1, 2 are the transitions after tokens 0, 1, and
+# row 0 starts from token 0. Every row has sum(min(p, q)) = 0.6, so each position can be rejected; all 7 drafts
+# are accepted with probability 0.6^7.
+K7_CASE = {"name": "eight_step_two_state",
+           "p_rows": [[0.7, 0.3], [0.7, 0.3], [0.2, 0.8]],
+           "q_rows": [[0.3, 0.7], [0.3, 0.7], [0.6, 0.4]],
+           "max_tokens": 8, "eos_token_id": None}
+
 
 def expected_distribution(case) -> dict[tuple[int, ...], float]:
     """Enumerate ordinary target outputs using Python binary64 arithmetic.

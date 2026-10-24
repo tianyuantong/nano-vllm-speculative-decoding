@@ -195,7 +195,7 @@ cython_debug/
 .cursorindexingignore
 # --- NanoServe-Lab ---
 results/raw/
-models/
+/models/
 *.safetensors
 *.bin
 *.nsys-rep

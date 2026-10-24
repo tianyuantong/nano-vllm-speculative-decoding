@@ -47,6 +47,16 @@ class RotaryEmbedding(nn.Module):
         key = apply_rotary_emb(key, cos, sin)
         return query, key
 
+    @torch.compile
+    def apply_rotary_emb_k(
+        self,
+        positions: torch.Tensor,
+        key: torch.Tensor,
+    ) -> torch.Tensor:
+        """Keys only: a DFlash draft writes its context K from target features, with no queries."""
+        cos, sin = self.cos_sin_cache[positions].chunk(2, dim=-1)
+        return apply_rotary_emb(key, cos, sin)
+
 
 @lru_cache(1)
 def get_rope(

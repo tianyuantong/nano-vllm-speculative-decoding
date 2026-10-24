@@ -2,7 +2,7 @@ import atexit
 from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 import torch.multiprocessing as mp
 
 from nanovllm.config import Config
@@ -39,7 +39,7 @@ class LLMEngine:
         self.dual_runner = None
         self.speculative = None
         draft_config = None
-        if config.draft_model is not None:
+        if config.draft_model is not None and config.draft_type == "model":
             draft_config = _draft_config(config, config_kwargs)
             self.dual_runner = DualModelRunner(config, draft_config)
             self.model_runner = self.dual_runner.target
@@ -54,12 +54,16 @@ class LLMEngine:
             self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
-        if draft_config is not None:
-            draft_eos = AutoTokenizer.from_pretrained(config.draft_model, use_fast=True).eos_token_id
+        if config.draft_model is not None:
+            if draft_config is not None:
+                draft_eos = AutoTokenizer.from_pretrained(config.draft_model, use_fast=True).eos_token_id
+                draft_config.eos = config.eos
+            else:    # a DFlash draft directory has its config and weights, no tokenizer
+                draft_eos = AutoConfig.from_pretrained(config.draft_model).eos_token_id
             if draft_eos != config.eos:
                 raise ValueError("target and draft tokenizers disagree on the EOS token")
-            draft_config.eos = config.eos
-            self.speculative = SpeculativeDecoder(self.model_runner, self.dual_runner.draft, config)
+            draft_runner = self.dual_runner.draft if self.dual_runner is not None else None
+            self.speculative = SpeculativeDecoder(self.model_runner, draft_runner, config)
             if not config.enforce_eager:
                 self.speculative.capture_graphs()
             if config.record_step_timings:
@@ -107,9 +111,12 @@ class LLMEngine:
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         start_event = self.step_timer.begin()
         if is_prefill:
-            token_ids = self.model_runner.call("run", seqs, True)
-            if self.speculative is not None:
-                self.speculative.prefill_draft(seqs)
+            if self.speculative is None:
+                token_ids = self.model_runner.call("run", seqs, True)
+            else:
+                aux = self.speculative.prefill_aux(seqs)
+                token_ids = self.model_runner.call("run", seqs, True, aux)
+                self.speculative.prefill_draft(seqs, aux)
             self.scheduler.postprocess(seqs, token_ids, True)
             kind = "prefill"
         elif self.speculative is not None:
