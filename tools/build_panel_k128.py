@@ -9,9 +9,9 @@ in non-thinking mode with D48's tokenizer files and template; a candidate fits w
 max_formatted_tokens long. Each category takes its protocol quota; the panel interleaves the categories in the
 protocol's order, so every prefix keeps their proportions.
 
-Runs outside the engine's venv:
+Runs outside the engine's venv; SPEED_DIR holds the files listed in --speed-dir's help:
   uv venv ~/.venvs/k128 -p 3.12 && uv pip install -p ~/.venvs/k128 duckdb==1.4.3 tiktoken==0.11.0 tokenizers jinja2
-  ~/.venvs/k128/bin/python tools/build_panel_k128.py --speed-dir ~/Codex/nano-vllm/outputs/nano-random-inputs-20260913 \
+  ~/.venvs/k128/bin/python tools/build_panel_k128.py --speed-dir SPEED_DIR \
       --exclude-panel benchmarks/inputs/panel-48.json --protocol benchmarks/protocol-v2.json \
       --output benchmarks/inputs/panel-K128.json
 """
