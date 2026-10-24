@@ -36,12 +36,18 @@ def verdict_a_beats_b(gains: list[float], noise: float) -> int:
     return 0
 
 
+def range_of(ratios: list[float]) -> tuple[float, float, float, bool]:
+    """Median, min and max, and whether the protocol reports only the range (it spans more than 0.05)."""
+    low, high = min(ratios), max(ratios)
+    return statistics.median(ratios), low, high, high - low > 0.05
+
+
 def format_range(ratios: list[float]) -> str:
     """Median (min–max) to two decimals; only the range when it spans more than 0.05."""
-    low, high = min(ratios), max(ratios)
-    if high - low > 0.05:
+    median, low, high, range_only = range_of(ratios)
+    if range_only:
         return f"{low:.2f}–{high:.2f}"
-    return f"{statistics.median(ratios):.2f} ({low:.2f}–{high:.2f})"
+    return f"{median:.2f} ({low:.2f}–{high:.2f})"
 
 
 def crossover(median_by_concurrency: dict[int, float]) -> int | None:

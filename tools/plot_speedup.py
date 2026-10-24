@@ -8,13 +8,12 @@ No plotting dependency: the SVG is written directly.
 import argparse
 import json
 import math
-import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_v2 import BASELINE, count_runs, format_range, load_runs  # noqa: E402
+from report_v2 import BASELINE, count_runs, load_runs, range_of  # noqa: E402
 
 THEMES = {
     "light": {"surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e", "grid": "#e1e0d9", "reference": "#898781",
@@ -42,8 +41,9 @@ def speedups(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> 
 
 
 def label(ratios: list[float]) -> str:
-    """The report's R without its parenthesis: the range when it spans more than 0.05, otherwise the median."""
-    return format_range(ratios).split(" (")[0] + "×"
+    """The report's R without its parenthesis: the range when the protocol reports only the range, else the median."""
+    median, low, high, range_only = range_of(ratios)
+    return (f"{low:.2f}–{high:.2f}" if range_only else f"{median:.2f}") + "×"
 
 
 def text(x: float, y: float, content: str, size: int, fill: str, anchor: str = "start", weight: str = "normal") -> str:
@@ -102,8 +102,8 @@ def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle
             if not ratios:
                 continue
             middle = center + (position - (len(LINES) - 1) / 2) * BAR_PITCH
-            low, high = min(ratios), max(ratios)
-            parts.append(column(middle - BAR_WIDTH / 2, y_of(statistics.median(ratios)), y_of(0), color))
+            median, low, high, _ = range_of(ratios)
+            parts.append(column(middle - BAR_WIDTH / 2, y_of(median), y_of(0), color))
             for y in (y_of(low), y_of(high)):
                 parts.append(f"<line x1='{middle - 4:.1f}' y1='{y:.1f}' x2='{middle + 4:.1f}' y2='{y:.1f}' "
                              f"stroke='{theme['muted']}' stroke-width='1.5'/>")

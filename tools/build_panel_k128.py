@@ -6,8 +6,9 @@ excluded. A first turn that still says the benchmark data must be fetched is reb
 (NVIDIA Model-Optimizer specdec_bench, the SPEEDBench methods in upstream_speed.py): stackselect for NIAH, BAMBOO
 meeting prediction for creative writing, padded or cut to 1000 o200k_base tokens. Prompts are Qwen3 chat-formatted
 in non-thinking mode with D48's tokenizer files and template; a candidate fits when it is at most
-max_formatted_tokens long. Each category takes its protocol quota; the panel interleaves the categories in the
-protocol's order, so every prefix keeps their proportions.
+max_formatted_tokens long. Each category takes its protocol quota, and the panel takes the categories round-robin
+in the protocol's order. A category that runs out early is over-represented in short prefixes: creative_writing's
+8 prompts end at position 32, so they are 17% of the first 48 against 6% of the panel.
 
 Runs outside the engine's venv; SPEED_DIR holds the files listed in --speed-dir's help:
   uv venv ~/.venvs/k128 -p 3.12 && uv pip install -p ~/.venvs/k128 duckdb==1.4.3 tiktoken==0.11.0 tokenizers jinja2
@@ -158,12 +159,12 @@ def main() -> None:
              for c in interleave(chosen, list(quotas))]
     assert not {tuple(e["prompt_token_ids"]) for e in panel} & {tuple(e["prompt_token_ids"]) for e in excluded}
     args.output.write_text(json.dumps(panel) + "\n")
-    inputs = [directory / name for name in ("throughput_1k.parquet", "upstream_speed.py", "stackselect_1k.json",
-                                            "meetingpred_4k.jsonl", "qwen-tokenizer/tokenizer.json",
-                                            "qwen-tokenizer/tokenizer_config.json")] + [args.exclude_panel]
+    names = ("throughput_1k.parquet", "upstream_speed.py", "stackselect_1k.json", "meetingpred_4k.jsonl",
+             "qwen-tokenizer/tokenizer.json", "qwen-tokenizer/tokenizer_config.json")
+    inputs = {name: directory / name for name in names} | {args.exclude_panel.name: args.exclude_panel}    # no machine paths
     provenance = {"output_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
                   "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                  "inputs": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs},
+                  "inputs": {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in inputs.items()},
                   "salt": salt, "quotas": quotas, "max_formatted_tokens": limit}
     args.output.with_suffix(".provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     print(json.dumps(provenance, indent=2))
