@@ -347,7 +347,9 @@ Timing: `record_step_timings=True` records a pair of CUDA events per step,
 read once after `generate()`. Each configuration runs one warm-up
 `generate()` (captures graphs, excluded) followed by the measured call; the
 measured call contains ≥ 100 rounds by construction (48 prompts × up to 512
-tokens), which satisfies the ≥ 25 warm-up / ≥ 100 measured rule.
+tokens), which satisfies the ≥ 25 warm-up / ≥ 100 measured rule. (Correction, 2026-10-17: rounds
+within one call are not independent repetitions, so each R in RESULTS.md is one
+measurement; see RESULTS.md, Repeatability.)
 
 Reported per configuration:
 

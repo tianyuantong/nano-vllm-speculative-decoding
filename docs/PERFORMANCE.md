@@ -147,7 +147,7 @@ and came out +6 %.
 
 | Component | ms | Share | Reducible? |
 |---|---:|---:|---|
-| Target VERIFY forward (CUDA graph) | ≈11 | 36 % | No — 8B BF16 weights are 16.4 GB; at 1.79 TB/s the floor is 9.2 ms, this runs at 83 % of it |
+| Target VERIFY forward (CUDA graph) | ≈11 | 36 % | No — a decode step must read ≈ 15.1 GB (36 layers and the LM head in BF16; the embedding table is read only at the batch's rows); at 1.79 TB/s the floor is 8.5 ms, this runs at ≈ 77 % of it |
 | 3 draft steps + catch-up (0.6B, CUDA graph) | ≈5 | 17 % | Partly — `compute_logits` and the per-step sampling run outside the graph; weights alone need 0.67 ms per step |
 | Host syncs, pinned allocations, Python control flow | ≈4 | 13 % | Yes — one D2H per round, preallocated buffers |
 | Per-request sampling, 4 × 2.80 | ≈11 | 37 % | Yes — batch the sampler across requests |
