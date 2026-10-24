@@ -25,6 +25,27 @@ For ordinary decoding leave out both `draft_model` and `num_speculative_tokens` 
 decoding is `temperature=0`. `top_p` requires `top_k` (the nucleus is computed over the
 top-k candidates).
 
+## A DFlash draft
+
+```python
+llm = LLM(
+    "/path/to/Qwen3-8B",
+    draft_model="/path/to/dflash_qwen3_8b_block7",   # deepseek-ai/dflash_qwen3_8b_block7
+    draft_type="dflash",
+    enable_prefix_cache=False,
+    kv_cache_memory_bytes=10 << 30,
+    max_num_seqs=8,
+)
+```
+
+`num_speculative_tokens` defaults to the draft's block size (7) and cannot differ from it,
+and there is no `draft_kv_cache_memory_bytes`: the draft keeps its context K/V in the
+target's KV blocks. A round runs the draft once on a block of the last committed token
+plus 6 mask tokens (non-causal attention over context K/V projected from five target
+layers), verifies the 7 drafts as below, writes the context K/V of all 8 verified
+positions, and accepts with the same rule. Round-entry invariant: the draft's context
+covers `len-1` positions, like the target's KV.
+
 ## What a round does
 
 For every sequence in a decode batch: the draft recomputes at most one missing KV entry

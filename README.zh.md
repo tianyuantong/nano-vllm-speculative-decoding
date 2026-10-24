@@ -2,46 +2,57 @@
 
 # nano-vllm-speculative-decoding
 
-为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现批量投机解码。
+为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现投机解码：独立 draft 模型，以及 DFlash 块式 draft。
 
-**B=1 吞吐约 1.5 倍 · B=8 为 1.1–1.2 倍**
+**C=1 吞吐 2.11–2.24 倍 · C=8 为 1.75–1.85 倍 · C=32 为 1.32–1.40 倍**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-[English](README.md) | **简体中文** · [快速开始](#快速开始) · [性能结果](docs/v1/RESULTS.md) · [实现设计](docs/design/batched-speculative-decoding.md)
+[English](README.md) | **简体中文** · [快速开始](#快速开始) · [结果](docs/RESULTS.md) · [实现设计](docs/design/batched-speculative-decoding.md)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-dark.svg">
-  <img alt="Qwen3 推荐采样、k=3 时，相对普通解码的吞吐倍数：B=1、2、4、8、16 分别为 1.50、1.37、1.24、1.17、1.04。" src="docs/assets/speedup-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128-dark.svg">
+  <img alt="K128 确认集上相对不投机的吞吐倍数，3 个 seed 的中位数和范围。DFlash：并发 1 为 2.11–2.24 倍，8 为 1.75–1.85 倍，32 为 1.32–1.40 倍，64 为 1.08 倍。Qwen3-0.6B draft：1.54、1.21、0.96、0.82 倍。" src="docs/assets/speedup-k128-light.svg" width="760">
 </picture>
 
 </div>
 
-Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell。相较同一引擎的普通解码，四次测量中
-B=1 的吞吐倍数为 1.47–1.50，B=8 为 1.09–1.17（Server 版 1 个 seed，Max-Q 工作站版 3 个 seed）；
-图中是 Server 版的单次结果。[完整性能结果、重复性与复现 →](docs/v1/RESULTS.md)
+Qwen3-8B 接 DFlash draft，RTX PRO 6000。输出分布不变（已检验）；GSM8K 准确率与不投机相差 −1.5 … +0.9 个百分点。
 
-## 核心改进
+怎么测的：同一引擎内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）；C=64 为 1.08 倍（1.06–1.09），在计时噪声内。原来的 0.6B draft 为 1.54 / 1.21 / 0.96 / 0.82 倍。和 vLLM 比（同卡同权重，开发版 `372477d`，开发集，挂钟吞吐）：C=1 为 155 对 156 tok/s，C=8 到 32 慢 7–9%。[测量协议、闸门和负结果 →](docs/RESULTS.md)
 
-小模型每轮起草多个 token，大模型通过一次前向计算完成验证。本项目把这套流程接入 nano-vLLM 的解码循环，
-结合批量采样、CUDA Graph 和原有调度器，提高生成吞吐。
+| C | 0.6B draft（k=3） | DFlash（k=7） | DFlash ÷ 0.6B | 每轮 token 数（0.6B / DFlash） |
+|---:|---|---|---|---|
+| 1 | 1.54 倍（1.54–1.57） | 2.11–2.24 倍 | 1.37–1.45 | 2.52 / 2.85 |
+| 8 | 1.21 倍（1.19–1.21） | 1.75–1.85 倍 | 1.44–1.56 | 2.49 / 2.75 |
+| 32 | 0.96 倍（0.95–0.96） | 1.32–1.40 倍 | 1.38–1.48 | 2.53 / 2.82 |
+| 64 | 0.82 倍（0.81–0.82） | 1.08 倍（1.06–1.09） | 1.29–1.33 | 2.53 / 2.82 |
 
-- **GPU 批量采样。** 候选 token 的概率与接受判定都留在 GPU 上，用向量化算子处理整批请求，每轮统一回传一次结果。
-  [采样器实现 →](nanovllm/layers/spec_sampler.py)
-- **CUDA Graph 验证。** 固定每轮 draft 长度，按 batch size 补齐形状，跨轮复用 CUDA Graph；target 一次前向计算所有候选位置。
-  [解码流程实现 →](nanovllm/engine/speculative.py)
-- **调度与 KV 管理。** 调度器为两个模型预留缓存空间，随 token 接受、请求完成和新请求加入，维护各自的 KV 状态。
-  [调度器实现 →](nanovllm/engine/scheduler.py)
+并发越高收益越小：verify 每行的成本过了约 128–256 行就变陡，而这个引擎的 prefill 步会让 decode 停下，C=32 时占稳态时间的 29%。C≤32 用 DFlash；C=64 时它并不比不投机快。
 
-```mermaid
-flowchart LR
-    D["Draft 起草"] --> V["Target 验证"]
-    V --> A["批量接受与采样"]
-    A --> C["更新序列与 KV 状态"]
-```
+## 新增了什么
+
+在 0.6B draft 版本之上，12 个引擎文件新增 434 行、删 107 行（引擎现共 2627 行）：
+- DFlash 的 draft 块（最后一个已提交 token 加 6 个占位 token）走 decode 路径，一次 7 个 query、非因果的注意力。
+- target 在 prefill 和 verify 时导出 5 层的 hidden state（hidden + residual）。
+- verify 之后把 8 个位置的上下文 K/V 全部写入；被拒的位置在被读到之前一定会被下一块覆盖。
+- draft 和 target 共用块表和 pad 块，不需要第二套 KV 分配。
+- 两张 CUDA graph：verify（同时导出那 5 层）和 draft 块前向。
+
+关键代码：`SpeculativeDecoder.run_round`（一轮五步）、`DFlashDrafter.propose` 和 `after_verify`、`Attention.forward` 的 decode 分支。
+
+## 正确性
+
+接受规则是标准的投机采样：u < min(1, p_target(x) / p_draft(x)) 时保留 draft x，否则从 normalize(max(p_target − p_draft, 0)) 重新采样，所以输出分布就是 target 的分布。在 GPU 上检验过：采样器的多步输出分布（29 例）、verify 对逐步 decode 的 logits（最大差 0.75 / 0.84，门槛 3.0）、GSM8K 准确率（与不投机相差 −1.5 … +0.9 个百分点）。
+
+## 这不是什么
+
+- 不是在线服务系统：数字来自离线闭环测量。
+- 不是新的 draft 方法：draft 用的是 [DFlash](https://github.com/z-lab/dflash) 的设计，权重是 DeepSpec 的 `dflash_qwen3_8b_block7`。
+- 不是大规模部署：一张卡、一个 8B 稠密模型。
 
 ## 快速开始
 
@@ -61,12 +72,11 @@ from nanovllm import LLM, SamplingParams
 
 llm = LLM(
     "/models/Qwen3-8B",
-    draft_model="/models/Qwen3-0.6B",
-    num_speculative_tokens=3,
+    draft_model="/models/dflash_qwen3_8b_block7",    # deepseek-ai/dflash_qwen3_8b_block7
+    draft_type="dflash",
     max_num_seqs=8,
     enable_prefix_cache=False,
     kv_cache_memory_bytes=10 << 30,
-    draft_kv_cache_memory_bytes=6 << 30,
     seed=0,
 )
 params = SamplingParams(temperature=0.7, top_k=20, top_p=0.8, max_tokens=256)
@@ -78,28 +88,37 @@ finally:
     llm.exit()
 ```
 
-省略 `draft_model` 和 `num_speculative_tokens` 即可使用普通解码。
+DFlash draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算。用 0.6B draft 时传 `draft_model="/models/Qwen3-0.6B"`、`num_speculative_tokens=3` 和 `draft_kv_cache_memory_bytes`；普通解码省略 `draft_model` 即可。
 [模型配置与 API →](docs/DECODING.md)
+
+## 复现
+
+```bash
+python -m pytest -q    # CPU 测试：198 个通过，约 6 秒
+python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.json --panel K128 --line dflash_k7 \
+    --concurrency 8 --seed 17011 --commit <sha> --output result.json
+```
+
+面板由 `tools/fetch_panels.py`（D48）和 `tools/build_panel_k128.py`（K128）生成；`tools/report_v2.py` 按 protocol 的判据出结论，`tools/plot_speedup.py` 画上面那张图。
 
 ## 深入了解
 
 | 文档 | 内容 |
 |---|---|
-| [性能结果](docs/v1/RESULTS.md) | 不同 batch size 的性能、阶段耗时、输出对比与复现命令 |
+| [结果](docs/RESULTS.md) | 两个面板、和 vLLM 的对比、闸门、一轮的时间花在哪 |
 | [实现设计](docs/design/batched-speculative-decoding.md) | 双模型执行、KV 状态、批处理与 CUDA Graph |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
+| [工具](tools/README.md) | 测量、闸门和分析脚本，每个一行说明 |
+| [9 月结果](docs/v1/RESULTS.md) | 0.6B draft 版本：不同 batch size 的性能、阶段耗时、重复性 |
 | [优化历程](docs/PERFORMANCE.md) | 第一版的性能分析，以及推动本次重写的主要瓶颈 |
 
 CPU 测试通过 [GitHub Actions](.github/workflows/cpu-tests.yml) 运行。
-性能测试入口是 [`bench_spec.py`](bench_spec.py)，图表由 [`tools/v1/plot_results.py`](tools/v1/plot_results.py) 生成。
 
 ## 致谢
 
-基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 构建，使用
-[Qwen3](https://huggingface.co/Qwen/Qwen3-8B)、[FlashAttention](https://github.com/Dao-AILab/flash-attention)
-与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的
-*Fast Inference from Transformers via Speculative Decoding*（2023）和 Chen 等人的
-*Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
+基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)。这个仓库加的部分：用独立 draft 模型的批量投机解码（0.6B 那条线，9 月发布）；以及 DFlash 的这几样：draft 块的 7-query 非因果 decode 模式；target 导出 5 层的 hidden + residual；verify 后给所有被验证的位置写上下文 K/V，靠下一块覆盖被拒的位置；draft 和 target 共用块表；两张 CUDA graph（verify 和 draft 块前向）。
+
+DFlash 的 draft 设计来自 [DFlash](https://github.com/z-lab/dflash)（[arXiv:2602.06036](https://arxiv.org/abs/2602.06036)）；权重，以及移植时逐项比对的参考实现，来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)。模型用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)，kernel 用 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的 *Fast Inference from Transformers via Speculative Decoding*（2023）和 Chen 等人的 *Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
 [上游版本与项目历史 →](docs/UPSTREAM.md)
 
 ## 许可
