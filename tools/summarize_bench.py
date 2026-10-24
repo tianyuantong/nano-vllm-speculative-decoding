@@ -129,6 +129,13 @@ def tokens_per_round(requests: list[dict]) -> list[float | None]:
             for request in requests]
 
 
+def round_weighted_tokens(speculative_stats: dict) -> float | None:
+    """Tokens per round over all of a run's rounds, as vLLM and DeepSpec count it: sum of (accepted + 1) ÷ rounds."""
+    counts = {int(key.split("_")[1]): n for key, n in speculative_stats.items() if key.startswith("accepted_")}
+    rounds = sum(counts.values())
+    return sum((accepted + 1) * n for accepted, n in counts.items()) / rounds if rounds else None
+
+
 def excess_prefill_tokens(steps: list[dict], requests: list[dict]) -> int:
     """Prefilled tokens beyond the prompts submitted; above 0 means a request was preempted and recomputed."""
     return (sum(step["tokens_out"] for step in steps if step["kind"] == "prefill")

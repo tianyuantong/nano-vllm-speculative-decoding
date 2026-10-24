@@ -25,6 +25,27 @@ For ordinary decoding leave out both `draft_model` and `num_speculative_tokens` 
 decoding is `temperature=0`. `top_p` requires `top_k` (the nucleus is computed over the
 top-k candidates).
 
+## A DFlash draft
+
+```python
+llm = LLM(
+    "/path/to/Qwen3-8B",
+    draft_model="/path/to/dflash_qwen3_8b_block7",   # deepseek-ai/dflash_qwen3_8b_block7
+    draft_type="dflash",
+    enable_prefix_cache=False,
+    kv_cache_memory_bytes=10 << 30,
+    max_num_seqs=8,
+)
+```
+
+`num_speculative_tokens` defaults to the draft's block size (7) and cannot differ from it,
+and there is no `draft_kv_cache_memory_bytes`: the draft keeps its context K/V in the
+target's KV blocks. A round runs the draft once on a block of the last committed token
+plus 6 mask tokens (non-causal attention over context K/V projected from five target
+layers), verifies the 7 drafts as below, writes the context K/V of all 8 verified
+positions, and accepts with the same rule. Round-entry invariant: the draft's context
+covers `len-1` positions, like the target's KV.
+
 ## What a round does
 
 For every sequence in a decode batch: the draft recomputes at most one missing KV entry
@@ -41,7 +62,7 @@ One `torch.Generator` per engine, seeded from `seed`. A run is reproducible give
 seed and the same batch composition; which requests share a batch changes the draws.
 The measured greedy outputs differ across batch sizes and between speculative and
 ordinary decoding. Most first divergences occur at small top-2 logit margins; the
-per-divergence results and identical-KV probe are in `docs/RESULTS.md`, gate G3 and its control.
+per-divergence results and identical-KV probe are in `docs/v1/RESULTS.md`, gate G3 and its control.
 
 ## Limits (v1)
 
@@ -53,13 +74,13 @@ all-random; `prompt + max_tokens + k <= max_model_len`.
 `record_step_timings=True` records a pair of CUDA events per engine step and one event
 per phase of every speculative round; `llm.step_timings()` and `llm.phase_timings()`
 return them after `generate()`. `bench_spec.py`, `tools/summarize_bench.py` and
-`tools/report_matrix.py` build throughput, per-round costs and the break-even check
+`tools/v1/report_matrix.py` build throughput, per-round costs and the break-even check
 from them.
 
 ## Gates
 
-`tools/gate_smoke.py`, `tools/gate_verify_logits.py` (G1: verification logits vs decode
+`tools/v1/gate_smoke.py`, `tools/gate_verify_logits.py` (G1: verification logits vs decode
 logits), `tools/gate_sampler_distribution.py` (G2: sampler distribution),
-`tools/gate_greedy_equivalence.py` (G3: greedy match rate with per-divergence logit
-margins) and `tools/gate_divergence_probe.py` (decode vs verify logits on identical KV
+`tools/v1/gate_greedy_equivalence.py` (G3: greedy match rate with per-divergence logit
+margins) and `tools/v1/gate_divergence_probe.py` (decode vs verify logits on identical KV
 at G3 divergence points) run on a CUDA machine with both models.

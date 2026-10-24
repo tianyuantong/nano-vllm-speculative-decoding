@@ -1,298 +1,208 @@
-# Results: batched speculative decoding vs ordinary decoding
+# Results: DFlash speculative decoding on nano-vLLM
 
-Measured 2026-09-21 on one NVIDIA RTX PRO 6000 Blackwell **Server Edition** (GB202, 96 GB,
-the same silicon and memory bandwidth as the RTX 5090 of the earlier experiments), driver
-580.173.02, torch 2.9.1+cu130, FlashAttention 2.8.3, Triton 3.5.1, Python 3.12.14,
-source `9a6afc3+src.ed54ec4112d3` (base commit + sha256 of the synced sources). Target
-Qwen3-8B, draft Qwen3-0.6B, both BF16, TP = 1. Every A/B pair (`k = 0` vs `k`) of one
-line and batch size ran in the same Slurm job on the same GPU; all 40 runs are one job
-(`spec-matrix-164484`). Raw result files: `benchmarks/results/pro6000-server-9a6afc3/`
-(not in git). The complete evidence package — the 40 result files, the gate, control and probe
-reports, the input panel, and a snapshot of the measured sources with SHA-256 sums — is the
-release asset `results-batched-v1`:
-<https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-batched-v1>.
-`tools/report_matrix.py` regenerates every table below from the result files.
+On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_qwen3_8b_block7`) proposes 7 tokens per round and a round yields 2.8 on average. On the unseen K128 confirmation panel, its steady-state throughput is **2.11–2.24×** plain decoding at C = 1, **1.75–1.85×** at C = 8 and **1.32–1.40×** at C = 32. At C = 64 it is 1.08× (1.06–1.09), which is within timing noise.
 
-## Setup
+The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, development panel, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
 
-- Workload: the 48-prompt panel of `docs/PERFORMANCE.md` (A1 groups 2, 6, 7, 8, 10, 11 and
-  A2 groups 0–5; Qwen3 chat template, non-thinking mode; prompts 980–2262 tokens),
-  `max_tokens = 512`, natural EOS. Fetched with `tools/fetch_panels.py`.
-- Engine: upstream nano-vLLM scheduler (continuous batching), `enable_prefix_cache=False`
-  in every run, `kv_cache_memory_bytes = 10 GiB`, `draft_kv_cache_memory_bytes = 6 GiB`,
-  `max_model_len = 4096`, `seed = 17011`.
-- Baseline: the same engine's ordinary decoding path (`k = 0`): the upstream scheduler and decode
-  CUDA graph, and the rewritten sampler (which adds top-k / top-p) shared with the speculative path.
-  It is not the untouched upstream release.
-- Lines: **rec** = Qwen3's recommended non-thinking sampling (T 0.7, top-p 0.8, top-k 20);
-  **flat** = T 1.0 without truncation (comparable with the RTX 5090 numbers of
-  `docs/PERFORMANCE.md`); **greedy** = T 0 (the model card advises against it; see
-  validity below).
-- Timing: one pair of CUDA events per engine step and one event per phase of every round,
-  read once after `generate()`; one warm-up `generate()` on 4 prompts excluded. Throughput
-  `Q` = completion tokens ÷ GPU timeline of the measured `generate()`; `R = Q(k) / Q(k=0)`.
-  Per-request TTFT and TPOT are not reported as latency: nano-vLLM's scheduler caps the
-  number of sequences prefilled per step, not the number running, so all 48 requests are
-  prefilled before the first decode step and per-request TPOT mostly measures the wait
-  behind earlier requests (362 ms at `B = 1`, where one decode step takes 12 ms).
+**How it is measured**
+- **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
+- **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§3).
+- **K128**: 128 prompts whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
+- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), frozen before the confirmation runs.
 
-## Headline
+## 1. Confirmation panel (K128)
 
-| max_num_seqs B | rec k=3 | flat k=3 | greedy k=4 |
-|---:|---:|---:|---:|
-| 1 | **1.50** | 1.45 | 1.53 |
-| 2 | **1.37** | 1.34 | 1.37 |
-| 4 | **1.24** | 1.25 | 1.26 |
-| 8 | **1.17** | 1.20 | 1.14 |
-| 16 | **1.04** | 1.03 | 1.06 |
+K128 is 128 prompts from SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): NIAH 43, code completion 40, open-book QA 37, creative writing 8. None of them overlap D48.
 
-`R ≥ 1.15` holds for `B ≤ 8` on the recommended and the T = 1.0 lines, and for `B ≤ 4` on the
-greedy line (greedy `B = 8` is 1.135); at `B = 16` speculation is within ±6 % of ordinary
-decoding. Each configuration is one seed and one timed call ([Repeatability](#repeatability) has three seeds at `B ∈ {1, 4, 8}`). The ratio of raw `generate()` wall
-times (the earlier project's primary metric) for the recommended line is 1.51 / 1.38 / 1.30 /
-1.19 / 1.07 at `B = 1 … 16`. Speculative calls emit fewer completion tokens in all five pairs:
-14949 / 14716 / 14443 / 14708 / 14841, versus 15023 / 14817 / 15165 / 14995 / 15166
-for ordinary decoding. Throughput ratio equals output-count ratio × GPU-time ratio;
-the wall timer has a slightly different boundary. Across `k ∈ {2, 3, 4}` on the rec line, `k = 3` is best for `B ≤ 4`,
-`k = 2` and `k = 3` tie at `B = 8`, and `k = 2` is best at `B = 16`; `k = 4` is never best.
-The previous implementation (`docs/PERFORMANCE.md`) measured −2.7 % … +5.4 % at `B ≤ 4`
-on the same models and panel.
+Which prompts each concurrency uses:
+- C = 1 and 8 take the first 48 prompts. Creative writing is 17% of those 48 against 6% of the whole panel, which likely lifts the speedup at these two concurrencies by about 0.04 (estimate).
+- C = 32 takes all 128.
+- C = 64 cycles through the panel twice.
 
-Recorded active speculative rounds take 19–31 ms, against 12–14 ms for one ordinary decode
-step: a request receives 2–3 tokens per round instead of one per step, so the gap between
-two deliveries grows from one step to one round.
+One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.7 ms, so the pre-registered rule voids it. The protocol also voids lines of one (C, seed) split across jobs, so all three lines of that group were rerun back to back in one job.
+- The table takes DFlash's value for that seed from the rerun: 2.19.
+- All 48 requests of all three lines produced the same tokens as the first run.
+- The 0.6B line keeps its original value: 1.566 (1.567 in the rerun).
 
-## Repeatability
+| C | 0.6B draft (k = 3) | DFlash (k = 7) | DFlash ÷ 0.6B |
+|---:|---|---|---|
+| 1 | **1.54 (1.54–1.57)** | **2.11–2.24** | 1.37–1.45 |
+| 8 | **1.21 (1.19–1.21)** | **1.75–1.85** | 1.44–1.56 |
+| 32 | 0.96 (0.95–0.96) | **1.32–1.40** | 1.38–1.48 |
+| 64 | 0.82 (0.81–0.82) | 1.08 (1.06–1.09) | 1.29–1.33 |
 
-On 2026-09-22 the rec line was rerun at `B ∈ {1, 4, 8}` with three seeds on an RTX PRO 6000
-Blackwell **Max-Q Workstation Edition** (job `spec-repeats-166061`, commit `02000a9`); every
-`k = 0` / `k = 3` pair ran back to back in one job.
+Values are the median (min–max) over seeds, to two decimals, or only the range when it spans more than 0.05. **Bold** marks a line that is faster than plain decoding by the protocol's rule.
 
-| B | published (Server, seed 17011) | Max-Q seed 17011 | Max-Q seed 110017 | Max-Q seed 130031 | range |
-|---:|---:|---:|---:|---:|---|
-| 1 | 1.499 | 1.496 | 1.488 | 1.475 | 1.47–1.50 |
-| 4 | 1.241 | 1.228 | 1.206 | 1.207 | 1.21–1.24 |
-| 8 | 1.168 | 1.150 | 1.095 | 1.093 | 1.09–1.17 |
+- **What "faster" means.** Every seed's R must be above 1 + 2 × timing noise. The confirmation panel has no timing repeats by design, so the timing noise is borrowed from the development matrix: 3.75%, from the same machine and the same engine.
+- **C = 64 is close to the line.** The three seeds give 1.057, 1.086 and 1.080. A timing noise of 2.5% would call this faster; the table takes the conservative side.
+- **DFlash against the 0.6B draft.** At every C, the per-seed paired gains all have the same sign and their median exceeds 2 × timing noise, so DFlash is faster than the 0.6B draft at every concurrency.
+- The 0.6B line drops below plain decoding from C = 32; DFlash stays above 1 up to C = 64.
+- Tokens per round, averaged over rounds: DFlash 2.75–2.85, 0.6B 2.49–2.53.
 
-- With the same seed, both GPUs produced identical tokens in all six calls; the differences are timing only.
-- At `B = 8` the spread across seeds (0.058) is larger than the difference between the GPUs (0.018):
-  different seeds generate different lengths, which changes the batch occupancy while the batch drains.
-- The editions differ by phase. Median step times, Server → Max-Q, at `B = 1 / 4 / 8`: decode
-  12.10 / 12.32 / 12.83 → 11.68 / 11.80 / 12.39 ms and speculative rounds 19.01 / 23.02 / 25.91 →
-  18.31 / 22.09 / 25.27 ms (2.5–4 % faster on the Max-Q); prefill 58.7 / 204.1 / 416.0 →
-  73.2 / 257.0 / 530.9 ms (25–28 % slower). Decode is limited by memory bandwidth and prefill by
-  compute, which the Max-Q's lower power limit constrains.
-- `B = 2` and `B = 16` have one measurement each.
+## 2. Development panel (D48) and confirmation panel (K128)
 
-## Throughput, latency and the break-even ratio
+| C | DFlash, D48 | DFlash, K128 | 0.6B, D48 | 0.6B, K128 |
+|---:|---|---|---|---|
+| 1 | 1.91–1.99 | 2.11–2.24 | 1.45–1.52 | 1.54 |
+| 8 | 1.66–1.72 | 1.75–1.85 | 1.17 | 1.21 |
+| 32 | 1.21–1.30 | 1.32–1.40 | 0.94 | 0.96 |
+| 64 | 1.01 | 1.08 | 0.79 | 0.82 |
+| tokens per round | 2.47–2.55 | 2.75–2.85 | 2.37–2.40 | 2.49–2.53 |
 
-`tokens/row/round` is the mean number of tokens one request commits per round
-(1 + accepted drafts). `round p50 / step p50` are the median durations at the full batch
-size; their ratio is the cost side of the break-even inequality.
+D48 is the 48-prompt panel of the September release, with 5 seeds per C. It also covers C = 2, 4 and 16:
+- DFlash: 1.91–1.97, 1.69–1.85 and 1.55;
+- 0.6B: 1.42, 1.32 and 0.99–1.04.
 
-| line | B | k | tok/s k=0 | tok/s k | R | tokens/row/round | round p50 / step p50 | ratio |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| flat | 1 | 3 | 82.7 | 120.3 | **1.454** | 2.32 | 18.3 / 11.9 | 1.54 |
-| flat | 2 | 3 | 159.1 | 213.6 | **1.342** | 2.31 | 20.1 / 12.2 | 1.64 |
-| flat | 4 | 3 | 305.4 | 382.9 | **1.254** | 2.38 | 22.2 / 12.1 | 1.83 |
-| flat | 8 | 3 | 503.2 | 605.3 | **1.203** | 2.28 | 25.0 / 12.6 | 1.98 |
-| flat | 16 | 3 | 805.0 | 831.1 | **1.032** | 2.27 | 30.0 / 13.9 | 2.15 |
-| greedy | 1 | 4 | 83.3 | 127.8 | **1.534** | 2.67 | 19.9 / 11.8 | 1.68 |
-| greedy | 2 | 4 | 159.6 | 218.1 | **1.366** | 2.59 | 21.6 / 12.1 | 1.78 |
-| greedy | 4 | 4 | 305.8 | 386.2 | **1.263** | 2.64 | 24.3 / 12.0 | 2.02 |
-| greedy | 8 | 4 | 549.1 | 623.3 | **1.135** | 2.68 | 27.0 / 12.5 | 2.16 |
-| greedy | 16 | 4 | 803.7 | 850.9 | **1.059** | 2.62 | 33.2 / 13.8 | 2.41 |
-| rec | 1 | 2 | 81.4 | 113.2 | **1.390** | 2.07 | 17.3 / 12.1 | 1.43 |
-| rec | 1 | 3 | 81.4 | 122.0 | **1.499** | 2.45 | 19.0 / 12.1 | 1.57 |
-| rec | 1 | 4 | 81.4 | 114.6 | **1.408** | 2.53 | 21.2 / 12.1 | 1.75 |
-| rec | 2 | 2 | 156.3 | 205.1 | **1.313** | 2.11 | 19.7 / 12.4 | 1.58 |
-| rec | 2 | 3 | 156.3 | 214.1 | **1.370** | 2.44 | 21.9 / 12.4 | 1.76 |
-| rec | 2 | 4 | 156.3 | 205.3 | **1.314** | 2.52 | 22.9 / 12.4 | 1.85 |
-| rec | 4 | 2 | 301.5 | 364.0 | **1.207** | 2.10 | 20.6 / 12.3 | 1.67 |
-| rec | 4 | 3 | 301.5 | 374.2 | **1.241** | 2.43 | 23.0 / 12.3 | 1.87 |
-| rec | 4 | 4 | 301.5 | 346.0 | **1.148** | 2.49 | 25.8 / 12.3 | 2.09 |
-| rec | 8 | 2 | 507.7 | 594.7 | **1.172** | 2.08 | 23.1 / 12.8 | 1.80 |
-| rec | 8 | 3 | 507.7 | 592.8 | **1.168** | 2.36 | 25.9 / 12.8 | 2.02 |
-| rec | 8 | 4 | 507.7 | 581.1 | **1.145** | 2.55 | 28.7 / 12.8 | 2.23 |
-| rec | 16 | 2 | 793.1 | 835.2 | **1.053** | 2.12 | 27.0 / 14.1 | 1.91 |
-| rec | 16 | 3 | 793.1 | 827.0 | **1.043** | 2.38 | 31.1 / 14.1 | 2.20 |
-| rec | 16 | 4 | 793.1 | 784.5 | **0.989** | 2.53 | 34.9 / 14.1 | 2.47 |
+The two panels agree on the direction and on every verdict.
 
-At a fixed full batch, `tokens/row/round > round/step` is a rough break-even check.
-The estimate `tokens/row/round ÷ ratio` differs from measured `R` by −0.053 to +0.105
-(estimate minus measurement) across the 25 pairs. It uses full-batch step medians and
-omits prefill and the drain at the end of a call, where rounds run below the full batch size.
-The sign of `R − 1` agrees with the estimate in 24 of 25 pairs; the exception is
-rec `B = 16, k = 4` (measured 0.989, estimated 1.026).
+The engine is the same on both panels; what differs is acceptance. K128 yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round):
 
-## Where a round's time goes
+| category | D48 | K128 |
+|---|---:|---:|
+| code completion | 3.42 | 3.49 |
+| NIAH | 2.80 | 2.92 |
+| creative writing | 2.59 | 2.95 |
+| open-book QA | 2.13 | 2.42 |
 
-Median milliseconds per phase (CUDA events inside `SpeculativeDecoder.run_round`). Medians
-do not add: the sum of the phase medians differs from the round median above by up to 1.1 ms
-(rec, B = 16: 30.0 vs 31.1). `catch_up` is one draft decode-graph step for the sequences a
-fully accepted round left one KV entry short; its p50 is ≈ 0 when fewer than half the rounds
-need it. "accept rate by position" is the share of rows whose first *n* drafts were all
-accepted (draft-prefix survival), not a per-position conditional rate.
+Prompt length is not the cause. Both panels have a median length of about 1020 tokens, and D48 has only three longer prompts (1229, 1264 and 2262 tokens).
 
-| line | B | k | catch_up | propose | verify | accept | copy | sum | draft-prefix survival by position |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| flat | 1 | 3 | 0.01 | 5.94 | 12.06 | 0.13 | 0.02 | 18.2 | 0.63, 0.41, 0.28 |
-| flat | 2 | 3 | 0.01 | 6.34 | 13.18 | 0.14 | 0.02 | 19.7 | 0.63, 0.41, 0.27 |
-| flat | 4 | 3 | 1.79 | 6.81 | 13.38 | 0.15 | 0.02 | 22.2 | 0.64, 0.43, 0.31 |
-| flat | 8 | 3 | 1.93 | 7.88 | 14.99 | 0.17 | 0.02 | 25.0 | 0.61, 0.40, 0.27 |
-| flat | 16 | 3 | 2.03 | 10.17 | 16.54 | 0.22 | 0.02 | 29.0 | 0.61, 0.40, 0.26 |
-| greedy | 1 | 4 | 0.01 | 7.61 | 12.07 | 0.03 | 0.02 | 19.7 | 0.66, 0.45, 0.32, 0.24 |
-| greedy | 2 | 4 | 0.01 | 8.11 | 13.16 | 0.03 | 0.02 | 21.3 | 0.64, 0.43, 0.30, 0.22 |
-| greedy | 4 | 4 | 1.74 | 8.79 | 13.88 | 0.03 | 0.02 | 24.5 | 0.66, 0.44, 0.31, 0.23 |
-| greedy | 8 | 4 | 1.86 | 10.05 | 14.93 | 0.04 | 0.02 | 26.9 | 0.67, 0.45, 0.32, 0.24 |
-| greedy | 16 | 4 | 1.93 | 13.23 | 16.90 | 0.05 | 0.02 | 32.1 | 0.65, 0.44, 0.31, 0.22 |
-| rec | 1 | 2 | 0.01 | 4.33 | 12.35 | 0.31 | 0.02 | 17.0 | 0.64, 0.43 |
-| rec | 1 | 3 | 0.01 | 6.42 | 12.06 | 0.31 | 0.02 | 18.8 | 0.67, 0.45, 0.33 |
-| rec | 1 | 4 | 0.01 | 8.58 | 12.13 | 0.33 | 0.02 | 21.1 | 0.63, 0.41, 0.29, 0.20 |
-| rec | 2 | 2 | 1.78 | 4.52 | 13.15 | 0.34 | 0.02 | 19.8 | 0.66, 0.45 |
-| rec | 2 | 3 | 1.78 | 6.84 | 13.19 | 0.34 | 0.03 | 22.2 | 0.67, 0.45, 0.32 |
-| rec | 2 | 4 | 0.01 | 9.15 | 13.14 | 0.34 | 0.02 | 22.7 | 0.63, 0.41, 0.28, 0.20 |
-| rec | 4 | 2 | 1.93 | 4.91 | 13.35 | 0.34 | 0.02 | 20.6 | 0.65, 0.44 |
-| rec | 4 | 3 | 1.81 | 7.39 | 13.38 | 0.34 | 0.03 | 23.0 | 0.66, 0.45, 0.32 |
-| rec | 4 | 4 | 1.78 | 9.89 | 13.94 | 0.35 | 0.02 | 26.0 | 0.62, 0.40, 0.27, 0.19 |
-| rec | 8 | 2 | 2.05 | 5.64 | 14.91 | 0.36 | 0.03 | 23.0 | 0.64, 0.44 |
-| rec | 8 | 3 | 1.97 | 8.49 | 14.99 | 0.38 | 0.03 | 25.9 | 0.64, 0.43, 0.29 |
-| rec | 8 | 4 | 1.83 | 11.33 | 15.01 | 0.39 | 0.03 | 28.6 | 0.64, 0.42, 0.28, 0.20 |
-| rec | 16 | 2 | 2.31 | 7.20 | 16.21 | 0.42 | 0.03 | 26.2 | 0.66, 0.46 |
-| rec | 16 | 3 | 2.11 | 10.85 | 16.56 | 0.47 | 0.03 | 30.0 | 0.65, 0.44, 0.30 |
-| rec | 16 | 4 | 1.96 | 14.46 | 16.93 | 0.49 | 0.03 | 33.9 | 0.63, 0.42, 0.28, 0.20 |
+## 3. Against vLLM (D48, wall-clock tok/s)
 
-Three measurements carry the analysis; the causes named for the first two are hypotheses
-consistent with the numbers, not separately profiled:
+| C | plain decoding: nano / vLLM v1 / vLLM v2 | 0.6B: nano / vLLM | DFlash: nano / vLLM | vLLM DSpark |
+|---:|---|---|---|---:|
+| 1 | 80 / 77 / 73 | 119 / 108 | 155 / 156 | 173 |
+| 8 | 515 / 506 / 492 | 608 / 596 | 804 / 881 | 919 |
+| 32 | 1276 / 1257 / 1224 | 1231 / 1279 | 1567 / 1681 | 1794 |
 
-1. **One draft step costs 2.1–3.6 ms** (propose ÷ k), against 0.7 ms for reading its 1.2 GB
-   of weights at 1.79 TB/s. A 28-layer model issues ≈ 300 kernels per step, so per-kernel
-   launch overhead inside the graph is the likely explanation; a kernel-level profile would
-   confirm it. With k = 3 the draft side (catch-up + propose) is 6–13 ms of a 19–31 ms round —
-   the term `(k+1)·d` of the inequality, and the reason larger k stops paying.
-2. **Verification costs 0–2.8 ms more than a decode step** (12.1 vs 11.9 ms at B = 1,
-   16.6 vs 14.1 ms at B = 16) for the same weight read. The two paths differ in the attention
-   kernel (`flash_attn_varlen_func` over k+1 queries without split-KV, against
-   `flash_attn_with_kvcache`) and in the number of query rows; which part of the gap each
-   accounts for was not measured.
-3. **Draft-prefix survival is ≈ 0.64 / 0.43 / 0.29 on all three sampling lines**, with greedy
-   slightly higher (0.66 / 0.45 / 0.32 / 0.23). Temperature and truncation change p and q, so
-   this is an observation about these three configurations, not a general independence.
+nano's numbers are the median of 5 seeds, without the timing repeats. vLLM's are the median of 2 runs.
+- **vLLM version.** `0.1.1.dev52+g372477d2d`, a development build from 2026-09-12. It runs the 0.6B draft on its v1 model runner and DFlash and DSpark on v2, so the table lists its plain decoding on both runners.
+- **Run-to-run variation.** vLLM's two runs differ by 7.2% at C = 8, so the gap at that concurrency is not stable; at C = 32 they differ by 0.8%.
+- vLLM was not run on K128.
 
-Everything the previous implementation paid for is gone: sampling is 0.03–0.5 ms per
-round for the whole batch (was ≈ 2.8 ms per request), the host copy is 0.02–0.03 ms
-(was two synchronizations), and there are no eager fallbacks (the round p95 tracks the
-p50 within 1–2 ms).
+What the table shows:
+- **Plain decoding.** nano is 1.5–4% faster than vLLM's v1 runner and 4–10% faster than its v2 runner. nano's plain decoding runs at about 69–71% memory-bandwidth utilisation: bytes of weights and KV read ÷ step time ÷ the 1.79 TB/s peak.
+- **DFlash.** It is level at C = 1 and 9% and 7% behind at C = 8 and 32. The most likely cause is the prefill stall of §5.2; its size matches, but it has not been verified directly.
+- **DSpark.** On vLLM, DSpark is another 4–11% faster than DFlash.
 
-## Correctness gates (job `spec-gates-164454`, control `spec-control-164467`)
+## 4. Correctness
 
-- **Smoke**: the speculative engine and the `k = 0` engine both generate coherent text on
-  three prompts; the speculative run finished 48 tokens × 3 prompts in 16 engine steps
-  (1 prefill + 15 rounds) against 48 steps.
-- **G1 — verification logits vs step-by-step decode logits** on the same prefix, k = 3:
-  max |Δ| per position 0.25 / 0.25 / 0.34 / 0.28 (bf16 resolution at logit magnitude
-  16–32 is 0.125), argmax identical at every position; a batch padded from 3 to 4 rows
-  changed the real rows by 0.0.
-- **G2 — sampler distribution**: eight exact reference (p, q) pairs, 200 000 draws each on
-  GPU: total variation between emitted and target distributions ≤ 0.0031 (max 0.00302). On a real
-  (p, q) pair from the target/draft at T 0.7 / top-p 0.8 / top-k 20 the analytic
-  acceptance rate Σ min(p, q) and the observed rate agreed (both 1.0: the distributions
-  coincided after truncation at that position). These checks use one draft per round (k = 1),
-  so the truncation at the first rejection, which exists only for k ≥ 2, was not exercised,
-  and the real pair did not exercise rejection at all.
-- **G3 — greedy equivalence** (a measurement, not a pass/fail gate): greedy k = 4 vs greedy
-  k = 0 on the 48 prompts: 7 exact matches, 41 divergences; 35 of the 41 divergences sit at a
-  top-2 logit margin below the G1 noise floor (median margin 0.000, i.e. exact bf16 ties).
-  **Control**: greedy k = 0 at B = 1 and at B = 8 against greedy k = 0 at B = 4 — 7 / 41 / 35
-  and 7 / 41 / 34. The baseline itself is batch-size sensitive to the same degree; the
-  matching counts do not prove that every individual divergence has the same cause.
-- **Probe at the six divergences with margins above the noise floor** (max 1.75) plus four
-  near-tie controls: with identical KV, decode-path and verification-path logits differ by
-  ≤ 0.375 at all ten probed positions (including positions 245, 255, 228, 229 within a
-  256-token block); their argmaxes agree at seven of ten, the three disagreements being at
-  decode-path margins 0.25, 0.0 and 0.0. For the 1.75 case both paths pick the ordinary
-  token on identical KV: the probe did not reproduce that flip. Its cause in the full
-  executions remains unresolved.
+### 4.1 Output quality (GSM8K)
 
-## Output validity (greedy line)
+| line | accuracy | difference from plain decoding, points (95% interval) |
+|---|---:|---|
+| plain decoding | 85.2% | — |
+| 0.6B | 85.6% | +0.4 (−0.8 … +1.6) |
+| DFlash | 84.9% | −0.3 (−1.5 … +0.9) |
 
-Share of requests hitting the 512-token cap and share whose last 64 tokens contain a
-repeated 8-gram. The two engines agree, so greedy acceptance is not inflated by
-repetition relative to the baseline; the model card's warning against greedy decoding
-stands.
+All 1319 questions × 2 seeds at C = 32, paired by question and seed. The gate requires the interval's lower end to be above −3 points; both lines pass. Fewer than 0.2% of answers could not be parsed.
 
-| B | k | capped share | repeated-tail share |
-|---:|---:|---:|---:|
-| 1 | 0 | 0.35 | 0.12 |
-| 1 | 4 | 0.33 | 0.08 |
-| 2 | 0 | 0.33 | 0.15 |
-| 2 | 4 | 0.33 | 0.15 |
-| 4 | 0 | 0.38 | 0.10 |
-| 4 | 4 | 0.35 | 0.12 |
-| 8 | 0 | 0.33 | 0.12 |
-| 8 | 4 | 0.33 | 0.12 |
-| 16 | 0 | 0.33 | 0.08 |
-| 16 | 4 | 0.35 | 0.12 |
+### 4.2 Gates
 
-## What would move R further (not implemented)
-
-| Change | Layer | Effect on the round (estimate) |
+| gate | what it checks | result |
 |---|---|---|
-| Fewer kernels per draft step (fuse the draft's per-layer ops, or a draft with fewer layers) | kernel / model | propose 6.4 → ≈ 3 ms at B = 1 for k = 3; R at B = 1 ≈ 1.5 → ≈ 1.8 |
-| Fold `compute_logits` and sampling into the draft step graph | framework | ≈ 0.3 ms per draft step |
-| Split-KV in the verification attention (FlashAttention 3 / FlashInfer paged prefill) | kernel | verify − 1…3 ms at B ≥ 8; moves the B = 16 break-even |
-| A stronger draft (per-position acceptance 0.64 → 0.8, e.g. an EAGLE-style head) | model | tokens/row/round 2.4 → ≈ 3.2 at the same k |
+| G1-draft | DFlash block forward against DeepSpec's reference, 8 fixtures | relative error 0.60–1.05% (bound 2%); argmax equal at every decided position |
+| Alignment | tokens per round, nano against DeepSpec, C = 1, 3 seeds per side | gap 0.009 at T 0.7 (bound 0.138), 0.032 at T 1.0 (bound 0.275); see below |
+| CUDA graph vs eager | the verify graph and the draft block graph | logits, exported hidden states and KV bit-identical at captured sizes |
+| G2-multi | the production sampler's multistep output distribution, k = 2, 3, 7, on the GPU | 29 cases pass |
+| G1-wide | verification logits against step-by-step decoding, 8 prompts, B = 1/4/16 | worst gap 0.75 (0.6B) and 0.84 (DFlash), bound 3.0; argmax equal at every decided position |
+| G2-real | acceptance rate and output distribution on real distributions | see below |
 
-## Limitations
+- **Decided position**: one where the reference's top logit leads the second by more than 0.5.
+- **Alignment, paired.** Over 24 per-prompt pairs, nano minus DeepSpec is +0.056 ± 0.19 at T 0.7 and +0.064 ± 0.26 at T 1.0 (2 standard errors); both are consistent with 0.
+- **G2-real.**
+  - DFlash: acceptance rate 0.776 against an analytic 0.777, worst frequency gap 0.0011 (bound 0.0066).
+  - 0.6B: acceptance rate 0.453 against an analytic 0.456, worst frequency gap 0.0008.
 
-- One GPU model in two editions (Repeatability: the Max-Q Workstation Edition decodes
-  2.5–4 % faster and prefills 25–28 % slower than the Server Edition), one model pair, one
-  seed per configuration in the main matrix (three seeds at `B ∈ {1, 4, 8}` on the Max-Q).
-- Offline throughput with every request prefilled before decoding; no per-request latency
-  is reported (see Setup).
-- No output-quality evaluation beyond the greedy repetition shares; strict finite-precision
-  equivalence to ordinary decoding is not claimed (G3 and its control show why it cannot
-  be, for greedy).
-- Timings are GPU-timeline durations between CUDA events; host time between steps is
-  included only where the GPU waits for it.
+### 4.3 Three rules revised after seeing the data
 
-## Reproduce
+**Alignment**
+- *First run:* the rule treated the rounds of one prompt as independent samples, which made the standard error too small. T 1.0 failed on the first seed, and across three seeds the difference changed sign (+0.18 … −0.20).
+- *Revision:* 3 seeds per side, with the standard error taken from per-run means.
+- *After:* passes.
 
-Use Python 3.10–3.12 on a CUDA machine, install the project and GPU dependencies as in
-[Usage](../README.md#usage), and run from the reviewed, committed repository root.
-In Bash, enter the local model directories when prompted. The new run records the clean
-commit being executed; the published run's source snapshot remains in the evidence package.
+**G1-wide**
+- *First run:* worst gaps of 1.25 (0.6B) and 1.75 (DFlash), above the fixed bound of 0.5. But decode alone, changing only the batch size, already differs by up to 1.5 (at B = 16), so even the reference path would fail a 0.5 bound.
+- *Revision:* the bound is twice the noise floor, and the floor is measured first in the same job.
+- *After:* passes. The argmax rule passed both times.
 
-```bash
-(
-  set -euo pipefail
-  test -z "$(git status --porcelain)"
-  MEASURED_COMMIT=$(git rev-parse HEAD)
-  read -r -p 'Local Qwen3-8B model directory: ' TARGET_MODEL
-  read -r -p 'Local Qwen3-0.6B model directory: ' DRAFT_MODEL
-  test -d "$TARGET_MODEL"
-  test -d "$DRAFT_MODEL"
-  python tools/fetch_panels.py
-  test -s benchmarks/inputs/panel-48.json
-  BENCH_OUTPUT=$(mktemp -d "${TMPDIR:-/tmp}/nano-vllm-reproduce.XXXXXX")
-  python tools/gate_smoke.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
-    --k 3 --output "$BENCH_OUTPUT/smoke.json"
-  python tools/gate_verify_logits.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
-    --k 3 --output "$BENCH_OUTPUT/g1.json"
-  python tools/gate_sampler_distribution.py --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
-    --k 3 --output "$BENCH_OUTPUT/g2.json"
-  python tools/gate_greedy_equivalence.py run --target "$TARGET_MODEL" \
-    --k 0 --output "$BENCH_OUTPUT/g3-ordinary.json"
-  python tools/gate_greedy_equivalence.py run --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
-    --k 4 --output "$BENCH_OUTPUT/g3-speculative.json"
-  python tools/gate_greedy_equivalence.py compare --target "$TARGET_MODEL" \
-    --ordinary "$BENCH_OUTPUT/g3-ordinary.json" --speculative "$BENCH_OUTPUT/g3-speculative.json" \
-    --noise-floor 0.34375 --output "$BENCH_OUTPUT/g3.json"
-  python bench_spec.py --commit "$MEASURED_COMMIT" --target "$TARGET_MODEL" \
-    --max-num-seqs 4 --temperature 0.7 --top-k 20 --top-p 0.8 --output "$BENCH_OUTPUT/rec-B4-k0.json"
-  python bench_spec.py --commit "$MEASURED_COMMIT" --target "$TARGET_MODEL" --draft "$DRAFT_MODEL" \
-    --k 3 --max-num-seqs 4 --temperature 0.7 --top-k 20 --top-p 0.8 --output "$BENCH_OUTPUT/rec-B4-k3.json"
-  python tools/report_matrix.py "$BENCH_OUTPUT/rec-B4-k0.json" "$BENCH_OUTPUT/rec-B4-k3.json"
-  printf 'Results: %s\n' "$BENCH_OUTPUT"
-)
-```
+**G2-real** (revised twice)
+- *First run:* both lines picked a position where the target split 0.5 / 0.5 and the draft put everything on one token, which tests only the simplest rejection.
+- *Second run:* the positions it picked had a target with a single token, so the output-distribution check tested nothing.
+- *Revisions:* first the draft's q, then also the target's p, must put probability on at least 2 tokens.
+- *After:* passes, now testing the residual distribution over several tokens.
+
+The protocol's `revised` notes record each revision together with the first run's numbers.
+
+## 5. Where the time goes
+
+### 5.1 One round
+
+DFlash on D48, median GPU time per phase (ms):
+
+| C | propose | verify | context store | accept | round |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2.85 | 12.11 | 0.26 | 0.32 | 15.7 |
+| 8 | 3.33 | 14.48 | 0.29 | 0.45 | 18.7 |
+| 32 | 6.50 | 22.23 | 0.34 | 2.20 | 31.8 |
+| 64 | 11.80 | 38.23 | 0.54 | 4.31 | 55.9 |
+
+**Verification is 68–77% of a round**, and it gets more expensive per row as concurrency rises:
+- From C = 32, each extra verified row costs about 0.023 ms; at C = 64, about 0.03–0.04 ms. Verifying 8 positions for every request costs more the more requests there are.
+- Yet only 8% of rounds accept five or more drafts. Verifying only the first few drafts is therefore a possible follow-up, estimated at about +3% at C = 32 and +8% at C = 64 (estimate).
+- vLLM's adaptive verification, compared on the same attention backend, gives 0.995× at C = 8 and 32.
+
+**The two CUDA graphs**
+- Capturing the draft block forward in a graph made a round 16% faster at C = 1 (18.8 → 15.7 ms) and 12% faster at C = 8. Profiling showed that before it, the GPU was waiting for the CPU to launch kernels.
+- A graph for the context store gained nothing: round time did not change, and the phase's GPU time fell by only 0.04 ms, so it was reverted. The expected explanation was that its launch cost was already hidden behind verification's GPU time; the measurement confirms only that there was no gain.
+
+### 5.2 The prefill stall
+
+nano's prefill steps do no decoding. Each new request pauses all the others for one step of about 52 ms, because a prefill step handles one prompt of about 1020 tokens.
+
+| C | prefill share of the steady window (DFlash / plain) | DFlash throughput lost to it (lower–upper bound) | speedup: measured → without prefill time |
+|---:|---|---|---|
+| 8 | 15.7% / 8.7% | 5–16% | 1.70 → 1.84 |
+| 32 | 29.5% / 21.6% | 15–29% | 1.27 → 1.40 |
+| 64 | 30.7% / 29.5% | 26–31% | 1.01 → 1.03 |
+
+The lower bound assumes each stall displaces one round; the upper bound counts all prefill time as lost.
+
+- **Why DFlash loses more.** DFlash decodes faster, so prefill takes a larger share of its time, and it loses 8–9 points more than plain decoding. vLLM mixes prefill into decode steps instead: the step gets longer, but the decoding requests still get their tokens in it, so it never stops a whole step.
+- **The gap to vLLM.** Without speculation, nano is 2–4% faster than vLLM; with DFlash it is 7% slower. This asymmetry of about 10 points matches the extra stall loss. It is not verified directly yet; verifying it needs prefill merged into decode steps.
+- **Inter-token latency.** ITL is the gap between two consecutive deliveries to one request. For DFlash at C = 32, its p99 is 131 ms, and 32.9 ms without the gaps that contain a prefill; those gaps are 21% of all gaps.
+
+## 6. Estimates made beforehand
+
+Before the first measurement, the plan estimated:
+
+| item | estimate | measured |
+|---|---|---|
+| round time at C = 1 | 15–16.5 ms | 15.7 ms |
+| tokens per round | 3.5–5, from the T = 1.0 numbers of the [DSpark paper](https://arxiv.org/abs/2607.05147) | 2.5 (D48), 2.8 (K128); DeepSpec's own implementation on 8 D48 prompts with temperature-only sampling (T 0.7) also gives just 2.55 (three runs, 2.49–2.59) |
+| speedup at C = 1 | 2.6–4.0 | 1.91–1.99 (D48), 2.11–2.24 (K128) |
+
+The cost was estimated well and the gain too high: acceptance on these prompts is lower than on the paper's benchmarks.
+
+## 7. Limitations
+
+- Offline closed loop: fixed concurrency, with a new request as soon as one finishes. This is not an online serving benchmark, and no service-level objectives were measured.
+- One GPU model (RTX PRO 6000 Blackwell) and one target model (Qwen3-8B).
+- Random sampling: T 0.7, top-k 20, top-p 0.8. Speculative decoding keeps the output distribution, not the exact tokens; §4 checks the distribution.
+- The comparison with vLLM is on D48 only, against a development build of vLLM.
+- The prefill stall is located but not fixed. Verifying fewer drafts per round and measuring the verify cost curve are not done yet.
+
+## Appendix: environment and data
+
+| item | value |
+|---|---|
+| engine | development matrix at `1f78eca`, confirmation set at `10b38b4` (same engine code) |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
+| software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
+| models | target Qwen3-8B; drafts Qwen3-0.6B and DeepSpec's `dflash_qwen3_8b_block7` |
+| protocol | [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), SHA256 `d012e92933cda36f…` |
+| panels | D48 `071befa6898b3187…`; K128 `44f6fb6b4922c3d8…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
+| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../tools/stall_stats.py) and [`tools/itl_stats.py`](../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure |
+
+Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run.
+
+The September results for the 0.6B draft are in [v1/RESULTS.md](v1/RESULTS.md).

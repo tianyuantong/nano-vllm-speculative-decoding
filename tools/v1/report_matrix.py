@@ -2,10 +2,12 @@
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 
-from summarize_bench import percentile, summarize
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from summarize_bench import percentile, summarize  # noqa: E402
 
 NAME = re.compile(r"(?P<line>[a-z]+)-B(?P<batch>\d+)-k(?P<k>\d+)\.json")
 
