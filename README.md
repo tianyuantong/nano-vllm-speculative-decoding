@@ -4,7 +4,7 @@
 
 Batched speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm).
 
-**1.50× throughput at batch 1 · 1.17× at batch 8**
+**≈1.5× throughput at batch 1 · 1.1–1.2× at batch 8**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -21,8 +21,9 @@ Batched speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/n
 </div>
 
 Qwen3-8B + Qwen3-0.6B · BF16 · RTX PRO 6000 Blackwell. Compared with ordinary decoding in the same
-engine, throughput rises from **81.4 to 122.0 tokens/s** at batch 1 and **507.7 to 592.8 tokens/s** at batch 8.
-[Full results and reproduction →](docs/RESULTS.md)
+engine, throughput is 1.47–1.50× at batch 1 and 1.09–1.17× at batch 8 across four measurements
+(one seed on the Server Edition, three on a Max-Q Workstation Edition); the figure shows the single
+Server-Edition run. [Full results, repeatability and reproduction →](docs/RESULTS.md)
 
 ## Highlights
 
