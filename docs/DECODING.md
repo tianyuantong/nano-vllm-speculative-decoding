@@ -66,7 +66,9 @@ drawn left to right: row j's logits get the Markov bias of the token drawn at ro
 after its bias. The checkpoint's confidence head is loaded but not used, so every round
 verifies all 7 drafts. When every request truncates with top-k, each row is drawn among its
 top `max_top_k + 64` logits, which matches the whole-vocabulary rule unless more than 64
-tokens tie at the cut value.
+tokens tie at the cut value. Sampling graphs are captured for the first 4 sampling settings
+(top-k width, top-p on or off, whether every request truncates); a batch with any other
+setting samples eagerly, with the same drafts, about 0.4–0.5 ms more per round at C = 1.
 
 ## What a round does
 

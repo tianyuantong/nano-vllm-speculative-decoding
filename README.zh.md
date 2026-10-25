@@ -20,9 +20,9 @@
 
 </div>
 
-Qwen3-8B 接 DSpark draft，RTX PRO 6000。输出分布不变（已检验）；GSM8K 准确率与不投机相差 −1.7 … +0.8 个百分点。
+Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布不变；采样器、draft 的分布和 logits 都检验过。GSM8K 准确率与不投机相差 −1.7 … +0.8 个百分点。
 
-怎么测的：同一引擎内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）。DSpark 每档都比 DFlash 快；C=32 到 64 时，这份领先里至少有 2–6 个百分点来自 DSpark 更省的采样路径。和 vLLM 的 DSpark 比（同型号的卡、同一份权重，开发版 `372477d`，开发集，挂钟吞吐）：C=1 到 32 慢 7.6–7.9%。[测量协议、闸门和待解的问题 →](docs/RESULTS.md)
+怎么测的：同一引擎内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）。DSpark 每档都比 DFlash 快；C=32 到 64 时，这份领先里估计有 2–6 个百分点来自 DSpark 更省的采样路径。和 vLLM 的 DSpark 比（同型号的卡、同一份权重，开发版 `372477d`，开发集，挂钟吞吐）：C=1 到 32 慢 7.6–7.9%。[测量协议、闸门和待解的问题 →](docs/RESULTS.md)
 
 | C | DFlash（k=7） | DSpark（k=7） | DSpark ÷ DFlash | 每轮 token 数（DFlash / DSpark） |
 |---:|---|---|---|---|
@@ -44,7 +44,7 @@ Qwen3-8B 接 DSpark draft，RTX PRO 6000。输出分布不变（已检验）；G
 - draft 和 target 共用块表和 pad 块，不需要第二套 KV 分配。
 - 两张 CUDA graph：verify（同时导出那 5 层）和 draft 块前向。
 
-**DSpark**，建在 DFlash 的 draft 上：4 个引擎文件新增 217 行、删 12 行（引擎现共 2832 行）。
+**DSpark**，建在 DFlash 的 draft 上：4 个引擎文件新增 224 行、删 12 行（引擎现共 2839 行）。
 - Markov head 给第 j 行的 logits 加一项低秩偏置，由第 j−1 行抽出的 token 决定（第 0 行用最后一个已提交的 token），所以 7 个 draft 从左到右逐个抽。
 - 每一行交给接受规则的，就是它实际被抽样时用的分布，也就是加过偏置之后的分布。
 - 所有请求都用 top-k 截断时，每行只在前 max_top_k + 64 个 logits 里抽；截断规则不变，只有超过 64 个 token 和截断点同分时才会和整词表不同。

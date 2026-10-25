@@ -20,9 +20,9 @@ Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm
 
 </div>
 
-DSpark draft on Qwen3-8B, RTX PRO 6000. Lossless in distribution (verified); GSM8K accuracy within −1.7…+0.8 pt.
+DSpark draft on Qwen3-8B, RTX PRO 6000. Lossless in distribution by the acceptance rule, with the sampler, the drafts' distributions and the logits checked; GSM8K accuracy within −1.7…+0.8 pt.
 
-Measured: steady-state tok/s against plain decoding in the same engine, on an unseen 128-prompt panel, 3 seeds per concurrency, median (min–max). DSpark is faster than DFlash at every concurrency; at C=32–64, at least 2–6 points of that lead come from DSpark's cheaper sampling path. Against vLLM's DSpark with the same weights on the same GPU model (dev build `372477d`, dev panel, wall-clock): 7.6–7.9% behind at C=1–32. [Protocol, gates, open questions →](docs/RESULTS.md)
+Measured: steady-state tok/s against plain decoding in the same engine, on an unseen 128-prompt panel, 3 seeds per concurrency, median (min–max). DSpark is faster than DFlash at every concurrency; at C=32–64, an estimated 2–6 points of that lead come from DSpark's cheaper sampling path. Against vLLM's DSpark with the same weights on the same GPU model (dev build `372477d`, dev panel, wall-clock): 7.6–7.9% behind at C=1–32. [Protocol, gates, open questions →](docs/RESULTS.md)
 
 | C | DFlash (k=7) | DSpark (k=7) | DSpark ÷ DFlash | tokens per round (DFlash / DSpark) |
 |---:|---|---|---|---|
@@ -44,7 +44,7 @@ Two block drafts on top of the 0.6B-draft release.
 - The draft shares the target's block table and pad block, so there is no second KV allocator.
 - Two CUDA graphs: verification (also exporting the 5 layers) and the draft block forward.
 
-**DSpark**, on the DFlash draft: 217 lines added, 12 removed, in 4 engine files (the engine is now 2,832 lines).
+**DSpark**, on the DFlash draft: 224 lines added, 12 removed, in 4 engine files (the engine is now 2,839 lines).
 - A Markov head adds to row j's logits a low-rank bias of the token drawn at row j−1 (the last committed token for row 0), so the 7 drafts are drawn left to right.
 - Each row hands the acceptance rule the distribution it was drawn from, after its bias.
 - When every request truncates with top-k, a row is drawn among its top max_top_k + 64 logits only; the truncation is the same, and exact unless more than 64 tokens tie at the cut.
