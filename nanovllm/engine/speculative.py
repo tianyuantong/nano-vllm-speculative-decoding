@@ -101,6 +101,9 @@ class ModelDrafter:
 # When every row truncates with top-k, a DSpark row is drawn among its top max_top_k + TIE_MARGIN logits: the
 # truncation also keeps the tokens tied with its cut value, and the margin leaves room for them.
 TIE_MARGIN = 64
+# DSpark captures sampling graphs, and a noise buffer, for at most this many sampling_graph_key values, the first
+# ones it meets; a batch with any other key samples eagerly, so varying top-k cannot grow them without bound.
+MAX_SAMPLING_KEYS = 4
 
 
 def num_candidates(max_top_k: int, all_top_k: bool, vocab_size: int) -> int:
@@ -127,7 +130,7 @@ class DFlashDrafter:
     positions, like the target's KV. It shares the target's block table: same block count, same pad block.
     With graphs, the block forward replays one graph per padded batch size. DFlash's logits and sampling stay
     outside; DSpark's logits and k rows replay a sampling graph per padded batch size and sampling_graph_key,
-    captured for every batch size when that key first appears.
+    captured for every batch size when that key first appears, for the first MAX_SAMPLING_KEYS keys only.
     """
 
     def __init__(self, config: Config, decoder: SpeculativeDecoder):
@@ -175,7 +178,7 @@ class DFlashDrafter:
         """One block forward; returns drafts [B, k] and probabilities [B, k, V] (None when greedy)."""
         decoder, k = self.decoder, self.decoder.num_drafts
         hidden = self._forward_graph(seqs) if self.graphs else self._forward_eager(seqs)
-        if self.model.markov_head is not None and self.graphs:
+        if self.model.markov_head is not None and self.graphs and self._has_sampling_graphs(sampling):
             return self._sample_markov_graph(len(seqs), sampling)    # reads the block graph's outputs
         logits = self.model.compute_logits(hidden).view(len(seqs), k, -1)
         if self.model.markov_head is not None:
@@ -225,6 +228,10 @@ class DFlashDrafter:
                 draft_probs[:, row] = probs_from_logits(row_logits, sampling)
                 prev = race(draft_probs[:, row], noise[:, row])
             drafts[:, row] = prev
+
+    def _has_sampling_graphs(self, sampling: SamplingTensors) -> bool:
+        """Whether this batch's sampling key has its sampling graphs, or may still capture them."""
+        return sampling_graph_key(sampling) in self.sampling_graphs or len(self.sampling_graphs) < MAX_SAMPLING_KEYS
 
     def _sample_markov_graph(self, batch_size: int,
                              sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
