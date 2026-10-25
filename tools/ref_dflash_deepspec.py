@@ -1,8 +1,10 @@
-"""Reference DFlash numbers from DeepSpec's own inference code (port plan Task 12).
+"""Reference block-draft numbers (DFlash, DSpark) from DeepSpec's own inference code (port plan Task 12).
 
-For the first D48 prompts, measures tokens per round of a target + DeepSpec DFlash draft with DeepSpec's
-generate_decoding_sample, and saves fixtures (target aux features -> the draft block's logits) for the
-port's numerical checks. Batch 1 and temperature-only sampling: DeepSpec's evaluator has no top-k/top-p.
+For the first D48 prompts, measures tokens per round of a target + DeepSpec block draft with DeepSpec's
+generate_decoding_sample, and saves fixtures (target aux features -> the draft block's logits; for DSpark also its
+greedy Markov chain and the logits after each row's Markov bias) for the port's numerical checks. Batch 1 and
+temperature-only sampling: DeepSpec's evaluator has no top-k/top-p. The confidence threshold is 0, so DSpark
+proposes its whole block, as nano's fixed-length verification does.
 
   python tools/ref_dflash_deepspec.py --target DIR --draft DIR --deepspec DIR --panel FILE --out DIR
 """
@@ -33,7 +35,8 @@ def load_pair(target_dir: str, draft_dir: str, deepspec_dir: str, device: str, d
 
 @torch.inference_mode()
 def dump_fixture(prompt_ids: list[int], target, draft, out_dir: Path, name: str) -> None:
-    """The prompt as context, the target's greedy next token as the anchor, and the draft block's 7 logits rows."""
+    """The prompt as context, the target's greedy next token as the anchor, and the draft block's 7 logits rows;
+    with a Markov head also its greedy chain from the anchor and the 7 rows after their Markov bias."""
     from transformers import DynamicCache
     from deepspec.eval.dspark.draft_ops import forward_dspark_draft_block
     from deepspec.modeling.dspark.common import extract_context_feature
@@ -51,8 +54,12 @@ def dump_fixture(prompt_ids: list[int], target, draft, out_dir: Path, name: str)
                                               past_key_values_draft=DynamicCache(), target_hidden_states=aux,
                                               start=anchor_position, block_size=draft.block_size)
     logits = draft.compute_logits(block_hidden[:, :draft.block_size])                      # [1, 7, V]
-    torch.save({"prompt_ids": prompt_ids, "aux": aux[0].cpu(), "anchor_token": anchor_token,
-                "anchor_position": anchor_position, "block_logits": logits[0].cpu()}, out_dir / f"{name}.pt")
+    fixture = {"prompt_ids": prompt_ids, "aux": aux[0].cpu(), "anchor_token": anchor_token,
+               "anchor_position": anchor_position, "block_logits": logits[0].cpu()}
+    if draft.markov_head is not None:
+        tokens, markov_logits = draft.sample_draft_tokens(logits, first_prev_token_ids=block_ids[:, 0], temperature=0.0)
+        fixture.update(markov_tokens=tokens[0].tolist(), markov_logits=markov_logits[0].cpu())
+    torch.save(fixture, out_dir / f"{name}.pt")
 
 
 def measure_tokens_per_round(prompts: list[list[int]], target, draft, temperature: float, max_new_tokens: int,

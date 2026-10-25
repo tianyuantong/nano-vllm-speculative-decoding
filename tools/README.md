@@ -15,8 +15,8 @@ Measurement, gates and analysis for bench-v2 (`benchmarks/protocol-v2.json`). `v
 | `gate_verify_logits.py` | G1-wide: verification logits against step-by-step decoding, judged against the decode noise floor |
 | `gate_sampler_distribution.py` | G2-real: acceptance rate and output distribution on a real target/draft pair |
 | `gate_task_accuracy.py` | G5: GSM8K accuracy of a line against k0 |
-| `gate_dflash.py` | DFlash port checks against DeepSpec: block logits, tokens-per-round alignment, CUDA graphs against eager |
-| `ref_dflash_deepspec.py` | Runs DeepSpec's own DFlash inference for those checks |
+| `gate_dflash.py` | Block-draft (DFlash, DSpark) port checks against DeepSpec: block logits and DSpark's Markov-corrected rows, tokens-per-round alignment, CUDA graphs against eager |
+| `ref_dflash_deepspec.py` | Runs DeepSpec's own DFlash or DSpark inference for those checks |
 | `v1/report_matrix.py` | Tables of the September release's `docs/v1/RESULTS.md` |
 | `v1/decompose_timings.py` | Per-round and per-step cost decomposition of archived September timings |
 | `v1/plot_results.py` | The README figures of the September release |

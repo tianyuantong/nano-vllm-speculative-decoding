@@ -1,9 +1,12 @@
-"""GPU checks of the DFlash port against DeepSpec's reference run (tools/ref_dflash_deepspec.py), port design §5.2.
+"""GPU checks of the block-draft port (DFlash, DSpark) against DeepSpec's reference run (tools/ref_dflash_deepspec.py),
+port design §5.2.
 
-  draft   G1-draft: nano's DFlash block forward on the real paged FlashAttention path, fed each fixture's target
-          aux features, against the block logits DeepSpec computed for that fixture. Pass: argmax equal on every
-          row whose reference top-2 margin exceeds 0.5 (G1-wide's rule), and max |delta| / max |logit| <= 2e-2.
-  rounds  tokens per round of the whole nano engine with the DFlash draft (eager, C=1, temperature-only) on the
+  draft   G1-draft: nano's block forward on the real paged FlashAttention path, fed each fixture's target aux
+          features, against the block logits DeepSpec computed for that fixture. Pass: argmax equal on every row
+          whose reference top-2 margin exceeds 0.5 (G1-wide's rule), and max |delta| / max |logit| <= 2e-2. For
+          DSpark the same rule also holds for the rows after their Markov bias, each row's previous token taken
+          from the reference's greedy chain, so one flipped token cannot mismatch the rows after it.
+  rounds  tokens per round of the whole nano engine with the block draft (eager, C=1, temperature-only) on the
           reference's prompts, against the reference's. Its per-run pass (|difference| <= 2 x the combined per-round
           standard error) is a diagnostic; the gate is `alignment` over several runs.
   graphs  the verify graph (it exports the aux features) and the draft block graph against their eager paths on the
@@ -26,10 +29,39 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Callable
 
 import torch
 
 GIB = 1 << 30
+
+
+def block_draft_type(draft_dir: str) -> str:
+    """dspark when the checkpoint has a Markov head, else dflash: the draft_type Config requires of it."""
+    from transformers import AutoConfig
+    return "dspark" if getattr(AutoConfig.from_pretrained(draft_dir), "markov_rank", 0) > 0 else "dflash"
+
+
+def compare_logits(actual: torch.Tensor, expected: torch.Tensor) -> dict:
+    """G1's rule on [rows, V] logits: argmax equal where the reference's top-2 margin exceeds 0.5, and the largest
+    difference over the largest reference logit."""
+    top2 = expected.topk(2, dim=-1).values
+    decided = top2[:, 0] - top2[:, 1] > 0.5
+    return {"argmax_equal_where_decided": bool(torch.equal(actual.argmax(-1)[decided], expected.argmax(-1)[decided])),
+            "decided_rows": int(decided.sum()),
+            "relative_error": float((actual - expected).abs().max() / expected.abs().max())}
+
+
+def passes(comparison: dict) -> bool:
+    return comparison["argmax_equal_where_decided"] and comparison["relative_error"] <= 2e-2
+
+
+def markov_rows(logits: torch.Tensor, markov_head: Callable[[torch.Tensor], torch.Tensor], anchor_token: int,
+                chain: list[int]) -> torch.Tensor:
+    """Each block row plus the Markov bias of the token before it on the chain (the anchor for row 0), summed in the
+    logits' dtype as the engine sums them."""
+    prev = torch.tensor([anchor_token] + chain[:-1], device=logits.device)
+    return logits + markov_head(prev)
 
 
 def check_draft(draft_dir: str, reference_dir: Path) -> dict:
@@ -64,16 +96,15 @@ def check_draft(draft_dir: str, reference_dir: Path) -> dict:
                         block_tables=torch.arange(blocks, dtype=torch.int32)[None],
                         query_len_per_seq=model.block_size, causal=False)
             input_ids = torch.tensor([fixture["anchor_token"]] + [model.mask_token_id] * (model.block_size - 1))
-            logits = model.compute_logits(model(input_ids, block)).float().cpu()
+            logits = model.compute_logits(model(input_ids, block))
             reset_context()
-        expected = fixture["block_logits"].float()
-        top2 = expected.topk(2, dim=-1).values
-        decided = top2[:, 0] - top2[:, 1] > 0.5
-        rows.append({"fixture": fixture_path.stem, "context": length,
-                     "argmax_equal_where_decided": bool(torch.equal(logits.argmax(-1)[decided], expected.argmax(-1)[decided])),
-                     "decided_rows": int(decided.sum()),
-                     "relative_error": float((logits - expected).abs().max() / expected.abs().max())})
-    passed = all(row["argmax_equal_where_decided"] and row["relative_error"] <= 2e-2 for row in rows)
+            row = {"fixture": fixture_path.stem, "context": length,
+                   **compare_logits(logits.float().cpu(), fixture["block_logits"].float())}
+            if model.markov_head is not None:
+                markov = markov_rows(logits, model.markov_head, fixture["anchor_token"], fixture["markov_tokens"])
+                row["markov"] = compare_logits(markov.float().cpu(), fixture["markov_logits"].float())
+        rows.append(row)
+    passed = all(passes(row) and ("markov" not in row or passes(row["markov"])) for row in rows)
     return {"gate": "G1-draft", "passed": passed, "threshold": "argmax where top-2 margin > 0.5; relative error <= 2e-2",
             "fixtures": rows}
 
@@ -91,7 +122,7 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
     manifest = json.loads((reference_dir / "manifest.json").read_text())
     by_id = {entry["id"]: entry["prompt_token_ids"] for entry in json.loads(panel.read_text())}
     prompts = [by_id[prompt_id] for prompt_id in manifest["prompt_ids"]]
-    llm = LLM(target, draft_model=draft, draft_type="dflash", enforce_eager=True, max_num_seqs=1,
+    llm = LLM(target, draft_model=draft, draft_type=block_draft_type(draft), enforce_eager=True, max_num_seqs=1,
               enable_prefix_cache=False, kv_cache_memory_bytes=4 * GIB, seed=seed)
     rows = []
     for name, result in reference.items():
@@ -118,7 +149,7 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
     from nanovllm import LLM, SamplingParams
     from nanovllm.engine.batch_metadata import draft_block_metadata
 
-    llm = LLM(target, draft_model=draft, draft_type="dflash", max_num_seqs=8, enable_prefix_cache=False,
+    llm = LLM(target, draft_model=draft, draft_type=block_draft_type(draft), max_num_seqs=8, enable_prefix_cache=False,
               kv_cache_memory_bytes=8 * GIB, seed=seed)
     spec = llm.speculative
     for entry in json.loads(panel.read_text())[:4]:
