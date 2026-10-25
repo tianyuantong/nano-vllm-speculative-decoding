@@ -98,10 +98,23 @@ class ModelDrafter:
         return drafts, draft_probs
 
 
-def sampling_graph_key(sampling: SamplingTensors) -> tuple[int, bool] | None:
+# When every row truncates with top-k, a DSpark row is drawn among its top max_top_k + TIE_MARGIN logits: the
+# truncation also keeps the tokens tied with its cut value, and the margin leaves room for them.
+TIE_MARGIN = 64
+
+
+def num_candidates(max_top_k: int, all_top_k: bool, vocab_size: int) -> int:
+    """How many of its top logits a DSpark row is drawn among; 0 means the whole vocabulary (some row does not
+    truncate). Exact unless more than max_top_k + TIE_MARGIN tokens reach a row's cut value, which takes more than
+    TIE_MARGIN of them tied with it."""
+    return min(max_top_k + TIE_MARGIN, vocab_size) if all_top_k else 0
+
+
+def sampling_graph_key(sampling: SamplingTensors) -> tuple[int, bool, bool] | None:
     """What a DSpark sampling graph depends on besides the batch size: None when greedy, else the host-side
-    truncation settings (the top-k width, whether top-p runs), which fix its shapes and branches."""
-    return None if sampling.temperatures is None else (sampling.max_top_k, sampling.has_top_p)
+    truncation settings (the top-k width, whether top-p runs, whether every row truncates), which fix its shapes
+    and branches."""
+    return None if sampling.temperatures is None else (sampling.max_top_k, sampling.has_top_p, sampling.all_top_k)
 
 
 class DFlashDrafter:
@@ -144,7 +157,8 @@ class DFlashDrafter:
         self.aux_dtype = config.hf_config.dtype
         self.hidden_size = hf_config.hidden_size
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.sampling_graphs: dict[tuple[int, bool] | None, dict[int, torch.cuda.CUDAGraph]] = {}
+        self.sampling_graphs: dict[tuple[int, bool, bool] | None, dict[int, torch.cuda.CUDAGraph]] = {}
+        self.sampling_noise: dict[tuple[int, bool, bool], torch.Tensor] = {}
         self.graph_vars: dict[str, torch.Tensor] = {}
 
     @torch.inference_mode()
@@ -175,25 +189,38 @@ class DFlashDrafter:
                        sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
         """DSpark: row j's logits get the Markov bias of the token drawn at row j-1 (the anchor for row 0), so the
         rows are drawn left to right, and each row's q is its distribution after its bias. The noise of all k rows
-        is drawn before row 0 in one call, as DFlash draws it, and the sampling graph consumes the generator alike."""
+        is drawn before row 0 in one call, and the sampling graph consumes the generator alike."""
         decoder = self.decoder
-        drafts = torch.empty(logits.shape[:2], dtype=torch.int64, device=decoder.device)
+        batch_size, k, vocab_size = logits.shape
+        drafts = torch.empty(batch_size, k, dtype=torch.int64, device=decoder.device)
+        candidates = num_candidates(sampling.max_top_k, sampling.all_top_k, vocab_size)
         draft_probs = noise = None
         if sampling.temperatures is not None:
             draft_probs = torch.empty(logits.shape, dtype=torch.float32, device=decoder.device)
-            noise = exponential_noise_(torch.empty_like(draft_probs), decoder.target.generator)
+            noise = exponential_noise_(torch.empty(batch_size, k, candidates or vocab_size, dtype=torch.float32,
+                                                   device=decoder.device), decoder.target.generator)
         prev = decoder._device_tensor([seq.last_token for seq in seqs], torch.int64)
-        self._markov_rows(logits, prev, sampling, noise, drafts, draft_probs)
+        self._markov_rows(logits, prev, sampling, noise, drafts, draft_probs, candidates)
         return drafts, draft_probs
 
     def _markov_rows(self, logits: torch.Tensor, prev: torch.Tensor, sampling: SamplingTensors | None,
-                     noise: torch.Tensor | None, drafts: torch.Tensor, draft_probs: torch.Tensor | None) -> None:
+                     noise: torch.Tensor | None, drafts: torch.Tensor, draft_probs: torch.Tensor | None,
+                     candidates: int) -> None:
         """Draw the k rows left to right into drafts, and their q into draft_probs unless greedy; prev holds the
-        anchors, the previous tokens of row 0."""
+        anchors, the previous tokens of row 0. With candidates, a row is drawn among its top `candidates` logits,
+        which hold every token the truncation keeps, and its q is scattered back over the vocabulary; otherwise
+        over the whole vocabulary."""
+        if draft_probs is not None and candidates:
+            draft_probs.zero_()                    # q is zero outside each row's candidates
         for row in range(logits.shape[1]):
             row_logits = logits[:, row] + self.model.markov_head(prev)
             if draft_probs is None:
                 prev = row_logits.argmax(dim=-1)
+            elif candidates:
+                values, ids = row_logits.topk(candidates, dim=-1)
+                probs = probs_from_logits(values, sampling)
+                prev = ids.gather(-1, race(probs, noise[:, row]).unsqueeze(-1)).squeeze(-1)
+                draft_probs[:, row].scatter_(-1, ids, probs)
             else:
                 draft_probs[:, row] = probs_from_logits(row_logits, sampling)
                 prev = race(draft_probs[:, row], noise[:, row])
@@ -207,24 +234,25 @@ class DFlashDrafter:
         key = sampling_graph_key(sampling)
         if key not in self.sampling_graphs:
             self._capture_sampling_graphs(key)
-        self._load_sampling_inputs(batch_size, sampling)
+        self._load_sampling_inputs(batch_size, sampling, key)
         padded = next(size for size in self.decoder.graph_batch_sizes if size >= batch_size)
         self.sampling_graphs[key][padded].replay()
         buffers = self.graph_vars
         return buffers["drafts"][:batch_size], None if key is None else buffers["probs"][:batch_size]
 
-    def _load_sampling_inputs(self, batch_size: int, sampling: SamplingTensors) -> None:
+    def _load_sampling_inputs(self, batch_size: int, sampling: SamplingTensors,
+                              key: tuple[int, bool, bool] | None) -> None:
         """The batch's temperatures, top-k, top-p and noise into the sampling graphs' buffers; nothing when greedy.
         Padding rows keep earlier values, which stay finite."""
-        if sampling.temperatures is None:
+        if key is None:
             return
         buffers = self.graph_vars
         buffers["temperatures"][:batch_size] = sampling.temperatures
         buffers["top_k"][:batch_size] = sampling.top_k
         buffers["top_p"][:batch_size] = sampling.top_p
-        exponential_noise_(buffers["noise"][:batch_size], self.decoder.target.generator)
+        exponential_noise_(self.sampling_noise[key][:batch_size], self.decoder.target.generator)
 
-    def _sampling_forward(self, batch_size: int, key: tuple[int, bool] | None) -> None:
+    def _sampling_forward(self, batch_size: int, key: tuple[int, bool, bool] | None) -> None:
         """A sampling graph's body: logits of the block graph's outputs, then the k rows into the buffers. Row 0's
         previous token is each block's first input, the anchor."""
         k, buffers = self.decoder.num_drafts, self.graph_vars
@@ -232,30 +260,40 @@ class DFlashDrafter:
         prev = buffers["input_ids"].view(-1, k)[:batch_size, 0]
         drafts = buffers["drafts"][:batch_size]
         if key is None:
-            self._markov_rows(logits, prev, None, None, drafts, None)
+            self._markov_rows(logits, prev, None, None, drafts, None, 0)
             return
-        max_top_k, has_top_p = key
+        max_top_k, has_top_p, all_top_k = key
         sampling = SamplingTensors(temperatures=buffers["temperatures"][:batch_size],
                                    top_k=buffers["top_k"][:batch_size], top_p=buffers["top_p"][:batch_size],
-                                   max_top_k=max_top_k, has_top_p=has_top_p)
-        self._markov_rows(logits, prev, sampling, buffers["noise"][:batch_size], drafts, buffers["probs"][:batch_size])
+                                   max_top_k=max_top_k, has_top_p=has_top_p, all_top_k=all_top_k)
+        self._markov_rows(logits, prev, sampling, self.sampling_noise[key][:batch_size], drafts,
+                          buffers["probs"][:batch_size], num_candidates(max_top_k, all_top_k, logits.shape[-1]))
 
     def _sampling_buffers(self, max_batch_size: int) -> dict[str, torch.Tensor]:
-        """What DSpark's sampling graphs read and write besides the block graph's buffers. Noise and parameters
+        """What DSpark's sampling graphs read and write besides the block graph's buffers and the noise. Parameters
         start finite, so padding rows stay finite."""
         decoder, shape = self.decoder, (max_batch_size, self.decoder.num_drafts)
         vocab_size, device = decoder.vocab_size, decoder.device
         return {"drafts": torch.zeros(shape, dtype=torch.int64, device=device),
                 "probs": torch.zeros(*shape, vocab_size, dtype=torch.float32, device=device),
-                "noise": torch.ones(*shape, vocab_size, dtype=torch.float32, device=device),
                 "temperatures": torch.ones(max_batch_size, dtype=torch.float32, device=device),
                 "top_k": torch.zeros(max_batch_size, dtype=torch.int64, device=device),
                 "top_p": torch.ones(max_batch_size, dtype=torch.float32, device=device)}
 
+    def _allocate_sampling_noise(self, key: tuple[int, bool, bool], max_batch_size: int) -> None:
+        """A random key's noise buffer, [max batch, k, candidates or V], with finite padding rows."""
+        max_top_k, _, all_top_k = key
+        vocab_size = self.decoder.vocab_size
+        width = num_candidates(max_top_k, all_top_k, vocab_size) or vocab_size
+        self.sampling_noise[key] = torch.ones(max_batch_size, self.decoder.num_drafts, width, dtype=torch.float32,
+                                              device=self.decoder.device)
+
     @torch.inference_mode()
-    def _capture_sampling_graphs(self, key: tuple[int, bool] | None) -> None:
+    def _capture_sampling_graphs(self, key: tuple[int, bool, bool] | None) -> None:
         """One sampling graph per batch size of the block graphs, into the target's pool."""
         decoder, graphs = self.decoder, {}
+        if key is not None:
+            self._allocate_sampling_noise(key, decoder.graph_batch_sizes[-1])
         with torch.device(decoder.device):
             for batch_size in reversed(decoder.graph_batch_sizes):
                 graph = torch.cuda.CUDAGraph()

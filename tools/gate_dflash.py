@@ -14,7 +14,11 @@ port design §5.2.
           at a captured batch size, a batch padded up to one reported only; at both, no other slot of the draft's KV
           written. For DSpark also its sampling graphs, under greedy, temperature-only and the protocol's sampling:
           drafts and q bit-identical to the eager rows from the same generator state at a captured batch size, and
-          at both batch sizes the generator left where the eager rows leave it.
+          at both batch sizes the generator left where the eager rows leave it; and q, drawn among each row's
+          candidates under the protocol's sampling, equal to the rule over the whole vocabulary along the drawn
+          chain (the same support and |delta| <= 1e-5) on every row whose kept tokens fit among its candidates.
+          Rows where more tokens reach the cut value are counted, not failed: their q is still the distribution
+          they were drawn from, only narrower than the truncation rule.
   alignment  the protocol's dflash_alignment rule over several `rounds` results (one per seed): per sampling, the mean
           of nano's runs against the mean of DeepSpec's. Pass: |difference| <= 2 x the standard error of that
           difference, computed from the per-run means.
@@ -38,6 +42,7 @@ import torch
 GIB = 1 << 30
 # (temperature, top_k, top_p) of the samplings DSpark's sampling graphs are checked under; rec is the protocol's.
 GRAPH_SAMPLINGS = {"greedy": (0.0, 0, 1.0), "temperature": (1.0, 0, 1.0), "rec": (0.7, 20, 0.8)}
+WHOLE_VOCABULARY_TOLERANCE = 1e-5    # fp32 sums of the same kept terms in another order
 
 
 def block_draft_type(draft_dir: str) -> str:
@@ -149,9 +154,21 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
             "threshold": "|nano - deepspec| <= 2 x combined standard error", "rows": rows}
 
 
+def whole_vocabulary_q(drafter, batch: list, logits: torch.Tensor, drafts: torch.Tensor, sampling) -> torch.Tensor:
+    """Each row's distribution by the engine's rule over the whole vocabulary, biased by the draft before it."""
+    from nanovllm.layers.spec_sampler import probs_from_logits
+
+    anchors = torch.tensor([seq.last_token for seq in batch], device=drafts.device)
+    prev = torch.cat([anchors.unsqueeze(1), drafts[:, :-1]], dim=1)
+    return torch.stack([probs_from_logits(logits[:, row] + drafter.model.markov_head(prev[:, row]), sampling)
+                        for row in range(drafts.shape[1])], dim=1)
+
+
 def check_sampling_graphs(drafter, seqs: list, generator: torch.Generator) -> list[dict]:
-    """DSpark's sampling graph against its eager rows on the same block outputs, from the same generator state."""
+    """DSpark's sampling graph against its eager rows on the same block outputs, from the same generator state;
+    the eager q against the rule over the whole vocabulary."""
     from types import SimpleNamespace
+    from nanovllm.engine.speculative import num_candidates
     from nanovllm.layers.spec_sampler import sampling_tensors
 
     k, rows = drafter.decoder.num_drafts, []
@@ -170,18 +187,30 @@ def check_sampling_graphs(drafter, seqs: list, generator: torch.Generator) -> li
                 row = {"batch": batch_size, "captured_size": batch_size in drafter.decoder.graph_batch_sizes,
                        "sampling": name, "drafts_equal": torch.equal(eager_drafts, graph_drafts),
                        "generator_equal": torch.equal(eager_state, generator.get_state()),
-                       "probs_equal": None, "probs_max_abs_diff": None}
+                       "probs_equal": None, "probs_max_abs_diff": None, "whole_vocabulary_same_support": None,
+                       "whole_vocabulary_max_abs_diff": None, "rows_past_candidates": None}
                 if eager_probs is not None:
+                    whole = whole_vocabulary_q(drafter, batch, logits, eager_drafts, sampling)
+                    candidates = num_candidates(sampling.max_top_k, sampling.all_top_k, whole.shape[-1])
+                    past = (whole > 0).sum(-1) > (candidates or whole.shape[-1])    # [B, k]: the kept set overflows
+                    mismatch = ((eager_probs > 0) != (whole > 0)).any(-1) & ~past
                     row.update(probs_equal=torch.equal(eager_probs, graph_probs),
-                               probs_max_abs_diff=float((eager_probs - graph_probs).abs().max()))
+                               probs_max_abs_diff=float((eager_probs - graph_probs).abs().max()),
+                               whole_vocabulary_same_support=not bool(mismatch.any()),
+                               whole_vocabulary_max_abs_diff=float((eager_probs - whole).abs().amax(-1)
+                                                                   .masked_fill(past, 0).max()),
+                               rows_past_candidates=int(past.sum()))
                 rows.append(row)
     return rows
 
 
 def sampling_row_passes(row: dict) -> bool:
-    """The generator in lockstep at every batch size; drafts and q bit-identical at a captured one (greedy has no q)."""
+    """The generator in lockstep and q the whole-vocabulary rule (on rows within the candidates) at every batch
+    size; drafts and q bit-identical at a captured one (greedy has no q)."""
     exact = row["drafts_equal"] and row["probs_equal"] is not False
-    return row["generator_equal"] and (exact or not row["captured_size"])
+    rule = row["probs_equal"] is None or (row["whole_vocabulary_same_support"]
+                                          and row["whole_vocabulary_max_abs_diff"] <= WHOLE_VOCABULARY_TOLERANCE)
+    return row["generator_equal"] and rule and (exact or not row["captured_size"])
 
 
 def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
@@ -238,7 +267,8 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
     return {"gate": "verify, draft block and sampling graphs against eager", "passed": passed,
             "threshold": "bit-identical verify logits, aux, block logits and block K/V at a captured batch size; "
                          "no other draft KV slot written at any batch size; DSpark: drafts and q bit-identical at a "
-                         "captured batch size, the generator in the same state at any", "rows": rows,
+                         "captured batch size, the generator in the same state and q the whole-vocabulary rule "
+                         f"(same support, |delta| <= {WHOLE_VOCABULARY_TOLERANCE}) at any", "rows": rows,
             "sampling_rows": sampling_rows}
 
 
