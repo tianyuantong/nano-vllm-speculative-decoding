@@ -1,5 +1,7 @@
 # Results: DFlash speculative decoding on nano-vLLM
 
+> Superseded by [the DSpark results](../RESULTS.md); this page keeps the DFlash results on the K128 panel.
+
 On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_qwen3_8b_block7`) proposes 7 tokens per round and a round yields 2.8 on average. On the unseen K128 confirmation panel, its steady-state throughput is **2.11–2.24×** plain decoding at C = 1, **1.75–1.85×** at C = 8 and **1.32–1.40×** at C = 32. At C = 64 it is 1.08× (1.06–1.09), which is within timing noise.
 
 The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, development panel, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
@@ -8,7 +10,7 @@ The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.8
 - **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
 - **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§3).
 - **K128**: 128 prompts whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
-- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), frozen before the confirmation runs.
+- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), frozen before the confirmation runs.
 
 ## 1. Confirmation panel (K128)
 
@@ -198,10 +200,10 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts Qwen3-0.6B and DeepSpec's `dflash_qwen3_8b_block7` |
-| protocol | [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), SHA256 `d012e92933cda36f…` |
+| protocol | [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), SHA256 `d012e92933cda36f…` |
 | panels | D48 `071befa6898b3187…`; K128 `44f6fb6b4922c3d8…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
-| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../tools/stall_stats.py) and [`tools/itl_stats.py`](../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure |
+| tools | [`tools/report_v2.py`](../../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../../tools/stall_stats.py) and [`tools/itl_stats.py`](../../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../../tools/plot_speedup.py) draws the README figure |
 
 Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run.
 
-The September results for the 0.6B draft are in [v1/RESULTS.md](v1/RESULTS.md).
+The September results for the 0.6B draft are in [v1/RESULTS.md](../v1/RESULTS.md).
