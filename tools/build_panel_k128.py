@@ -6,15 +6,21 @@ excluded. A first turn that still says the benchmark data must be fetched is reb
 (NVIDIA Model-Optimizer specdec_bench, the SPEEDBench methods in upstream_speed.py): stackselect for NIAH, BAMBOO
 meeting prediction for creative writing, padded or cut to 1000 o200k_base tokens. Prompts are Qwen3 chat-formatted
 in non-thinking mode with D48's tokenizer files and template; a candidate fits when it is at most
-max_formatted_tokens long. Each category takes its protocol quota, and the panel takes the categories round-robin
-in the protocol's order. A category that runs out early is over-represented in short prefixes: creative_writing's
-8 prompts end at position 32, so they are 17% of the first 48 against 6% of the panel.
+max_formatted_tokens long. Each category takes its protocol quota; the panel's `interleave` sets the order:
+  round_robin    (K128) the categories in turn, in the protocol's order. A category that runs out early is
+                 over-represented in short prefixes: creative_writing's 8 prompts end at position 32, so they are
+                 17% of the first 48 against 6% of the panel.
+  proportional   (K128b) next comes the category furthest behind its share, so every prefix keeps each share
+                 within one prompt.
 
 Runs outside the engine's venv; SPEED_DIR holds the files listed in --speed-dir's help:
   uv venv ~/.venvs/k128 -p 3.12 && uv pip install -p ~/.venvs/k128 duckdb==1.4.3 tiktoken==0.11.0 tokenizers jinja2
-  ~/.venvs/k128/bin/python tools/build_panel_k128.py --speed-dir SPEED_DIR \
+  ~/.venvs/k128/bin/python tools/build_panel_k128.py --speed-dir SPEED_DIR --panel K128 \
       --exclude-panel benchmarks/inputs/panel-48.json --protocol benchmarks/protocol-v2.json \
       --output benchmarks/inputs/panel-K128.json
+  ~/.venvs/k128/bin/python tools/build_panel_k128.py --speed-dir SPEED_DIR --panel K128b \
+      --exclude-panel benchmarks/inputs/panel-48.json benchmarks/inputs/panel-K128.json \
+      --protocol benchmarks/protocol-v2.1.json --output benchmarks/inputs/panel-K128b.json
 """
 import argparse
 import ast
@@ -23,6 +29,7 @@ import json
 import random
 import re
 import sys
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -69,6 +76,21 @@ def interleave(by_category: dict[str, list[dict]], order: list[str]) -> list[dic
             if queue:
                 panel.append(queue.pop(0))
     return panel
+
+
+def interleave_proportional(by_category: dict[str, list[dict]], order: list[str]) -> list[dict]:
+    """Each next entry comes from the category with the smallest (taken + 1) / quota, ties in order."""
+    quotas = {category: len(by_category[category]) for category in order}
+    taken = dict.fromkeys(order, 0)
+    panel = []
+    for _ in range(sum(quotas.values())):
+        category = min((c for c in order if taken[c] < quotas[c]), key=lambda c: Fraction(taken[c] + 1, quotas[c]))
+        panel.append(by_category[category][taken[category]])
+        taken[category] += 1
+    return panel
+
+
+INTERLEAVES = {"round_robin": interleave, "proportional": interleave_proportional}
 
 
 def load_recipes(upstream: Path) -> dict:
@@ -125,19 +147,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--speed-dir", type=Path, required=True,
                         help="throughput_1k.parquet, upstream_speed.py, stackselect_1k.json, meetingpred_4k.jsonl, qwen-tokenizer/")
-    parser.add_argument("--exclude-panel", type=Path, required=True)
+    parser.add_argument("--panel", default="K128", help="the protocol's panel to build")
+    parser.add_argument("--exclude-panel", type=Path, nargs="+", required=True, help="panels whose prompts it must not reuse")
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    spec = json.loads(args.protocol.read_text())["panels"]["K128"]
+    spec = json.loads(args.protocol.read_text())["panels"][args.panel]
     quotas, salt, limit = spec["quotas"], spec["salt"], spec["max_formatted_tokens"]
+    order = spec.get("interleave", "round_robin")
     directory = args.speed_dir
     connection = duckdb.connect()
     pool = connection.sql(f"select question_id, sub_category, source, src_id, turns "
                           f"from read_parquet('{directory / 'throughput_1k.parquet'}')").fetchall()
     rows = [dict(zip(("question_id", "sub_category", "source", "src_id", "turns"), row)) for row in pool]
     candidates = [{**row, "category": normalize_category(row["sub_category"])} for row in rows]
-    excluded = json.loads(args.exclude_panel.read_text())
+    excluded = [entry for path in args.exclude_panel for entry in json.loads(path.read_text())]
     excluded_ids = {entry["id"] for entry in excluded}
     excluded_sources = {(row["source"], row["src_id"]) for row in rows if row["question_id"] in excluded_ids}
     recipes = load_recipes(directory / "upstream_speed.py")
@@ -147,25 +171,28 @@ def main() -> None:
     bamboo = [json.loads(line) for line in (directory / "meetingpred_4k.jsonl").read_text().splitlines() if line.strip()]
     encode = chat_encoder(directory / "qwen-tokenizer")
     encoded = {}
+    excluded_prompts = {tuple(entry["prompt_token_ids"]) for entry in excluded}
 
     def fits(candidate: dict) -> bool:
+        """At most max_formatted_tokens long, and not an excluded panel's prompt under another question id."""
         prompt, recipe = first_turn(candidate, recipes, stackselect, bamboo)
         encoded[candidate["question_id"]] = (recipe, encode(prompt))
-        return len(encoded[candidate["question_id"]][1]) <= limit
+        token_ids = encoded[candidate["question_id"]][1]
+        return len(token_ids) <= limit and tuple(token_ids) not in excluded_prompts
 
     chosen = select_candidates(candidates, excluded_ids, excluded_sources, salt, quotas, fits)
     panel = [{"id": c["question_id"], "category": c["category"], "source": c["source"], "src_id": c["src_id"],
               "recipe": encoded[c["question_id"]][0], "prompt_token_ids": encoded[c["question_id"]][1]}
-             for c in interleave(chosen, list(quotas))]
+             for c in INTERLEAVES[order](chosen, list(quotas))]
     assert not {tuple(e["prompt_token_ids"]) for e in panel} & {tuple(e["prompt_token_ids"]) for e in excluded}
     args.output.write_text(json.dumps(panel) + "\n")
     names = ("throughput_1k.parquet", "upstream_speed.py", "stackselect_1k.json", "meetingpred_4k.jsonl",
              "qwen-tokenizer/tokenizer.json", "qwen-tokenizer/tokenizer_config.json")
-    inputs = {name: directory / name for name in names} | {args.exclude_panel.name: args.exclude_panel}    # no machine paths
-    provenance = {"output_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
+    inputs = {name: directory / name for name in names} | {path.name: path for path in args.exclude_panel}    # no machine paths
+    provenance = {"panel": args.panel, "output_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
                   "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   "inputs": {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in inputs.items()},
-                  "salt": salt, "quotas": quotas, "max_formatted_tokens": limit}
+                  "salt": salt, "quotas": quotas, "max_formatted_tokens": limit, "interleave": order}
     args.output.with_suffix(".provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     print(json.dumps(provenance, indent=2))
 

@@ -8,7 +8,7 @@ D48: the first of each category, the two longest, and those two cut to 2046 and 
 crosses a 256-token block boundary. Pass: every |delta| <= 2 x the noise floor's worst delta, and the argmax agrees
 wherever the reference's top-2 margin exceeds 0.5.
 
-  python tools/gate_verify_logits.py --line LINE --models-root DIR --commit C --out FILE
+  python tools/gate_verify_logits.py --line LINE [--protocol FILE] --models-root DIR --commit C --out FILE
 """
 import argparse
 import json
@@ -102,12 +102,13 @@ def verify_vs_decode(llm, prompt_ids: list[int], k: int, batch_sizes: tuple[int,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--line", required=True, help="a protocol line with a drafter (model_k3, dflash_k7)")
+    parser.add_argument("--line", required=True, help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7)")
+    parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    protocol = json.loads(PROTOCOL.read_text())
+    protocol = json.loads(args.protocol.read_text())
     gate = protocol["gates"]["G1_wide"]
     panel = json.loads((ROOT / protocol["panels"]["D48"]["file"]).read_text())
     line, batch_sizes = protocol["lines"][args.line], tuple(gate["batch"])

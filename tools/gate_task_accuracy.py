@@ -6,7 +6,8 @@
            the accuracy difference must stay above -3 points. Invalid instead of failed when more than 2% of either
            side's answers cannot be parsed, or k0 scores below 80%.
 
-  python tools/gate_task_accuracy.py run --line LINE --seed S --data FILE --models-root DIR --commit C --out FILE
+  python tools/gate_task_accuracy.py run --line LINE [--protocol FILE] --seed S --data FILE --models-root DIR \
+      --commit C --out FILE
   python tools/gate_task_accuracy.py compare --baseline FILE [FILE ...] --candidate FILE [FILE ...] --out FILE
 """
 import argparse
@@ -74,7 +75,7 @@ def run(args: argparse.Namespace) -> dict:
     from bench_spec import engine_kwargs, run_closed_loop
     from nanovllm import LLM, SamplingParams
 
-    protocol = json.loads(PROTOCOL.read_text())
+    protocol = json.loads(args.protocol.read_text())
     questions = load_gsm8k(args.data)
     tokenizer = AutoTokenizer.from_pretrained(f"{args.models_root}/{protocol['models']['target']}")
     panel = [{"id": f"q{index}", "category": "gsm8k", "prompt_token_ids": build_prompt(tokenizer, row["question"])}
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=["run", "compare"])
     parser.add_argument("--line")
+    parser.add_argument("--protocol", type=Path, default=PROTOCOL, help="run")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--data", type=Path)
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
