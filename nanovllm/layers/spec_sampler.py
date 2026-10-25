@@ -20,6 +20,7 @@ class SamplingTensors:
     top_p: torch.Tensor                # [B] fp32; 1.0 disables top-p for that row
     max_top_k: int                     # host copy of max(top_k); 0 means no row truncates
     has_top_p: bool                    # host: some row has top_p < 1
+    all_top_k: bool                    # host: every row has top_k > 0
 
 
 def sampling_tensors(seqs, device: torch.device) -> SamplingTensors:
@@ -35,6 +36,7 @@ def sampling_tensors(seqs, device: torch.device) -> SamplingTensors:
         top_p=_to_device(top_p, torch.float32, device),
         max_top_k=max(top_k),
         has_top_p=any(value < 1.0 for value in top_p),
+        all_top_k=min(top_k) > 0,
     )
 
 

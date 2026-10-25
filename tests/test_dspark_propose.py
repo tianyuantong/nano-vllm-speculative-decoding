@@ -28,6 +28,7 @@ def make_drafter(k: int, bias: torch.Tensor = BIAS) -> DFlashDrafter:
     drafter = object.__new__(DFlashDrafter)
     drafter.decoder = decoder
     drafter.model = SimpleNamespace(markov_head=lambda prev: bias[prev], compute_logits=lambda hidden: hidden)
+    drafter.sampling_noise = {}
     return drafter
 
 
@@ -52,8 +53,9 @@ def test_q_is_each_row_distribution_after_its_bias():
 
 
 def test_without_a_bias_the_rows_draw_what_dflash_draws():
-    # The noise of all k rows is drawn at once, as DFlash draws it: with a zero Markov bias the same generator state
-    # gives DFlash's q and drafts and leaves the generator where DFlash leaves it.
+    # One row does not truncate, so the rows are drawn over the whole vocabulary, with the noise of all k rows drawn
+    # at once as DFlash draws it: with a zero Markov bias the same generator state gives DFlash's q and drafts and
+    # leaves the generator where DFlash leaves it.
     seqs = [Sequence([1, 2], SamplingParams(temperature=1.0)),
             Sequence([3, 0], SamplingParams(temperature=0.7, top_k=3, top_p=0.9))]
     sampling = sampling_tensors(seqs, CPU)
@@ -67,10 +69,28 @@ def test_without_a_bias_the_rows_draw_what_dflash_draws():
     assert torch.equal(drafter.decoder.target.generator.get_state(), generator.get_state())
 
 
+def test_candidate_rows_give_the_whole_vocabulary_distribution():
+    # Every row truncates, so each row is drawn among its top max_top_k + TIE_MARGIN logits (20 + 64). In the top-3
+    # row, thirty tokens tie with the cut value 3, out to rank 31: the truncation keeps them, and so do the candidates.
+    vocab_size, k = 200, 4
+    seqs = [Sequence([1, 2], SamplingParams(temperature=0.7, top_k=3)),
+            Sequence([3, 0], SamplingParams(temperature=1.0, top_k=20, top_p=0.8))]
+    sampling = sampling_tensors(seqs, CPU)
+    logits = torch.randn(2, k, vocab_size, generator=torch.Generator().manual_seed(5))
+    logits[0] = logits[0].clamp(max=2.5)
+    logits[0, :, :32] = torch.tensor([5.0, 4.0] + [3.0] * 30)
+    drafts, probs = make_drafter(k, bias=torch.zeros(vocab_size, vocab_size))._sample_markov(seqs, logits, sampling)
+    whole = probs_from_logits(logits, sampling)                       # no bias: each row's rule over the vocabulary
+    assert torch.equal(probs > 0, whole > 0)
+    assert torch.allclose(probs, whole, rtol=0, atol=1e-6)
+    assert bool((probs.gather(-1, drafts.unsqueeze(-1)) > 0).all())
+
+
 @pytest.mark.parametrize("params", [
     [SamplingParams(temperature=0), SamplingParams(temperature=0)],
     [SamplingParams(temperature=1.0), SamplingParams(temperature=0.7, top_k=3, top_p=0.9)],
-], ids=["greedy", "random"])
+    [SamplingParams(temperature=1.0, top_k=4), SamplingParams(temperature=0.7, top_k=3, top_p=0.9)],
+], ids=["greedy", "random", "candidates"])
 def test_sampling_graph_body_draws_what_the_eager_rows_draw(params):
     # The body a sampling graph captures, run eagerly: two sequences padded to four, the anchors read from the block
     # inputs as draft_block_metadata lays them out, the logits from the block outputs.
@@ -87,9 +107,12 @@ def test_sampling_graph_body_draws_what_the_eager_rows_draw(params):
     metadata = draft_block_metadata(seqs, 256, k, vocab_size - 1, padded, 99, 1)
     drafter.graph_vars = {"outputs": logits.view(padded * k, vocab_size), "input_ids": torch.tensor(metadata.input_ids),
                           **drafter._sampling_buffers(padded)}
+    key = sampling_graph_key(sampling)
+    if key is not None:
+        drafter._allocate_sampling_noise(key, padded)
     drafter.decoder.target.generator.manual_seed(0)                   # where the eager rows started
-    drafter._load_sampling_inputs(2, sampling)
-    drafter._sampling_forward(padded, sampling_graph_key(sampling))
+    drafter._load_sampling_inputs(2, sampling, key)
+    drafter._sampling_forward(padded, key)
     buffers = drafter.graph_vars
     assert torch.equal(buffers["drafts"][:2], eager_drafts)
     assert eager_probs is None or torch.equal(buffers["probs"][:2], eager_probs)
