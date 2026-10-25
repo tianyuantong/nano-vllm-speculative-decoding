@@ -1,6 +1,6 @@
 {
   "version": "2.1",
-  "frozen": false,
+  "frozen": true,
   "derived_from": {"file": "benchmarks/protocol-v2.json", "sha256": "d012e92933cda36fe793d575b464f8d3e0875185900976de1d3939f76bc6d59e"},
   "changes_from_v2": [
     "lines: dspark_k7 added for M3; model_k3 dropped, its v2 numbers stand",
