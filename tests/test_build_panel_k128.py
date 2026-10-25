@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from build_panel_k128 import interleave, rank_key, select_candidates  # noqa: E402
+from build_panel_k128 import interleave, interleave_proportional, rank_key, select_candidates  # noqa: E402
 
 SALT = "bench-v2-confirm:"
 
@@ -55,3 +55,14 @@ def test_quota_per_category_in_rank_order():
 def test_interleave():
     assert interleave({"A": ["a1", "a2"], "B": ["b1"], "C": ["c1", "c2", "c3"]}, ["A", "B", "C"]) == \
         ["a1", "b1", "c1", "a2", "c2", "c3"]
+
+
+def test_proportional_interleave_keeps_every_prefix_within_one_prompt_of_each_share():
+    quotas = {"code_completion": 40, "NIAH": 43, "open_books": 37, "creative_writing": 8}
+    total = sum(quotas.values())
+    panel = interleave_proportional({c: [(c, i) for i in range(n)] for c, n in quotas.items()}, list(quotas))
+    for c, n in quotas.items():
+        assert [i for category, i in panel if category == c] == list(range(n))    # each list whole, in order
+    for length in range(1, total + 1):
+        prefix = [category for category, _ in panel[:length]]
+        assert all(abs(prefix.count(c) - length * n / total) <= 1 for c, n in quotas.items())

@@ -20,6 +20,8 @@ from typing import TypedDict
 
 import torch
 
+from nanovllm.config import BLOCK_DRAFTS
+
 ROOT = Path(__file__).resolve().parent
 GIB = 1 << 30
 WARMUP_PROMPTS = 4
@@ -75,8 +77,8 @@ def kv_block_bytes(model_dir: str, block_size: int = 256) -> int:
 def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurrency: int, seed: int,
                   models_root: str) -> tuple[str, str | None, dict]:
     """Target directory, draft directory and LLM keyword arguments of one protocol line. Every line gets the target
-    KV budget of the largest k; a model draft gets the same block count in its own pool, DFlash's KV mirrors the
-    target's blocks."""
+    KV budget of the largest k; a model draft gets the same block count in its own pool, a block draft's KV mirrors
+    the target's blocks. The protocol names block drafts by their draft_type (dflash, dspark)."""
     max_tokens = protocol["sampling"]["max_tokens"]
     budget_k = max(spec["k"] for spec in protocol["lines"].values())
     target = f"{models_root}/{protocol['models']['target']}"
@@ -88,8 +90,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
     if line["drafter"] is not None:
         draft = f"{models_root}/{protocol['models']['drafts'][line['drafter']]}"
         kwargs.update(draft_model=draft, num_speculative_tokens=line["k"])
-        if line["drafter"] == "dflash":
-            kwargs.update(draft_type="dflash")
+        if line["drafter"] in BLOCK_DRAFTS:
+            kwargs.update(draft_type=line["drafter"])
         else:
             kwargs.update(draft_kv_cache_memory_bytes=kv_budget_bytes(panel, concurrency, max_tokens, budget_k,
                                                                       kv_block_bytes(draft)))
