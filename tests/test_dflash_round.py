@@ -67,6 +67,7 @@ class FakeDFlash:
 
     def __init__(self, decoder, is_right):
         self.mask_token_id, self.block_size, self.aux_layer_ids = MASK, K, (0,)
+        self.markov_head = None    # DFlash: the k rows are sampled at once
         self.decoder, self.is_right = decoder, is_right
         self.cache = {}           # slot -> ("context", position, token) or ("block", position)
         self.bad_reads = []
