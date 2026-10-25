@@ -12,7 +12,9 @@ port design §5.2.
   graphs  the verify graph (it exports the aux features) and the draft block graph against their eager paths on the
           same rows. Pass: verify logits and aux, block logits and the block K/V stored in the draft's KV bit-identical
           at a captured batch size, a batch padded up to one reported only; at both, no other slot of the draft's KV
-          written.
+          written. For DSpark also its sampling graphs, under greedy, temperature-only and the protocol's sampling:
+          drafts and q bit-identical to the eager rows from the same generator state at a captured batch size, and
+          at both batch sizes the generator left where the eager rows leave it.
   alignment  the protocol's dflash_alignment rule over several `rounds` results (one per seed): per sampling, the mean
           of nano's runs against the mean of DeepSpec's. Pass: |difference| <= 2 x the standard error of that
           difference, computed from the per-run means.
@@ -34,6 +36,8 @@ from typing import Callable
 import torch
 
 GIB = 1 << 30
+# (temperature, top_k, top_p) of the samplings DSpark's sampling graphs are checked under; rec is the protocol's.
+GRAPH_SAMPLINGS = {"greedy": (0.0, 0, 1.0), "temperature": (1.0, 0, 1.0), "rec": (0.7, 20, 0.8)}
 
 
 def block_draft_type(draft_dir: str) -> str:
@@ -145,6 +149,41 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
             "threshold": "|nano - deepspec| <= 2 x combined standard error", "rows": rows}
 
 
+def check_sampling_graphs(drafter, seqs: list, generator: torch.Generator) -> list[dict]:
+    """DSpark's sampling graph against its eager rows on the same block outputs, from the same generator state."""
+    from types import SimpleNamespace
+    from nanovllm.layers.spec_sampler import sampling_tensors
+
+    k, rows = drafter.decoder.num_drafts, []
+    for batch_size in (4, 3):
+        batch = seqs[:batch_size]
+        with torch.inference_mode():
+            logits = drafter.model.compute_logits(drafter._forward_graph(batch)).view(batch_size, k, -1)
+            for name, (temperature, top_k, top_p) in GRAPH_SAMPLINGS.items():
+                params = SimpleNamespace(temperature=temperature, top_k=top_k, top_p=top_p)
+                sampling = sampling_tensors([params] * batch_size, drafter.decoder.device)
+                state = generator.get_state()
+                eager_drafts, eager_probs = drafter._sample_markov(batch, logits, sampling)
+                eager_state = generator.get_state()
+                generator.set_state(state)
+                graph_drafts, graph_probs = drafter._sample_markov_graph(batch_size, sampling)
+                row = {"batch": batch_size, "captured_size": batch_size in drafter.decoder.graph_batch_sizes,
+                       "sampling": name, "drafts_equal": torch.equal(eager_drafts, graph_drafts),
+                       "generator_equal": torch.equal(eager_state, generator.get_state()),
+                       "probs_equal": None, "probs_max_abs_diff": None}
+                if eager_probs is not None:
+                    row.update(probs_equal=torch.equal(eager_probs, graph_probs),
+                               probs_max_abs_diff=float((eager_probs - graph_probs).abs().max()))
+                rows.append(row)
+    return rows
+
+
+def sampling_row_passes(row: dict) -> bool:
+    """The generator in lockstep at every batch size; drafts and q bit-identical at a captured one (greedy has no q)."""
+    exact = row["drafts_equal"] and row["probs_equal"] is not False
+    return row["generator_equal"] and (exact or not row["captured_size"])
+
+
 def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
     from nanovllm import LLM, SamplingParams
     from nanovllm.engine.batch_metadata import draft_block_metadata
@@ -189,13 +228,18 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
                      "aux_max_abs_diff": float((eager_aux.float() - graph_aux.float()).abs().max()),
                      "block_logits_max_abs_diff": float((eager_block.float() - graph_block.float()).abs().max()),
                      "block_kv_max_abs_diff": float((eager_kv.float() - graph_kv.float()).abs().max())})
+    sampling_rows = (check_sampling_graphs(drafter, seqs, spec.target.generator)
+                     if drafter.model.markov_head is not None else [])
     llm.exit()
     exact = ("logits_equal", "aux_equal", "block_logits_equal", "block_kv_equal")
     passed = (all(row["other_slots_unchanged"] for row in rows)
-              and all(row[key] for row in rows if row["captured_size"] for key in exact))
-    return {"gate": "verify and draft block graphs against eager", "passed": passed,
+              and all(row[key] for row in rows if row["captured_size"] for key in exact)
+              and all(sampling_row_passes(row) for row in sampling_rows))
+    return {"gate": "verify, draft block and sampling graphs against eager", "passed": passed,
             "threshold": "bit-identical verify logits, aux, block logits and block K/V at a captured batch size; "
-                         "no other draft KV slot written at any batch size", "rows": rows}
+                         "no other draft KV slot written at any batch size; DSpark: drafts and q bit-identical at a "
+                         "captured batch size, the generator in the same state at any", "rows": rows,
+            "sampling_rows": sampling_rows}
 
 
 def check_alignment(paths: list[Path]) -> dict:

@@ -1,12 +1,15 @@
 """DSpark's propose: the drafts are drawn left to right, each row's logits biased by the Markov head on the token
-before it (the anchor for row 0), and the q handed to acceptance is each row's distribution after its bias."""
+before it (the anchor for row 0), and the q handed to acceptance is each row's distribution after its bias. The
+sampling graphs capture the same rows; their body is checked here run eagerly, the capture itself on the GPU."""
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from nanovllm.engine.batch_metadata import draft_block_metadata
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.speculative import DFlashDrafter, SpeculativeDecoder
-from nanovllm.layers.spec_sampler import probs_from_logits, sampling_tensors
+from nanovllm.engine.speculative import DFlashDrafter, SpeculativeDecoder, sampling_graph_key
+from nanovllm.layers.spec_sampler import probs_from_logits, sample, sampling_tensors
 from nanovllm.sampling_params import SamplingParams
 
 CPU = torch.device("cpu")
@@ -16,13 +19,15 @@ BIAS = torch.tensor([[0.0, 2.0, 0.0],
                      [0.0, 0.0, 0.0]])
 
 
-def make_drafter(k: int) -> DFlashDrafter:
+def make_drafter(k: int, bias: torch.Tensor = BIAS) -> DFlashDrafter:
+    """A drafter whose Markov head looks the bias up by previous token and whose hidden states are its logits."""
     config = SimpleNamespace(num_speculative_tokens=k, kvcache_block_size=256, max_model_len=64,
-                             hf_config=SimpleNamespace(vocab_size=3))
+                             hf_config=SimpleNamespace(vocab_size=bias.shape[1]))
     target = SimpleNamespace(device=CPU, generator=torch.Generator().manual_seed(0))
     decoder = SpeculativeDecoder(target, object(), config)    # builds a ModelDrafter, unused here
     drafter = object.__new__(DFlashDrafter)
-    drafter.decoder, drafter.model = decoder, SimpleNamespace(markov_head=lambda prev: BIAS[prev])
+    drafter.decoder = decoder
+    drafter.model = SimpleNamespace(markov_head=lambda prev: bias[prev], compute_logits=lambda hidden: hidden)
     return drafter
 
 
@@ -44,3 +49,48 @@ def test_q_is_each_row_distribution_after_its_bias():
     for row in range(4):
         assert torch.equal(probs[:, row], probs_from_logits(logits[:, row] + BIAS[prev], sampling))
         prev = drafts[:, row]
+
+
+def test_without_a_bias_the_rows_draw_what_dflash_draws():
+    # The noise of all k rows is drawn at once, as DFlash draws it: with a zero Markov bias the same generator state
+    # gives DFlash's q and drafts and leaves the generator where DFlash leaves it.
+    seqs = [Sequence([1, 2], SamplingParams(temperature=1.0)),
+            Sequence([3, 0], SamplingParams(temperature=0.7, top_k=3, top_p=0.9))]
+    sampling = sampling_tensors(seqs, CPU)
+    logits = torch.randn(2, 4, 6, generator=torch.Generator().manual_seed(2))
+    drafter = make_drafter(k=4, bias=torch.zeros(6, 6))
+    drafts, probs = drafter._sample_markov(seqs, logits, sampling)
+    generator = torch.Generator().manual_seed(0)
+    dflash_probs = probs_from_logits(logits, sampling)
+    assert torch.equal(probs, dflash_probs)
+    assert torch.equal(drafts, sample(dflash_probs, generator))
+    assert torch.equal(drafter.decoder.target.generator.get_state(), generator.get_state())
+
+
+@pytest.mark.parametrize("params", [
+    [SamplingParams(temperature=0), SamplingParams(temperature=0)],
+    [SamplingParams(temperature=1.0), SamplingParams(temperature=0.7, top_k=3, top_p=0.9)],
+], ids=["greedy", "random"])
+def test_sampling_graph_body_draws_what_the_eager_rows_draw(params):
+    # The body a sampling graph captures, run eagerly: two sequences padded to four, the anchors read from the block
+    # inputs as draft_block_metadata lays them out, the logits from the block outputs.
+    k, vocab_size, padded = 3, 6, 4
+    seqs = [Sequence([1, 2], params[0]), Sequence([3, 4], params[1])]
+    for seq in seqs:
+        seq.target_kv.block_table = [0]
+    sampling = sampling_tensors(seqs, CPU)
+    drafter = make_drafter(k, bias=torch.randn(vocab_size, vocab_size, generator=torch.Generator().manual_seed(3)))
+    logits = torch.randn(padded, k, vocab_size, generator=torch.Generator().manual_seed(4))
+    eager_drafts, eager_probs = drafter._sample_markov(seqs, logits[:2], sampling)
+    eager_state = drafter.decoder.target.generator.get_state()
+
+    metadata = draft_block_metadata(seqs, 256, k, vocab_size - 1, padded, 99, 1)
+    drafter.graph_vars = {"outputs": logits.view(padded * k, vocab_size), "input_ids": torch.tensor(metadata.input_ids),
+                          **drafter._sampling_buffers(padded)}
+    drafter.decoder.target.generator.manual_seed(0)                   # where the eager rows started
+    drafter._load_sampling_inputs(2, sampling)
+    drafter._sampling_forward(padded, sampling_graph_key(sampling))
+    buffers = drafter.graph_vars
+    assert torch.equal(buffers["drafts"][:2], eager_drafts)
+    assert eager_probs is None or torch.equal(buffers["probs"][:2], eager_probs)
+    assert torch.equal(drafter.decoder.target.generator.get_state(), eager_state)
