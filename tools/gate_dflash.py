@@ -1,15 +1,24 @@
-"""GPU checks of the DFlash port against DeepSpec's reference run (tools/ref_dflash_deepspec.py), port design §5.2.
+"""GPU checks of the block-draft port (DFlash, DSpark) against DeepSpec's reference run (tools/ref_dflash_deepspec.py),
+port design §5.2.
 
-  draft   G1-draft: nano's DFlash block forward on the real paged FlashAttention path, fed each fixture's target
-          aux features, against the block logits DeepSpec computed for that fixture. Pass: argmax equal on every
-          row whose reference top-2 margin exceeds 0.5 (G1-wide's rule), and max |delta| / max |logit| <= 2e-2.
-  rounds  tokens per round of the whole nano engine with the DFlash draft (eager, C=1, temperature-only) on the
+  draft   G1-draft: nano's block forward on the real paged FlashAttention path, fed each fixture's target aux
+          features, against the block logits DeepSpec computed for that fixture. Pass: argmax equal on every row
+          whose reference top-2 margin exceeds 0.5 (G1-wide's rule), and max |delta| / max |logit| <= 2e-2. For
+          DSpark the same rule also holds for the rows after their Markov bias, each row's previous token taken
+          from the reference's greedy chain, so one flipped token cannot mismatch the rows after it.
+  rounds  tokens per round of the whole nano engine with the block draft (eager, C=1, temperature-only) on the
           reference's prompts, against the reference's. Its per-run pass (|difference| <= 2 x the combined per-round
           standard error) is a diagnostic; the gate is `alignment` over several runs.
   graphs  the verify graph (it exports the aux features) and the draft block graph against their eager paths on the
           same rows. Pass: verify logits and aux, block logits and the block K/V stored in the draft's KV bit-identical
           at a captured batch size, a batch padded up to one reported only; at both, no other slot of the draft's KV
-          written.
+          written. For DSpark also its sampling graphs, under greedy, temperature-only and the protocol's sampling:
+          drafts and q bit-identical to the eager rows from the same generator state at a captured batch size, and
+          at both batch sizes the generator left where the eager rows leave it; and q, drawn among each row's
+          candidates under the protocol's sampling, equal to the rule over the whole vocabulary along the drawn
+          chain (the same support and |delta| <= 1e-5) on every row whose kept tokens fit among its candidates.
+          Rows where more tokens reach the cut value are counted, not failed: their q is still the distribution
+          they were drawn from, only narrower than the truncation rule.
   alignment  the protocol's dflash_alignment rule over several `rounds` results (one per seed): per sampling, the mean
           of nano's runs against the mean of DeepSpec's. Pass: |difference| <= 2 x the standard error of that
           difference, computed from the per-run means.
@@ -26,10 +35,42 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Callable
 
 import torch
 
 GIB = 1 << 30
+# (temperature, top_k, top_p) of the samplings DSpark's sampling graphs are checked under; rec is the protocol's.
+GRAPH_SAMPLINGS = {"greedy": (0.0, 0, 1.0), "temperature": (1.0, 0, 1.0), "rec": (0.7, 20, 0.8)}
+WHOLE_VOCABULARY_TOLERANCE = 1e-5    # fp32 sums of the same kept terms in another order
+
+
+def block_draft_type(draft_dir: str) -> str:
+    """dspark when the checkpoint has a Markov head, else dflash: the draft_type Config requires of it."""
+    from transformers import AutoConfig
+    return "dspark" if getattr(AutoConfig.from_pretrained(draft_dir), "markov_rank", 0) > 0 else "dflash"
+
+
+def compare_logits(actual: torch.Tensor, expected: torch.Tensor) -> dict:
+    """G1's rule on [rows, V] logits: argmax equal where the reference's top-2 margin exceeds 0.5, and the largest
+    difference over the largest reference logit."""
+    top2 = expected.topk(2, dim=-1).values
+    decided = top2[:, 0] - top2[:, 1] > 0.5
+    return {"argmax_equal_where_decided": bool(torch.equal(actual.argmax(-1)[decided], expected.argmax(-1)[decided])),
+            "decided_rows": int(decided.sum()),
+            "relative_error": float((actual - expected).abs().max() / expected.abs().max())}
+
+
+def passes(comparison: dict) -> bool:
+    return comparison["argmax_equal_where_decided"] and comparison["relative_error"] <= 2e-2
+
+
+def markov_rows(logits: torch.Tensor, markov_head: Callable[[torch.Tensor], torch.Tensor], anchor_token: int,
+                chain: list[int]) -> torch.Tensor:
+    """Each block row plus the Markov bias of the token before it on the chain (the anchor for row 0), summed in the
+    logits' dtype as the engine sums them."""
+    prev = torch.tensor([anchor_token] + chain[:-1], device=logits.device)
+    return logits + markov_head(prev)
 
 
 def check_draft(draft_dir: str, reference_dir: Path) -> dict:
@@ -64,16 +105,15 @@ def check_draft(draft_dir: str, reference_dir: Path) -> dict:
                         block_tables=torch.arange(blocks, dtype=torch.int32)[None],
                         query_len_per_seq=model.block_size, causal=False)
             input_ids = torch.tensor([fixture["anchor_token"]] + [model.mask_token_id] * (model.block_size - 1))
-            logits = model.compute_logits(model(input_ids, block)).float().cpu()
+            logits = model.compute_logits(model(input_ids, block))
             reset_context()
-        expected = fixture["block_logits"].float()
-        top2 = expected.topk(2, dim=-1).values
-        decided = top2[:, 0] - top2[:, 1] > 0.5
-        rows.append({"fixture": fixture_path.stem, "context": length,
-                     "argmax_equal_where_decided": bool(torch.equal(logits.argmax(-1)[decided], expected.argmax(-1)[decided])),
-                     "decided_rows": int(decided.sum()),
-                     "relative_error": float((logits - expected).abs().max() / expected.abs().max())})
-    passed = all(row["argmax_equal_where_decided"] and row["relative_error"] <= 2e-2 for row in rows)
+            row = {"fixture": fixture_path.stem, "context": length,
+                   **compare_logits(logits.float().cpu(), fixture["block_logits"].float())}
+            if model.markov_head is not None:
+                markov = markov_rows(logits, model.markov_head, fixture["anchor_token"], fixture["markov_tokens"])
+                row["markov"] = compare_logits(markov.float().cpu(), fixture["markov_logits"].float())
+        rows.append(row)
+    passed = all(passes(row) and ("markov" not in row or passes(row["markov"])) for row in rows)
     return {"gate": "G1-draft", "passed": passed, "threshold": "argmax where top-2 margin > 0.5; relative error <= 2e-2",
             "fixtures": rows}
 
@@ -91,7 +131,7 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
     manifest = json.loads((reference_dir / "manifest.json").read_text())
     by_id = {entry["id"]: entry["prompt_token_ids"] for entry in json.loads(panel.read_text())}
     prompts = [by_id[prompt_id] for prompt_id in manifest["prompt_ids"]]
-    llm = LLM(target, draft_model=draft, draft_type="dflash", enforce_eager=True, max_num_seqs=1,
+    llm = LLM(target, draft_model=draft, draft_type=block_draft_type(draft), enforce_eager=True, max_num_seqs=1,
               enable_prefix_cache=False, kv_cache_memory_bytes=4 * GIB, seed=seed)
     rows = []
     for name, result in reference.items():
@@ -114,11 +154,70 @@ def check_rounds(target: str, draft: str, reference_dir: Path, panel: Path, seed
             "threshold": "|nano - deepspec| <= 2 x combined standard error", "rows": rows}
 
 
+def whole_vocabulary_q(drafter, batch: list, logits: torch.Tensor, drafts: torch.Tensor, sampling) -> torch.Tensor:
+    """Each row's distribution by the engine's rule over the whole vocabulary, biased by the draft before it."""
+    from nanovllm.layers.spec_sampler import probs_from_logits
+
+    anchors = torch.tensor([seq.last_token for seq in batch], device=drafts.device)
+    prev = torch.cat([anchors.unsqueeze(1), drafts[:, :-1]], dim=1)
+    return torch.stack([probs_from_logits(logits[:, row] + drafter.model.markov_head(prev[:, row]), sampling)
+                        for row in range(drafts.shape[1])], dim=1)
+
+
+def check_sampling_graphs(drafter, seqs: list, generator: torch.Generator) -> list[dict]:
+    """DSpark's sampling graph against its eager rows on the same block outputs, from the same generator state;
+    the eager q against the rule over the whole vocabulary."""
+    from types import SimpleNamespace
+    from nanovllm.engine.speculative import num_candidates
+    from nanovllm.layers.spec_sampler import sampling_tensors
+
+    k, rows = drafter.decoder.num_drafts, []
+    for batch_size in (4, 3):
+        batch = seqs[:batch_size]
+        with torch.inference_mode():
+            logits = drafter.model.compute_logits(drafter._forward_graph(batch)).view(batch_size, k, -1)
+            for name, (temperature, top_k, top_p) in GRAPH_SAMPLINGS.items():
+                params = SimpleNamespace(temperature=temperature, top_k=top_k, top_p=top_p)
+                sampling = sampling_tensors([params] * batch_size, drafter.decoder.device)
+                state = generator.get_state()
+                eager_drafts, eager_probs = drafter._sample_markov(batch, logits, sampling)
+                eager_state = generator.get_state()
+                generator.set_state(state)
+                graph_drafts, graph_probs = drafter._sample_markov_graph(batch_size, sampling)
+                row = {"batch": batch_size, "captured_size": batch_size in drafter.decoder.graph_batch_sizes,
+                       "sampling": name, "drafts_equal": torch.equal(eager_drafts, graph_drafts),
+                       "generator_equal": torch.equal(eager_state, generator.get_state()),
+                       "probs_equal": None, "probs_max_abs_diff": None, "whole_vocabulary_same_support": None,
+                       "whole_vocabulary_max_abs_diff": None, "rows_past_candidates": None}
+                if eager_probs is not None:
+                    whole = whole_vocabulary_q(drafter, batch, logits, eager_drafts, sampling)
+                    candidates = num_candidates(sampling.max_top_k, sampling.all_top_k, whole.shape[-1])
+                    past = (whole > 0).sum(-1) > (candidates or whole.shape[-1])    # [B, k]: the kept set overflows
+                    mismatch = ((eager_probs > 0) != (whole > 0)).any(-1) & ~past
+                    row.update(probs_equal=torch.equal(eager_probs, graph_probs),
+                               probs_max_abs_diff=float((eager_probs - graph_probs).abs().max()),
+                               whole_vocabulary_same_support=not bool(mismatch.any()),
+                               whole_vocabulary_max_abs_diff=float((eager_probs - whole).abs().amax(-1)
+                                                                   .masked_fill(past, 0).max()),
+                               rows_past_candidates=int(past.sum()))
+                rows.append(row)
+    return rows
+
+
+def sampling_row_passes(row: dict) -> bool:
+    """The generator in lockstep and q the whole-vocabulary rule (on rows within the candidates) at every batch
+    size; drafts and q bit-identical at a captured one (greedy has no q)."""
+    exact = row["drafts_equal"] and row["probs_equal"] is not False
+    rule = row["probs_equal"] is None or (row["whole_vocabulary_same_support"]
+                                          and row["whole_vocabulary_max_abs_diff"] <= WHOLE_VOCABULARY_TOLERANCE)
+    return row["generator_equal"] and rule and (exact or not row["captured_size"])
+
+
 def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
     from nanovllm import LLM, SamplingParams
     from nanovllm.engine.batch_metadata import draft_block_metadata
 
-    llm = LLM(target, draft_model=draft, draft_type="dflash", max_num_seqs=8, enable_prefix_cache=False,
+    llm = LLM(target, draft_model=draft, draft_type=block_draft_type(draft), max_num_seqs=8, enable_prefix_cache=False,
               kv_cache_memory_bytes=8 * GIB, seed=seed)
     spec = llm.speculative
     for entry in json.loads(panel.read_text())[:4]:
@@ -158,13 +257,19 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
                      "aux_max_abs_diff": float((eager_aux.float() - graph_aux.float()).abs().max()),
                      "block_logits_max_abs_diff": float((eager_block.float() - graph_block.float()).abs().max()),
                      "block_kv_max_abs_diff": float((eager_kv.float() - graph_kv.float()).abs().max())})
+    sampling_rows = (check_sampling_graphs(drafter, seqs, spec.target.generator)
+                     if drafter.model.markov_head is not None else [])
     llm.exit()
     exact = ("logits_equal", "aux_equal", "block_logits_equal", "block_kv_equal")
     passed = (all(row["other_slots_unchanged"] for row in rows)
-              and all(row[key] for row in rows if row["captured_size"] for key in exact))
-    return {"gate": "verify and draft block graphs against eager", "passed": passed,
+              and all(row[key] for row in rows if row["captured_size"] for key in exact)
+              and all(sampling_row_passes(row) for row in sampling_rows))
+    return {"gate": "verify, draft block and sampling graphs against eager", "passed": passed,
             "threshold": "bit-identical verify logits, aux, block logits and block K/V at a captured batch size; "
-                         "no other draft KV slot written at any batch size", "rows": rows}
+                         "no other draft KV slot written at any batch size; DSpark: drafts and q bit-identical at a "
+                         "captured batch size, the generator in the same state and q the whole-vocabulary rule "
+                         f"(same support, |delta| <= {WHOLE_VOCABULARY_TOLERANCE}) at any", "rows": rows,
+            "sampling_rows": sampling_rows}
 
 
 def check_alignment(paths: list[Path]) -> dict:

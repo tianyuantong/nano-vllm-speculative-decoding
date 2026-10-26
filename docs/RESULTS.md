@@ -1,208 +1,149 @@
-# Results: DFlash speculative decoding on nano-vLLM
+# Results: DSpark speculative decoding on nano-vLLM
 
-On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_qwen3_8b_block7`) proposes 7 tokens per round and a round yields 2.8 on average. On the unseen K128 confirmation panel, its steady-state throughput is **2.11–2.24×** plain decoding at C = 1, **1.75–1.85×** at C = 8 and **1.32–1.40×** at C = 32. At C = 64 it is 1.08× (1.06–1.09), which is within timing noise.
+On an RTX PRO 6000 with Qwen3-8B in BF16, the DSpark draft (DeepSpec's `dspark_qwen3_8b_block7`) proposes 7 tokens per round like DFlash, then corrects them left to right with its Markov head; a round yields 2.81–2.95 tokens on average. On the unseen K128b confirmation panel, its steady-state throughput is **2.08–2.20×** plain decoding at C = 1, **1.73–1.80×** at C = 8, **1.43× (1.42–1.45)** at C = 32 and **1.15× (1.13–1.15)** at C = 64, faster at all four.
 
-The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, development panel, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
+DFlash in the same engine and jobs gives 1.94–2.06 / 1.68 / 1.31 / 1.01×, and DSpark is faster than it at every concurrency: by 4.4–8.1% at C = 1, 1.2–7.8% at C = 8, 8.9–9.9% at C = 32 and 11.0–14.7% at C = 64. At C = 32 and 64, an estimated 2–6 points of that lead come from the two lines sampling differently (§3). Against vLLM's DSpark (same GPU model, same weights, development panel, wall-clock throughput of the whole run), nano is 7.6–7.9% behind at C = 1, 8 and 32.
 
 **How it is measured**
 - **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
-- **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§3).
-- **K128**: 128 prompts whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
-- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), frozen before the confirmation runs.
+- **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§4).
+- **K128b**: a new 128-prompt confirmation panel whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
+- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.1.json`](../benchmarks/protocol-v2.1.json), frozen before the GPU runs.
 
-## 1. Confirmation panel (K128)
+## 1. Confirmation panel (K128b)
 
-K128 is 128 prompts from SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): NIAH 43, code completion 40, open-book QA 37, creative writing 8. None of them overlap D48.
+K128b has K128's quotas (NIAH 43, code completion 40, open-book QA 37, creative writing 8), drawn from SPEED-Bench `throughput_1k` with a new salt; prompts used in D48 or K128 are excluded by question id and by prompt text. Categories are interleaved in proportion to their quotas, so creative writing is 6% of the first 48 prompts (used at C = 1 and 8), as in the whole panel; in K128 it was 17%.
 
-Which prompts each concurrency uses:
-- C = 1 and 8 take the first 48 prompts. Creative writing is 17% of those 48 against 6% of the whole panel, which likely lifts the speedup at these two concurrencies by about 0.04 (estimate).
-- C = 32 takes all 128.
-- C = 64 cycles through the panel twice.
-
-One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.7 ms, so the pre-registered rule voids it. The protocol also voids lines of one (C, seed) split across jobs, so all three lines of that group were rerun back to back in one job.
-- The table takes DFlash's value for that seed from the rerun: 2.19.
-- All 48 requests of all three lines produced the same tokens as the first run.
-- The 0.6B line keeps its original value: 1.566 (1.567 in the rerun).
-
-| C | 0.6B draft (k = 3) | DFlash (k = 7) | DFlash ÷ 0.6B |
+| C | DFlash (k = 7) | DSpark (k = 7) | DSpark over DFlash, per seed |
 |---:|---|---|---|
-| 1 | **1.54 (1.54–1.57)** | **2.11–2.24** | 1.37–1.45 |
-| 8 | **1.21 (1.19–1.21)** | **1.75–1.85** | 1.44–1.56 |
-| 32 | 0.96 (0.95–0.96) | **1.32–1.40** | 1.38–1.48 |
-| 64 | 0.82 (0.81–0.82) | 1.08 (1.06–1.09) | 1.29–1.33 |
+| 1 | **1.94–2.06** | **2.08–2.20** | +4.4 … +8.1% |
+| 8 | **1.68 (1.67–1.71)** | **1.73–1.80** | +1.2 … +7.8% |
+| 32 | **1.31 (1.31–1.33)** | **1.43 (1.42–1.45)** | +8.9 … +9.9% |
+| 64 | 1.01 (1.00–1.01) | **1.15 (1.13–1.15)** | +11.0 … +14.7% |
 
 Values are the median (min–max) over seeds, to two decimals, or only the range when it spans more than 0.05. **Bold** marks a line that is faster than plain decoding by the protocol's rule.
 
-- **What "faster" means.** Every seed's R must be above 1 + 2 × timing noise. The confirmation panel has no timing repeats by design, so the timing noise is borrowed from the development matrix: 3.75%, from the same machine and the same engine.
-- **C = 64 is close to the line.** The three seeds give 1.057, 1.086 and 1.080. A timing noise of 2.5% would call this faster; the table takes the conservative side.
-- **DFlash against the 0.6B draft.** At every C, the per-seed paired gains all have the same sign and their median exceeds 2 × timing noise, so DFlash is faster than the 0.6B draft at every concurrency.
-- The 0.6B line drops below plain decoding from C = 32; DFlash stays above 1 up to C = 64.
-- Tokens per round, averaged over rounds: DFlash 2.75–2.85, 0.6B 2.49–2.53.
+- **What "faster" means.** Every seed's R must be above 1 + 2 × timing noise. The confirmation panel has no timing repeats by design, so the timing noise is borrowed from the development matrix: 1.38%, from 9 repeat pairs on the same machine and engine.
+- **DSpark against DFlash.** At every C, the per-seed paired gains all have the same sign and their median exceeds 2 × timing noise, so DSpark is faster than DFlash at every concurrency.
+- Tokens per round, averaged over rounds: DSpark 2.81–2.95, DFlash 2.53–2.70.
+- **One void and its rerun.** One DFlash run (C = 1, seed 17011) had a round of 199 ms against a median of 15.7 ms, so the pre-registered rule voids it; the record is kept. Of those 199 ms, 182 went to the context-store step (median 0.26 ms); propose and verify were normal. The DFlash results' only void was the same cell and step (177 ms) at almost the same point: round 3549, 57.4 s into the run, against round 3544 and 57.3 s here, both the first DFlash run of a confirmation job. Of 78 runs at C = 1, these two are the only ones with a round over twice the median. The group's three lines were rerun back to back in one job: valid, with the same tokens as the first run on all three lines, and the group takes its values from the rerun (DFlash 2.06). The same seed and the same outputs did not reproduce the stall, so it does not follow from the data; the cause is not known.
 
-## 2. Development panel (D48) and confirmation panel (K128)
+## 2. Development panel (D48) and confirmation panel (K128b)
 
-| C | DFlash, D48 | DFlash, K128 | 0.6B, D48 | 0.6B, K128 |
+| C | DFlash, D48 | DFlash, K128b | DSpark, D48 | DSpark, K128b |
 |---:|---|---|---|---|
-| 1 | 1.91–1.99 | 2.11–2.24 | 1.45–1.52 | 1.54 |
-| 8 | 1.66–1.72 | 1.75–1.85 | 1.17 | 1.21 |
-| 32 | 1.21–1.30 | 1.32–1.40 | 0.94 | 0.96 |
-| 64 | 1.01 | 1.08 | 0.79 | 0.82 |
-| tokens per round | 2.47–2.55 | 2.75–2.85 | 2.37–2.40 | 2.49–2.53 |
+| 1 | 1.91–1.99 | 1.94–2.06 | 2.00 (1.98–2.03) | 2.08–2.20 |
+| 8 | 1.69 (1.66–1.71) | 1.68 (1.67–1.71) | 1.72–1.82 | 1.73–1.80 |
+| 32 | 1.26 (1.26–1.30) | 1.31 (1.31–1.33) | 1.40 (1.38–1.40) | 1.43 (1.42–1.45) |
+| 64 | 1.01 (0.99–1.03) | 1.01 (1.00–1.01) | 1.12 (1.11–1.13) | 1.15 (1.13–1.15) |
+| tokens per round | 2.47–2.55 | 2.53–2.70 | 2.70–2.79 | 2.81–2.95 |
 
-D48 is the 48-prompt panel of the September release, with 5 seeds per C. It also covers C = 2, 4 and 16:
-- DFlash: 1.91–1.97, 1.69–1.85 and 1.55;
-- 0.6B: 1.42, 1.32 and 0.99–1.04.
+D48 has 5 seeds per C and also covers C = 2, 4 and 16: DSpark 1.99–2.06, 1.78–1.88 and 1.56–1.65; DFlash 1.91–1.96, 1.71–1.84 and 1.54 (1.54–1.58). DSpark is faster than DFlash at all seven. The two panels agree on the direction and on every verdict.
 
-The two panels agree on the direction and on every verdict.
+- **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`3dc0dba`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
+- **Releasing the confirmation set.** The design's stop rule, revised after the first matrix and before the second, released the confirmation set when, at every C, DSpark's tokens per round were higher and the median paired gain was positive; both held at all seven.
+- **A new machine.** The cloud instance changed between the DFlash and DSpark runs. Plain decoding on the new one gives 80.1 / 557.4 / 1459.0 / 2031.9 tok/s at C = 1 / 8 / 32 / 64, against 80.4 / 554.8 / 1466.0 / 2040.5 before: within ±0.5%, below the timing noise, so §4 compares the new nano numbers with vLLM's from the old machine.
 
-The engine is the same on both panels; what differs is acceptance. K128 yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round):
+## 3. Where DSpark's lead comes from
 
-| category | D48 | K128 |
-|---|---:|---:|
-| code completion | 3.42 | 3.49 |
-| NIAH | 2.80 | 2.92 |
-| creative writing | 2.59 | 2.95 |
-| open-book QA | 2.13 | 2.42 |
+DSpark's paired gain over DFlash, split per seed into four factors that multiply to it: tokens per round, round time (DFlash's round ÷ DSpark's), the share of the steady window outside prefill steps, and the rest. A positive percentage favours DSpark; the last column is propose time, DSpark minus DFlash. Medians over seeds, 5 on D48 and 3 on K128b, from [`tools/gain_factors.py`](../tools/gain_factors.py).
 
-Prompt length is not the cause. Both panels have a median length of about 1020 tokens, and D48 has only three longer prompts (1229, 1264 and 2262 tokens).
+| panel | C | gain | tokens per round | round | outside prefill | rest | propose difference (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| D48 | 1 | +3.4% | +6.8% | −3.7% | −0.1% | −0.2% | +0.68 |
+| D48 | 2 | +4.2% | +8.5% | −3.7% | −0.3% | −0.1% | +0.65 |
+| D48 | 4 | +4.5% | +9.0% | −3.9% | −0.3% | −0.1% | +0.72 |
+| D48 | 8 | +4.6% | +9.6% | −4.2% | −0.4% | −0.5% | +0.79 |
+| D48 | 16 | +4.0% | +9.1% | −2.8% | −2.1% | −0.5% | +0.58 |
+| D48 | 32 | +9.2% | +9.4% | +2.1% | −2.7% | +0.6% | −0.97 |
+| D48 | 64 | +11.4% | +8.1% | +5.7% | −3.6% | +0.4% | −2.84 |
+| K128b | 1 | +6.6% | +10.3% | −2.8% | −0.1% | −0.3% | +0.64 |
+| K128b | 8 | +6.1% | +11.7% | −4.3% | −1.5% | −0.4% | +0.81 |
+| K128b | 32 | +9.7% | +9.5% | +3.1% | −3.5% | +0.1% | −0.97 |
+| K128b | 64 | +14.1% | +10.2% | +5.9% | −4.0% | +0.1% | −3.01 |
 
-## 3. Against vLLM (D48, wall-clock tok/s)
+- **7–12% more tokens per round** is the Markov head's work: later positions in the block know what the earlier ones drew, so more of them are accepted. This is where DSpark's lead comes from.
+- **Round time.** Up to C = 16 DSpark's round is 3–4% longer; at C = 32 and 64 it is 2–6% shorter. Almost all of the difference is in propose; verification differs by under 0.5 ms. The negative "outside prefill" column means DSpark, decoding faster, takes in new requests more often, so prefill stalls ([DFlash results](v2/RESULTS.md) §5.2) take more of its time.
+- **Why the round gets shorter at high concurrency.** The two lines sample differently: candidate-only sampling applies to DSpark only, while DFlash still runs softmax and top-k over the whole vocabulary, which costs more as concurrency rises. From C = 16 to 64, DFlash's propose grows by 7.9 ms, DSpark's by 4.4 ms.
+- **How much of the lead that asymmetry accounts for.** This is inferred from what each line's round does, not measured with DFlash on candidate sampling.
+  - C = 32 and 64: with the same sampling, DSpark's propose could not be shorter than DFlash's, since it does all of DFlash's propose plus the row-by-row correction. If the other phases and the prefill share stayed as measured, the shorter round on D48 (2.1 and 5.7 points; verification differs there by at most 0.18 ms) would all be the asymmetry's, and DSpark's lead without it would be about +7% and +5%. This is a conditional estimate, not a bound. On K128b, DSpark's verification is also 0.29 and 0.42 ms shorter, so not all of its 3.1 and 5.9 points are sampling.
+  - C = 1 and 16: profiled, DFlash's logits-and-sampling step spends only 0.23 ms and 0.60 ms outside the logits matrix multiply (lm_head). Candidate sampling could save at most that, 1.5% and 2.8% of a round, so the asymmetry accounts for at most 1.5 and 2.8 points there.
+- Measuring the same-sampling number exactly needs DFlash on candidate sampling too; that has not been done.
 
-| C | plain decoding: nano / vLLM v1 / vLLM v2 | 0.6B: nano / vLLM | DFlash: nano / vLLM | vLLM DSpark |
-|---:|---|---|---|---:|
-| 1 | 80 / 77 / 73 | 119 / 108 | 155 / 156 | 173 |
-| 8 | 515 / 506 / 492 | 608 / 596 | 804 / 881 | 919 |
-| 32 | 1276 / 1257 / 1224 | 1231 / 1279 | 1567 / 1681 | 1794 |
+## 4. Against vLLM (D48, wall-clock tok/s)
 
-nano's numbers are the median of 5 seeds, without the timing repeats. vLLM's are the median of 2 runs.
-- **vLLM version.** `0.1.1.dev52+g372477d2d`, a development build from 2026-09-12. It runs the 0.6B draft on its v1 model runner and DFlash and DSpark on v2, so the table lists its plain decoding on both runners.
-- **Run-to-run variation.** vLLM's two runs differ by 7.2% at C = 8, so the gap at that concurrency is not stable; at C = 32 they differ by 0.8%.
-- vLLM was not run on K128.
+| C | plain decoding: nano / vLLM v1 | DFlash: nano / vLLM | DSpark: nano / vLLM | DSpark's extra tokens per round over DFlash: nano / vLLM |
+|---:|---|---|---|---|
+| 1 | 80 / 77 | 154 / 156 | 160 / 173 | +8.3% / +13.7% |
+| 8 | 517 / 506 | 800 / 881 | 849 / 919 | +9.1% / +14.1% |
+| 32 | 1273 / 1257 | 1567 / 1681 | 1652 / 1794 | +10.4% / +12.2% |
 
-What the table shows:
-- **Plain decoding.** nano is 1.5–4% faster than vLLM's v1 runner and 4–10% faster than its v2 runner. nano's plain decoding runs at about 69–71% memory-bandwidth utilisation: bytes of weights and KV read ÷ step time ÷ the 1.79 TB/s peak.
-- **DFlash.** It is level at C = 1 and 9% and 7% behind at C = 8 and 32. The most likely cause is the prefill stall of §5.2; its size matches, but it has not been verified directly.
-- **DSpark.** On vLLM, DSpark is another 4–11% faster than DFlash.
+nano's numbers are the median of 5 seeds on the new machine, without the timing repeats. vLLM's are the median of 2 runs on the previous machine (the same GPU model) with `0.1.1.dev52+g372477d2d`, which runs DFlash and DSpark on its v2 model runner; vLLM was not rerun.
 
-## 4. Correctness
+- nano's DSpark is 7.6–7.9% behind vLLM's at all three concurrencies. Its DFlash is 1.1% behind at C = 1, and 9.2% and 6.8% behind at C = 8 and 32.
+- There are four known differences; which of them matters most is not known.
+  - **Tokens per round.** The two DSparks are close (nano 2.71–2.79, vLLM 2.74–2.87), but nano's DFlash already gets more (2.50–2.55 against 2.44–2.52), so DSpark adds less on top of it.
+  - **Draft truncation.** nano also applies top-k and top-p to the draft; vLLM's draft uses temperature only.
+  - **CUDA graphs.** At C = 1 nano's DSpark propose is 0.68 ms longer than DFlash's, about 4% of a round. vLLM captures the backbone and the 7 sampling steps in one graph; nano uses two.
+  - **The prefill stall.** nano's prefill steps do no decoding ([DFlash results](v2/RESULTS.md) §5.2), which costs throughput at C = 8 and 32.
 
-### 4.1 Output quality (GSM8K)
+## 5. Correctness
+
+### 5.1 Output quality (GSM8K)
 
 | line | accuracy | difference from plain decoding, points (95% interval) |
 |---|---:|---|
 | plain decoding | 85.2% | — |
-| 0.6B | 85.6% | +0.4 (−0.8 … +1.6) |
-| DFlash | 84.9% | −0.3 (−1.5 … +0.9) |
+| DSpark | 84.7% | −0.5 (−1.7 … +0.8) |
 
-All 1319 questions × 2 seeds at C = 32, paired by question and seed. The gate requires the interval's lower end to be above −3 points; both lines pass. Fewer than 0.2% of answers could not be parsed.
+All 1319 questions × 2 seeds, paired by question and seed. The gate requires the interval's lower end to be above −3 points; DSpark passes. Fewer than 0.2% of answers could not be parsed.
 
-### 4.2 Gates
+### 5.2 Gates
 
 | gate | what it checks | result |
 |---|---|---|
-| G1-draft | DFlash block forward against DeepSpec's reference, 8 fixtures | relative error 0.60–1.05% (bound 2%); argmax equal at every decided position |
-| Alignment | tokens per round, nano against DeepSpec, C = 1, 3 seeds per side | gap 0.009 at T 0.7 (bound 0.138), 0.032 at T 1.0 (bound 0.275); see below |
-| CUDA graph vs eager | the verify graph and the draft block graph | logits, exported hidden states and KV bit-identical at captured sizes |
-| G2-multi | the production sampler's multistep output distribution, k = 2, 3, 7, on the GPU | 29 cases pass |
-| G1-wide | verification logits against step-by-step decoding, 8 prompts, B = 1/4/16 | worst gap 0.75 (0.6B) and 0.84 (DFlash), bound 3.0; argmax equal at every decided position |
-| G2-real | acceptance rate and output distribution on real distributions | see below |
+| G1-draft | DSpark's block logits and Markov-corrected logits against DeepSpec's reference, 8 fixtures, fed DeepSpec's greedy chain row by row | relative error 0.59–1.08% (block) and 0.60–0.92% (corrected), bound 2%; argmax equal at every decided position |
+| Alignment | tokens per round, nano against DeepSpec, C = 1, temperature only, 3 seeds per side | gap 0.074 at T 0.7 (bound 0.179), 0.027 at T 1.0 (bound 0.329) |
+| G1-wide | verification logits against step-by-step decoding | worst gap 0.84, bound 3.0 |
+| CUDA graph vs eager | the sampling graph | bit-identical; candidate q differs from the whole-vocabulary rule by at most 6e-8, and none of the gate's 49 rows has kept tokens past the candidate window |
+| Sampling graph timing | propose with the 7 sampling steps captured, against eager | C = 1: 4.07 → 3.56–3.65 ms; C = 8: 4.41 → 4.09–4.10 ms |
+| G2-multi | the production sampler's multistep output distribution, on the GPU | 29 cases pass |
+| G2-real | acceptance rate and output distribution on a real distribution | acceptance error 0.003 (bound 0.02), worst frequency gap 0.0023 (bound 0.0064) |
 
 - **Decided position**: one where the reference's top logit leads the second by more than 0.5.
-- **Alignment, paired.** Over 24 per-prompt pairs, nano minus DeepSpec is +0.056 ± 0.19 at T 0.7 and +0.064 ± 0.26 at T 1.0 (2 standard errors); both are consistent with 0.
-- **G2-real.**
-  - DFlash: acceptance rate 0.776 against an analytic 0.777, worst frequency gap 0.0011 (bound 0.0066).
-  - 0.6B: acceptance rate 0.453 against an analytic 0.456, worst frequency gap 0.0008.
-
-### 4.3 Three rules revised after seeing the data
-
-**Alignment**
-- *First run:* the rule treated the rounds of one prompt as independent samples, which made the standard error too small. T 1.0 failed on the first seed, and across three seeds the difference changed sign (+0.18 … −0.20).
-- *Revision:* 3 seeds per side, with the standard error taken from per-run means.
-- *After:* passes.
-
-**G1-wide**
-- *First run:* worst gaps of 1.25 (0.6B) and 1.75 (DFlash), above the fixed bound of 0.5. But decode alone, changing only the batch size, already differs by up to 1.5 (at B = 16), so even the reference path would fail a 0.5 bound.
-- *Revision:* the bound is twice the noise floor, and the floor is measured first in the same job.
-- *After:* passes. The argmax rule passed both times.
-
-**G2-real** (revised twice)
-- *First run:* both lines picked a position where the target split 0.5 / 0.5 and the draft put everything on one token, which tests only the simplest rejection.
-- *Second run:* the positions it picked had a target with a single token, so the output-distribution check tested nothing.
-- *Revisions:* first the draft's q, then also the target's p, must put probability on at least 2 tokens.
-- *After:* passes, now testing the residual distribution over several tokens.
-
-The protocol's `revised` notes record each revision together with the first run's numbers.
-
-## 5. Where the time goes
-
-### 5.1 One round
-
-DFlash on D48, median GPU time per phase (ms):
-
-| C | propose | verify | context store | accept | round |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 2.85 | 12.11 | 0.26 | 0.32 | 15.7 |
-| 8 | 3.33 | 14.48 | 0.29 | 0.45 | 18.7 |
-| 32 | 6.50 | 22.23 | 0.34 | 2.20 | 31.8 |
-| 64 | 11.80 | 38.23 | 0.54 | 4.31 | 55.9 |
-
-**Verification is 68–77% of a round**, and it gets more expensive per row as concurrency rises:
-- From C = 32, each extra verified row costs about 0.023 ms; at C = 64, about 0.03–0.04 ms. Verifying 8 positions for every request costs more the more requests there are.
-- Yet only 8% of rounds accept five or more drafts. Verifying only the first few drafts is therefore a possible follow-up, estimated at about +3% at C = 32 and +8% at C = 64 (estimate).
-- vLLM's adaptive verification, compared on the same attention backend, gives 0.995× at C = 8 and 32.
-
-**The two CUDA graphs**
-- Capturing the draft block forward in a graph made a round 16% faster at C = 1 (18.8 → 15.7 ms) and 12% faster at C = 8. Profiling showed that before it, the GPU was waiting for the CPU to launch kernels.
-- A graph for the context store gained nothing: round time did not change, and the phase's GPU time fell by only 0.04 ms, so it was reverted. The expected explanation was that its launch cost was already hidden behind verification's GPU time; the measurement confirms only that there was no gain.
-
-### 5.2 The prefill stall
-
-nano's prefill steps do no decoding. Each new request pauses all the others for one step of about 52 ms, because a prefill step handles one prompt of about 1020 tokens.
-
-| C | prefill share of the steady window (DFlash / plain) | DFlash throughput lost to it (lower–upper bound) | speedup: measured → without prefill time |
-|---:|---|---|---|
-| 8 | 15.7% / 8.7% | 5–16% | 1.70 → 1.84 |
-| 32 | 29.5% / 21.6% | 15–29% | 1.27 → 1.40 |
-| 64 | 30.7% / 29.5% | 26–31% | 1.01 → 1.03 |
-
-The lower bound assumes each stall displaces one round; the upper bound counts all prefill time as lost.
-
-- **Why DFlash loses more.** DFlash decodes faster, so prefill takes a larger share of its time, and it loses 8–9 points more than plain decoding. vLLM mixes prefill into decode steps instead: the step gets longer, but the decoding requests still get their tokens in it, so it never stops a whole step.
-- **The gap to vLLM.** Without speculation, nano is 2–4% faster than vLLM; with DFlash it is 7% slower. This asymmetry of about 10 points matches the extra stall loss. It is not verified directly yet; verifying it needs prefill merged into decode steps.
-- **Inter-token latency.** ITL is the gap between two consecutive deliveries to one request. For DFlash at C = 32, its p99 is 131 ms, and 32.9 ms without the gaps that contain a prefill; those gaps are 21% of all gaps.
+- G1-draft and G1-wide ran on the engine before candidate sampling (`3dc0dba`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
 
 ## 6. Estimates made beforehand
 
-Before the first measurement, the plan estimated:
-
 | item | estimate | measured |
 |---|---|---|
-| round time at C = 1 | 15–16.5 ms | 15.7 ms |
-| tokens per round | 3.5–5, from the T = 1.0 numbers of the [DSpark paper](https://arxiv.org/abs/2607.05147) | 2.5 (D48), 2.8 (K128); DeepSpec's own implementation on 8 D48 prompts with temperature-only sampling (T 0.7) also gives just 2.55 (three runs, 2.49–2.59) |
-| speedup at C = 1 | 2.6–4.0 | 1.91–1.99 (D48), 2.11–2.24 (K128) |
+| DSpark against DFlash | +4–11%, from vLLM | medians +3.4–11.4% (D48), +6.1–14.1% (K128b) |
+| DSpark's extra tokens per round | about +12–18%, from vLLM | +7–10% (D48), +10–12% (K128b) |
+| sampling steps left out of the graph | a round about 6% slower at C = 1 | 3.7% slower (17.04 against 16.43 ms) |
+| candidate sampling | saves 0.5 ms (C = 1) to 0.7 ms (C = 16) a round; DSpark over DFlash up to +7% at C = 1 and +4–6% at C = 8–16, C = 8 likely still undecided | the sampling step's GPU time falls by 0.54 ms (C = 1) and 0.94 ms (C = 16); DSpark over DFlash +3.4% at C = 1, +4.6% at C = 8 and +4.0% at C = 16 (D48), and C = 8 is decided |
 
-The cost was estimated well and the gain too high: acceptance on these prompts is lower than on the paper's benchmarks.
+The extra tokens per round were estimated too high: nano's DFlash already gets more tokens per round than vLLM's, which leaves DSpark less to add (§4).
 
-## 7. Limitations
+## 7. Open questions
 
-- Offline closed loop: fixed concurrency, with a new request as soon as one finishes. This is not an online serving benchmark, and no service-level objectives were measured.
-- One GPU model (RTX PRO 6000 Blackwell) and one target model (Qwen3-8B).
-- Random sampling: T 0.7, top-k 20, top-p 0.8. Speculative decoding keeps the output distribution, not the exact tokens; §4 checks the distribution.
-- The comparison with vLLM is on D48 only, against a development build of vLLM.
-- The prefill stall is located but not fixed. Verifying fewer drafts per round and measuring the verify cost curve are not done yet.
+- **DSpark's tokens per round moved after candidate sampling.** Candidate sampling changes how the random numbers are drawn, so the same seed produces different text. Across 35 (C, seed) pairs on D48, 23 went down and 12 up, a mean of 2.785 → 2.752 (−1.2%); DFlash, unchanged, reproduces all 35 exactly. At C = 64 all five seeds went down, by 0.03–0.06, while four of five went up at C = 32, which is consistent with random variation. The sampled distribution can change in only one case, a row with more than 84 tokens at or above its cut value; otherwise the candidate path and the whole-vocabulary rule agree row by row (`num_candidates` in `nanovllm/engine/speculative.py`, and the tie test in `tests/test_dspark_propose.py`). How often such rows occur in real logits cannot be told from the gate's 49 rows; it needs a count on the GPU, about 5 minutes.
+- The context-store stall of the void run (§1).
+- What costs nano the 8% against vLLM's DSpark (§4).
+
+Measurement scope as in the DFlash results: offline closed loop, one GPU model, one target model, random sampling (T 0.7, top-k 20, top-p 0.8); see [v2/RESULTS.md](v2/RESULTS.md) §7.
 
 ## Appendix: environment and data
 
 | item | value |
 |---|---|
-| engine | development matrix at `1f78eca`, confirmation set at `10b38b4` (same engine code) |
+| engine | `f30ed0a` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `3dc0dba` for G1-draft, G1-wide and the first matrix |
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
-| models | target Qwen3-8B; drafts Qwen3-0.6B and DeepSpec's `dflash_qwen3_8b_block7` |
-| protocol | [`benchmarks/protocol-v2.json`](../benchmarks/protocol-v2.json), SHA256 `d012e92933cda36f…` |
-| panels | D48 `071befa6898b3187…`; K128 `44f6fb6b4922c3d8…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
-| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../tools/stall_stats.py) and [`tools/itl_stats.py`](../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure |
+| models | target Qwen3-8B; drafts DeepSpec's `dflash_qwen3_8b_block7` and `dspark_qwen3_8b_block7` (`deepseek-ai/dspark_qwen3_8b_block7` at `03326e5`) |
+| protocol | [`benchmarks/protocol-v2.1.json`](../benchmarks/protocol-v2.1.json), SHA256 `f8adddb463ffb268…` |
+| panels | D48 `071befa6898b3187…`; K128b `cfd53af26e0cdcc2…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
+| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/gain_factors.py`](../tools/gain_factors.py) splits DSpark's gain (§3); [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure |
 
 Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run.
 
-The September results for the 0.6B draft are in [v1/RESULTS.md](v1/RESULTS.md).
+The DFlash results on K128 are in [v2/RESULTS.md](v2/RESULTS.md), and the September results of the 0.6B draft in [v1/RESULTS.md](v1/RESULTS.md).

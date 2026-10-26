@@ -146,18 +146,28 @@ def test_build_result_has_the_schema_keys():
     assert set(result) == set(RESULT_KEYS) and result["schema"] == "bench-v2"
 
 
-def test_engine_kwargs_follow_the_protocol_lines(tmp_path):
-    protocol = json.loads((ROOT / "benchmarks" / "protocol-v2.json").read_text())
+def kwargs_of_every_line(protocol_file: str, tmp_path) -> dict[str, dict]:
+    protocol = json.loads((ROOT / "benchmarks" / protocol_file).read_text())
     for directory in [protocol["models"]["target"], *protocol["models"]["drafts"].values()]:
         (tmp_path / directory).mkdir()
         (tmp_path / directory / "config.json").write_text(
             json.dumps({"num_hidden_layers": 2, "num_key_value_heads": 1, "head_dim": 2}))
     panel = [{"prompt_token_ids": [0] * 100}]
-    kwargs = {name: engine_kwargs(protocol, line, panel, 8, 17011, str(tmp_path))[2]
-              for name, line in protocol["lines"].items()}
+    return {name: engine_kwargs(protocol, line, panel, 8, 17011, str(tmp_path))[2]
+            for name, line in protocol["lines"].items()}
+
+
+def test_engine_kwargs_follow_the_protocol_lines(tmp_path):
+    kwargs = kwargs_of_every_line("protocol-v2.json", tmp_path)
     assert len({value["kv_cache_memory_bytes"] for value in kwargs.values()}) == 1    # one target budget for every line
     assert "draft_model" not in kwargs["k0"]
     assert kwargs["model_k3"]["num_speculative_tokens"] == 3 and kwargs["model_k3"]["draft_kv_cache_memory_bytes"] > 0
     assert "draft_type" not in kwargs["model_k3"]
     assert kwargs["dflash_k7"]["draft_type"] == "dflash" and kwargs["dflash_k7"]["num_speculative_tokens"] == 7
     assert "draft_kv_cache_memory_bytes" not in kwargs["dflash_k7"]
+
+
+def test_engine_kwargs_give_dspark_its_draft_type(tmp_path):
+    kwargs = kwargs_of_every_line("protocol-v2.1.json", tmp_path)
+    assert kwargs["dspark_k7"]["draft_type"] == "dspark" and kwargs["dspark_k7"]["num_speculative_tokens"] == 7
+    assert "draft_kv_cache_memory_bytes" not in kwargs["dspark_k7"]

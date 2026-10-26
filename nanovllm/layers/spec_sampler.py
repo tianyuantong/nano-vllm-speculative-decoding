@@ -20,6 +20,7 @@ class SamplingTensors:
     top_p: torch.Tensor                # [B] fp32; 1.0 disables top-p for that row
     max_top_k: int                     # host copy of max(top_k); 0 means no row truncates
     has_top_p: bool                    # host: some row has top_p < 1
+    all_top_k: bool                    # host: every row has top_k > 0
 
 
 def sampling_tensors(seqs, device: torch.device) -> SamplingTensors:
@@ -35,6 +36,7 @@ def sampling_tensors(seqs, device: torch.device) -> SamplingTensors:
         top_p=_to_device(top_p, torch.float32, device),
         max_top_k=max(top_k),
         has_top_p=any(value < 1.0 for value in top_p),
+        all_top_k=min(top_k) > 0,
     )
 
 
@@ -82,10 +84,19 @@ def truncate_logits(scaled: torch.Tensor, sampling: SamplingTensors) -> torch.Te
     return scaled.masked_fill(scaled < threshold, NEGATIVE_INFINITY)
 
 
+def exponential_noise_(out: torch.Tensor, generator: torch.Generator | None) -> torch.Tensor:
+    """Fill out with the race's Exp(1) noise, in place; returns out."""
+    return out.exponential_(1.0, generator=generator).clamp_min_(EXPONENTIAL_NOISE_FLOOR)
+
+
+def race(weights: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+    """argmax(w / E) over the last dim: index i wins with probability w_i / sum(w) when E is Exp(1) noise."""
+    return (weights / noise).argmax(dim=-1)
+
+
 def sample(weights: torch.Tensor, generator: torch.Generator | None) -> torch.Tensor:
     """Exponential race: argmax(w / E) with E ~ Exp(1) picks index i with probability w_i / sum(w)."""
-    noise = torch.empty_like(weights).exponential_(1.0, generator=generator).clamp_min_(EXPONENTIAL_NOISE_FLOOR)
-    return (weights / noise).argmax(dim=-1)
+    return race(weights, exponential_noise_(torch.empty_like(weights), generator))
 
 
 def accept_random(p: torch.Tensor, q: torch.Tensor, drafts: torch.Tensor,

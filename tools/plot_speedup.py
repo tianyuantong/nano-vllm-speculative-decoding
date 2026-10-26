@@ -1,28 +1,29 @@
 """The README figure (SVG, light and dark): each speculative line's speedup over plain decoding at every concurrency
 of one panel, the median as a column and the range over seeds as a whisker, counted as report_v2.py counts them.
-No plotting dependency: the SVG is written directly.
+Only the lines the results hold are drawn, each in its own color whichever panel it is on. No plotting dependency:
+the SVG is written directly.
 
-  python tools/plot_speedup.py --protocol benchmarks/protocol-v2.json --panel K128 --results DIR [DIR ...] \
-      --out docs/assets/speedup-k128
+  python tools/plot_speedup.py --protocol benchmarks/protocol-v2.1.json --panel K128b --results DIR [DIR ...] \
+      --out docs/assets/speedup-k128b
 """
 import argparse
 import json
 import math
-import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_v2 import BASELINE, count_runs, format_range, load_runs  # noqa: E402
+from report_v2 import BASELINE, count_runs, load_runs, range_of  # noqa: E402
 
 THEMES = {
     "light": {"surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e", "grid": "#e1e0d9", "reference": "#898781",
-              "series": ["#2a78d6", "#eb6834"]},
+              "series": {"dflash_k7": "#2a78d6", "dspark_k7": "#1baf7a", "model_k3": "#eb6834"}},
     "dark": {"surface": "#1a1a19", "text": "#f0efec", "muted": "#c3c2b7", "grid": "#2c2c2a", "reference": "#898781",
-             "series": ["#3987e5", "#d95926"]},
+             "series": {"dflash_k7": "#3987e5", "dspark_k7": "#199e70", "model_k3": "#d95926"}},
 }
-LINES = {"dflash_k7": "DFlash draft, k = 7", "model_k3": "Qwen3-0.6B draft, k = 3"}    # drawn in this order
+LINES = {"dflash_k7": "DFlash draft, k = 7", "dspark_k7": "DSpark draft, k = 7",
+         "model_k3": "Qwen3-0.6B draft, k = 3"}    # drawn in this order
 FONT = "font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'"
 WIDTH, HEIGHT = 760, 430
 LEFT, RIGHT, TOP, BOTTOM = 56, 24, 104, 60
@@ -42,8 +43,9 @@ def speedups(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> 
 
 
 def label(ratios: list[float]) -> str:
-    """The report's R without its parenthesis: the range when it spans more than 0.05, otherwise the median."""
-    return format_range(ratios).split(" (")[0] + "×"
+    """The report's R without its parenthesis: the range when the protocol reports only the range, else the median."""
+    median, low, high, range_only = range_of(ratios)
+    return (f"{low:.2f}–{high:.2f}" if range_only else f"{median:.2f}") + "×"
 
 
 def text(x: float, y: float, content: str, size: int, fill: str, anchor: str = "start", weight: str = "normal") -> str:
@@ -60,6 +62,7 @@ def column(x: float, y_top: float, y_base: float, fill: str) -> str:
 
 
 def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle: str) -> str:
+    lines = [line for line in LINES if line in values]
     concurrencies = sorted({concurrency for by_concurrency in values.values() for concurrency in by_concurrency})
     top_value = max(max(ratios) for by_concurrency in values.values() for ratios in by_concurrency.values())
     y_max = math.ceil((top_value + 0.25) * 2) / 2
@@ -70,8 +73,8 @@ def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle
         return TOP + plot_h * (1 - value / y_max)
 
     title = "Speedup over plain decoding, by concurrency"
-    summary = "; ".join(f"{name}: " + ", ".join(f"{label(values[line][c])} at C = {c}" for c in concurrencies)
-                        for line, name in LINES.items())
+    summary = "; ".join(f"{LINES[line]}: " + ", ".join(f"{label(values[line][c])} at C = {c}" for c in concurrencies)
+                        for line in lines)
     parts = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {WIDTH} {HEIGHT}' width='{WIDTH}' height='{HEIGHT}' "
              f"role='img'><title>{title}</title><desc>{summary}</desc>",
              f"<rect width='{WIDTH}' height='{HEIGHT}' fill='{theme['surface']}' rx='8'/>",
@@ -79,10 +82,10 @@ def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle
              text(LEFT, 49, subtitle, 12, theme["muted"])]
 
     x = LEFT
-    for color, name in zip(theme["series"], LINES.values()):
-        parts.append(f"<rect x='{x}' y='68' width='12' height='12' rx='3' fill='{color}'/>")
-        parts.append(text(x + 18, 78.5, name, 12, theme["text"]))
-        x += 18 + 6.0 * len(name) + 20
+    for line in lines:
+        parts.append(f"<rect x='{x}' y='68' width='12' height='12' rx='3' fill='{theme['series'][line]}'/>")
+        parts.append(text(x + 18, 78.5, LINES[line], 12, theme["text"]))
+        x += 18 + 6.0 * len(LINES[line]) + 20
     parts.append(f"<line x1='{x}' y1='74' x2='{x + 16}' y2='74' stroke='{theme['reference']}' stroke-width='1.5'/>")
     parts.append(text(x + 22, 78.5, "plain decoding (1×)", 12, theme["text"]))
 
@@ -97,13 +100,13 @@ def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle
 
     for index, concurrency in enumerate(concurrencies):
         center = LEFT + slot * (index + 0.5)
-        for position, (line, color) in enumerate(zip(LINES, theme["series"])):
+        for position, line in enumerate(lines):
             ratios = values[line].get(concurrency)
             if not ratios:
                 continue
-            middle = center + (position - (len(LINES) - 1) / 2) * BAR_PITCH
-            low, high = min(ratios), max(ratios)
-            parts.append(column(middle - BAR_WIDTH / 2, y_of(statistics.median(ratios)), y_of(0), color))
+            middle = center + (position - (len(lines) - 1) / 2) * BAR_PITCH
+            median, low, high, _ = range_of(ratios)
+            parts.append(column(middle - BAR_WIDTH / 2, y_of(median), y_of(0), theme["series"][line]))
             for y in (y_of(low), y_of(high)):
                 parts.append(f"<line x1='{middle - 4:.1f}' y1='{y:.1f}' x2='{middle + 4:.1f}' y2='{y:.1f}' "
                              f"stroke='{theme['muted']}' stroke-width='1.5'/>")

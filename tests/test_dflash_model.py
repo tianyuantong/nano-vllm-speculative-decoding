@@ -19,7 +19,7 @@ import gpu_import_stubs  # noqa: F401  (before the engine imports)
 from nanovllm.layers import attention
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.models import qwen3
-from nanovllm.models.dflash import DFlashDraftModel
+from nanovllm.models.dflash import DFlashDraftModel, MarkovHead
 from nanovllm.utils.context import reset_context, set_context
 from nanovllm.utils.loader import load_model
 
@@ -49,10 +49,11 @@ def meta_model(config: Qwen3Config) -> DFlashDraftModel:
     return model
 
 
-def test_parameters_match_the_checkpoint():
-    model = meta_model(data_config("dflash_qwen3_8b_block7"))
+@pytest.mark.parametrize("checkpoint", ["dflash_qwen3_8b_block7", "dspark_qwen3_8b_block7"])
+def test_parameters_match_the_checkpoint(checkpoint):
+    model = meta_model(data_config(checkpoint))
     expected = defaultdict(lambda: [0, None])            # parameter -> [rows, row shape]
-    for name, shape in json.loads((DATA / "dflash_qwen3_8b_block7.tensors.json").read_text()).items():
+    for name, shape in json.loads((DATA / f"{checkpoint}.tensors.json").read_text()).items():
         packed = next((key for key in model.packed_modules_mapping if key in name), None)
         if packed is not None:
             name = name.replace(packed, model.packed_modules_mapping[packed][0])
@@ -62,7 +63,7 @@ def test_parameters_match_the_checkpoint():
     assert actual == {name: [rows, *rest] for name, (rows, rest) in expected.items()}
 
 
-@pytest.mark.parametrize("name", ["dflash_qwen3_4b_block7", "dflash_qwen3_8b_block7"])
+@pytest.mark.parametrize("name", ["dflash_qwen3_4b_block7", "dflash_qwen3_8b_block7", "dspark_qwen3_8b_block7"])
 def test_config_is_read_as_deepspec_reads_it(name, monkeypatch):
     bases = []
 
@@ -75,6 +76,20 @@ def test_config_is_read_as_deepspec_reads_it(name, monkeypatch):
     assert bases == [1e6] * 5    # the base in effect: the config has rope_parameters, not rope_theta
     assert model.layers[0].self_attn.head_dim == 128
     assert (model.block_size, model.mask_token_id, model.aux_layer_ids) == (7, MASK, (1, 9, 17, 25, 33))
+
+
+@pytest.mark.skipif(not os.environ.get("DEEPSPEC_DIR"), reason="needs DEEPSPEC_DIR")
+def test_markov_head_matches_deepspec():
+    sys.path.insert(0, os.environ["DEEPSPEC_DIR"])
+    from deepspec.modeling.dspark.markov_head import VanillaMarkov
+
+    torch.manual_seed(0)
+    reference = VanillaMarkov(vocab_size=64, markov_rank=8)
+    ours = MarkovHead(vocab_size=64, rank=8)
+    ours.markov_w1.weight.data.copy_(reference.markov_w1.weight.data)
+    ours.markov_w2.weight.data.copy_(reference.markov_w2.weight.data)
+    prev = torch.tensor([0, 5, 63, 5])
+    assert torch.equal(ours(prev), reference.compute_step_bias(prev, None))
 
 
 # ---------------------------------------------------------------- against DeepSpec, with real weights

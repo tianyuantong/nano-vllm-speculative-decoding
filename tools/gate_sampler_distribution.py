@@ -9,7 +9,7 @@ token can be drawn), k=1 rounds through sample() and accept_random(): (a) 16384 
 accept mass; (b) 100000 first emitted tokens, every frequency within the Hoeffding bound sqrt(ln(2M/delta) / 2N) of
 p, M the support size, delta 0.001.
 
-  python tools/gate_sampler_distribution.py --line LINE --models-root DIR --commit C --out FILE
+  python tools/gate_sampler_distribution.py --line LINE [--protocol FILE] --models-root DIR --commit C --out FILE
 """
 import argparse
 import json
@@ -129,12 +129,13 @@ def check_real_position(position: RealPosition, accept_trials: int, emit_trials:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--line", required=True, help="a protocol line with a drafter (model_k3, dflash_k7)")
+    parser.add_argument("--line", required=True, help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7)")
+    parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    protocol = json.loads(PROTOCOL.read_text())
+    protocol = json.loads(args.protocol.read_text())
     gate, rec = protocol["gates"]["G2_real"], protocol["sampling"]
     panel = json.loads((ROOT / protocol["panels"]["D48"]["file"]).read_text())
     target, _, kwargs = engine_kwargs(protocol, protocol["lines"][args.line], panel, 1, protocol["seeds"]["dev"][0],
