@@ -101,7 +101,7 @@ python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json
     --concurrency 8 --seed 17011 --commit <sha> --output result.json
 ```
 
-The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k128.py` (K128, K128b); `tools/report_v2.py` applies the protocol's verdicts, `tools/gain_factors.py` splits one line's gain over another into its factors, and `tools/plot_speedup.py` draws the figure above.
+The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k128.py` (K128, K128b); `tools/report_v2.py` applies the protocol's verdicts, `tools/gain_factors.py` splits one line's gain over another into its factors, and `tools/plot_speedup.py` draws the figure above. The result files behind every table, with the gates' outputs and the panels, are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark).
 
 ## Explore the project
 

@@ -204,6 +204,6 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 | panels | D48 `071befa6898b3187…`; K128 `44f6fb6b4922c3d8…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
 | tools | [`tools/report_v2.py`](../../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../../tools/stall_stats.py) and [`tools/itl_stats.py`](../../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../../tools/plot_speedup.py) draws the README figure |
 
-Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run.
+Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run. Every run's file and log, the gates' outputs, the job scripts and the panels are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark), whose README gives the commands that regenerate these tables.
 
 The September results for the 0.6B draft are in [v1/RESULTS.md](../v1/RESULTS.md).
