@@ -22,8 +22,6 @@
 
 Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布不变；采样器、draft 的分布和 logits 都检验过。GSM8K 准确率与不投机相差 −1.7 … +0.8 个百分点。
 
-怎么测的：同一引擎内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）。DSpark 每档都比 DFlash 快；C=32 到 64 时，这份领先里估计有 2–6 个百分点来自 DSpark 更省的采样路径。和 vLLM 的 DSpark 比（同型号的卡、同一份权重，开发版 `372477d`，开发集，挂钟吞吐）：C=1 到 32 慢 7.6–7.9%。[测量协议、闸门和待解的问题 →](docs/RESULTS.md)
-
 | C | DFlash（k=7） | DSpark（k=7） | DSpark ÷ DFlash | 每轮 token 数（DFlash / DSpark） |
 |---:|---|---|---|---|
 | 1 | 1.94–2.06 倍 | 2.08–2.20 倍 | 1.07（1.04–1.08） | 2.59 / 2.82 |
@@ -31,30 +29,32 @@ Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布�
 | 32 | 1.31 倍（1.31–1.33） | 1.43 倍（1.42–1.45） | 1.10（1.09–1.10） | 2.70 / 2.95 |
 | 64 | 1.01 倍（1.00–1.01） | 1.15 倍（1.13–1.15） | 1.14（1.11–1.15） | 2.65 / 2.93 |
 
-并发越高收益越小：verify 每行的成本在高并发时变陡，而这个引擎的 prefill 步会让 decode 停下，C=32 时占 DSpark 稳态时间的 31%。C=64 时 DSpark 仍比不投机快，DFlash 则不然。0.6B draft 和 DFlash 在之前 K128 面板上的结果见 [DFlash 结果](docs/v2/RESULTS.md)。
+怎么测的：同一引擎、同一作业内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）。[测量协议、闸门和待解的问题 →](docs/RESULTS.md)
+
+## 加速从哪来
+
+- **DSpark 领先靠的是接受率。** 它的 Markov head 让每轮 token 数比 DFlash 多 7–12%。C=32 到 64 时，领先里估计有 2–6 个百分点来自 DSpark 更省的采样路径。
+- **并发越高收益越小。** verify 每行的成本在高并发时变陡；这个引擎的 prefill 步会让 decode 停下，C=32 时占 DSpark 稳态时间的 31%。
+- **和 vLLM 的 DSpark 比**（同一份权重、同型号的卡，开发版 `372477d`，开发集，挂钟吞吐）：C=1 到 32 慢 7.6–7.9%。不投机时，nano 比 vLLM 快 1–5%。
 
 ## 新增了什么
 
-在 0.6B draft 版本之上，加了两种块式 draft。
+在 0.6B draft 版本之上；引擎现共 2839 行。
+- **DFlash 块式 draft**：走 decode 路径，一次 7 个 query、非因果的注意力，读 target 的 5 层；每个被验证的位置都把上下文 K/V 写进 target 自己的块。12 个引擎文件，+434/−107。
+- **在它上面加 DSpark**：Markov head 让 7 行从左到右逐个抽，每行交给接受规则的就是它实际被抽样时用的分布。4 个引擎文件，+224/−12。
+- **CUDA graph**：verify、draft 块前向，以及 DSpark 的 7 步采样。
 
-**DFlash**：12 个引擎文件新增 434 行、删 107 行。
-- draft 块（最后一个已提交 token 加 6 个占位 token）走 decode 路径，一次 7 个 query、非因果的注意力。
-- target 在 prefill 和 verify 时导出 5 层的 hidden state（hidden + residual）。
-- verify 之后把 8 个位置的上下文 K/V 全部写入；被拒的位置在被读到之前一定会被下一块覆盖。
-- draft 和 target 共用块表和 pad 块，不需要第二套 KV 分配。
-- 两张 CUDA graph：verify（同时导出那 5 层）和 draft 块前向。
-
-**DSpark**，建在 DFlash 的 draft 上：4 个引擎文件新增 224 行、删 12 行（引擎现共 2839 行）。
-- Markov head 给第 j 行的 logits 加一项低秩偏置，由第 j−1 行抽出的 token 决定（第 0 行用最后一个已提交的 token），所以 7 个 draft 从左到右逐个抽。
-- 每一行交给接受规则的，就是它实际被抽样时用的分布，也就是加过偏置之后的分布。
-- 所有请求都用 top-k 截断时，每行只在前 max_top_k + 64 个 logits 里抽；截断规则不变，只有超过 64 个 token 和截断点同分时才会和整词表不同。
-- 7 步采样录进一张 CUDA graph，随机数在 graph 外面先抽好，所以 graph 和 eager 用的是同一份噪声。
-
-关键代码：`SpeculativeDecoder.run_round`（一轮五步）、`DFlashDrafter.propose`、`_markov_rows`（DSpark 从左到右的逐行采样）和 `after_verify`、`Attention.forward` 的 decode 分支。
+关键代码：`SpeculativeDecoder.run_round`（一轮五步）、`DFlashDrafter.propose`、`_markov_rows` 和 `after_verify`、`Attention.forward` 的 decode 分支。
 
 ## 正确性
 
 接受规则是标准的投机采样：u < min(1, p_target(x) / p_draft(x)) 时保留 draft x，否则从 normalize(max(p_target − p_draft, 0)) 重新采样，所以输出分布就是 target 的分布；DSpark 的 p_draft 是每行加过 Markov 偏置之后的分布。在 GPU 上检验过：采样器的多步输出分布（29 例）、DSpark 的块 logits 和 Markov 修正后的 logits 对 DeepSpec（相对误差 0.59–1.08%，门槛 2%）、verify 对逐步 decode 的 logits（最大差 0.84，门槛 3.0）、GSM8K 准确率（与不投机相差 −1.7 … +0.8 个百分点）。
+
+## 踩过的坑
+
+- 输入已经是 fp32 时，`x.float()` 返回的是同一个张量，所以上游的 RMSNorm 在 fp32 下会改写自己的输入。bf16 不受影响；是拿 draft 在 fp32 下对 DeepSpec 时发现的。
+- torch.compile 默认的重编译上限是 8，超了以后新形状走未编译的路径，graph 对 eager 的逐位一致因此被打破，上限调到 64 才恢复。
+- 和 vLLM 公平地比，要把它的 draft 采样从 greedy 改成按分布抽，并让 DeepSpec 的 DFlash 权重走 vLLM 的 `dspark` 路径，那条路径的块布局才和这份权重对得上（vLLM `372477d`）。
 
 ## 快速开始
 
@@ -119,9 +119,7 @@ CPU 测试通过 [GitHub Actions](.github/workflows/cpu-tests.yml) 运行。
 
 ## 致谢
 
-基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)。这个仓库加的部分：用独立 draft 模型的批量投机解码（0.6B 那条线，9 月发布）；DFlash 的这几样：draft 块的 7-query 非因果 decode 模式，target 导出 5 层的 hidden + residual，verify 后给所有被验证的位置写上下文 K/V、靠下一块覆盖被拒的位置，draft 和 target 共用块表，两张 CUDA graph（verify 和 draft 块前向）；以及 DSpark 的这几样：块内从左到右、带 Markov 修正的采样，截断行只在候选上采样，7 步采样的 CUDA graph。
-
-DFlash 的 draft 设计来自 [DFlash](https://github.com/z-lab/dflash)（[arXiv:2602.06036](https://arxiv.org/abs/2602.06036)），DSpark 来自 DeepSeek（[arXiv:2607.05147](https://arxiv.org/abs/2607.05147)）；两份权重，以及移植时逐项比对的参考实现，都来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)。模型用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)，kernel 用 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的 *Fast Inference from Transformers via Speculative Decoding*（2023）和 Chen 等人的 *Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
+基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)。这个仓库加的是：9 月发布的、用独立 draft 模型的批量投机解码，以及[新增了什么](#新增了什么)里列的全部内容。DFlash 的 draft 设计来自 [DFlash](https://github.com/z-lab/dflash)（[arXiv:2602.06036](https://arxiv.org/abs/2602.06036)），DSpark 来自 DeepSeek（[arXiv:2607.05147](https://arxiv.org/abs/2607.05147)）；两份权重，以及移植时逐项比对的参考实现，都来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)。模型用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)，kernel 用 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的 *Fast Inference from Transformers via Speculative Decoding*（2023）和 Chen 等人的 *Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
 [上游版本与项目历史 →](docs/UPSTREAM.md)
 
 ## 许可
