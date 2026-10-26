@@ -83,15 +83,27 @@ def _median_or_dash(values: list[float | None]) -> str:
 def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict, list, dict]:
     """The runs that count: each run's invalid reasons by name, the timing-noise pairs, and per (panel, C, seed) each
     valid repeat-1 line's (Q_steady, tokens per round, its per-request median). A later run with the same
-    (panel, C, line, seed, repeat) replaces an earlier one, so a rerun directory listed last replaces the runs it repeats."""
+    (panel, C, line, seed, repeat) replaces an earlier one, so a rerun directory listed last replaces the runs it repeats.
+    Every run of a (panel, C, seed), each line and repeat, must come from one directory with one protocol, panel and
+    commit; otherwise none of them counts, so a rerun has to repeat the whole (C, seed)."""
     invalid = {name: invalid_reasons(result, summary, protocol) for name, result, summary in runs}
     by_key = {}
     for name, result, summary in runs:
         config = result["config"]
         by_key[(config["panel"], config["concurrency"], config["line"], config["seed"], config["repeat"])] = (name, result, summary)
 
+    # A result file carries no job id, so its directory stands for the job.
+    jobs = defaultdict(set)    # (panel, C, seed) -> (directory, protocol, panel, commit) of each of its runs
+    for (panel, concurrency, _, seed, _), (name, result, _) in by_key.items():
+        manifest = result["manifest"]
+        jobs[(panel, concurrency, seed)].add((str(Path(name).parent), result["protocol_sha256"],
+                                              manifest["panel_sha256"], manifest["commit"]))
+
     pairs = []
     for (panel, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
+        if len(jobs[(panel, concurrency, seed)]) > 1:
+            invalid[name].append("lines of one (C, seed) split across jobs")
+            continue
         twin = by_key.get((panel, concurrency, line, seed, 2))
         if repeat == 1 and twin is not None:
             pairs.append((summary["q_steady"], twin[2]["q_steady"]))

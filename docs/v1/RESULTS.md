@@ -1,6 +1,6 @@
 # Results: batched speculative decoding vs ordinary decoding
 
-> Superseded by [the DFlash results](../RESULTS.md); this page keeps the September results of the 0.6B draft.
+> Superseded by [the DFlash results](../v2/RESULTS.md) and [the DSpark results](../RESULTS.md); this page keeps the September results of the 0.6B draft.
 
 Measured 2026-09-21 on one NVIDIA RTX PRO 6000 Blackwell **Server Edition** (GB202, 96 GB,
 the same silicon and memory bandwidth as the RTX 5090 of the earlier experiments), driver

@@ -46,6 +46,30 @@ layers), verifies the 7 drafts as below, writes the context K/V of all 8 verifie
 positions, and accepts with the same rule. Round-entry invariant: the draft's context
 covers `len-1` positions, like the target's KV.
 
+## A DSpark draft
+
+```python
+llm = LLM(
+    "/path/to/Qwen3-8B",
+    draft_model="/path/to/dspark_qwen3_8b_block7",   # deepseek-ai/dspark_qwen3_8b_block7
+    draft_type="dspark",
+    enable_prefix_cache=False,
+    kv_cache_memory_bytes=10 << 30,
+    max_num_seqs=8,
+)
+```
+
+The block, its KV and the verification are DFlash's. `draft_type` must match the
+checkpoint: a DSpark checkpoint has a Markov head, a DFlash one does not. The 7 drafts are
+drawn left to right: row j's logits get the Markov bias of the token drawn at row j−1
+(the last committed token for row 0), and the acceptance rule gets each row's distribution
+after its bias. The checkpoint's confidence head is loaded but not used, so every round
+verifies all 7 drafts. When every request truncates with top-k, each row is drawn among its
+top `max_top_k + 64` logits, which matches the whole-vocabulary rule unless more than 64
+tokens tie at the cut value. Sampling graphs are captured for the first 4 sampling settings
+(top-k width, top-p on or off, whether every request truncates); a batch with any other
+setting samples eagerly, with the same drafts, about 0.4–0.5 ms more per round at C = 1.
+
 ## What a round does
 
 For every sequence in a decode batch: the draft recomputes at most one missing KV entry

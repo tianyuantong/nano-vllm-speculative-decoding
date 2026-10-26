@@ -1,7 +1,73 @@
 # Design: batched speculative decoding on the upstream engine
 
-Status: implemented and measured (see `docs/v1/RESULTS.md`). Supersedes the `RandomLLM`
-offline controller (PRs #3–#7) and the plans under `docs/plans/`.
+Status: implemented and measured. §1–§10 are the September design, for a
+separate draft model (the 0.6B line, [results](../v1/RESULTS.md)). The DFlash
+and DSpark drafts added in October keep its verification, acceptance rule,
+single device-to-host copy and target KV accounting, and change how drafts
+are proposed ([DFlash results](../v2/RESULTS.md),
+[DSpark results](../RESULTS.md)). The next two sections cover all three.
+Supersedes the `RandomLLM` offline controller (PRs #3–#7) and the plans under
+`docs/plans/`.
+
+## Three drafts
+
+| | 0.6B draft model | DFlash | DSpark |
+|---|---|---|---|
+| how it proposes | k drafts (k = 3 in the measurements), one decode step each, each sampled before the next step | k = 7 drafts from one forward over a block: the last committed token and 6 mask tokens. The rows see the context and the whole block (no causal mask) and are sampled at once | DFlash's block forward, then the 7 rows are sampled left to right: row j's logits get a bias from a rank-256 Markov head, indexed by the token drawn at row j − 1. Its confidence head is not used, so all 7 are verified |
+| what it reads from the target | nothing: it runs on tokens | the outputs of target layers 1, 9, 17, 25 and 33 (counting from 0) at every position the target computes | as DFlash |
+| its KV | its own cache, block table and memory budget | context K/V computed from those outputs, in its own cache tensor at the target's block table and slots | as DFlash |
+| q in the acceptance rule | each step's sampling distribution | each row's sampling distribution | each row's distribution after its Markov bias |
+| CUDA graphs | the upstream decode graph, replayed once per step | the block forward, per padded batch size; logits and sampling run eagerly | the block forward, and the 7 sampling steps per padded batch size and sampling setting (the first 4 settings) |
+| after a rejection | target and draft entries past the new length are stale, and the next round overwrites them before anything reads them | as the 0.6B line, for the target KV and the context K/V | as DFlash |
+| after all k are accepted | the draft never took d_k as input, so its KV lacks that entry: the next round starts with one catch-up step | nothing is missing: verification covered all k + 1 positions | as DFlash |
+
+All three are verified the same way: one target forward over the last
+committed token and the k drafts (k + 1 rows, one CUDA graph per padded batch
+size; for DFlash and DSpark it also exports the five layers' outputs), then
+the standard rule: keep draft x when u < min(1, p(x) / q(x)), stop at the
+first rejection, and draw one more token, from normalize(max(p − q, 0)) at
+the rejected position or from p after the last draft when all are accepted.
+
+## One round, by position
+
+A DFlash or DSpark round on a sequence of 100 tokens (positions 0–99), k = 7,
+where the target accepts 2 drafts. At round entry the target KV and the
+draft's context K/V cover positions 0–98; the last committed token x99, the
+block's anchor, has neither yet.
+
+| position | 99 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1. propose: draft block input | x99 | mask | mask | mask | mask | mask | mask | | |
+| drafts, one per block row | | d1 | d2 | d3 | d4 | d5 | d6 | d7 | |
+| 2. verify: target input and target KV written | x99 | d1 | d2 | d3 | d4 | d5 | d6 | d7 | |
+| 3. store: context K/V written | x99 | d1 | d2 | d3 | d4 | d5 | d6 | d7 | |
+| 4. accept | | ✓ | ✓ | ✗, draws t | | | | | |
+| 5. commit: tokens, len 103 | x99 | d1 | d2 | t | | | | | |
+| KV after the round | valid | valid | valid | stale | stale | stale | stale | stale | |
+| next round's block | | | | t | mask | mask | mask | mask | mask |
+
+- **Verification rows.** The row at position 99 + i gives the target's
+  distribution p for position 100 + i: rows 0–6 check d1–d7, and row 7 gives
+  a bonus token when all 7 are accepted. Here d3 fails, so t is drawn from
+  normalize(max(p − q, 0)) of row 2. A draft is rejected only where
+  p(d3) < q(d3), so that distribution has no mass on d3, and t ≠ d3.
+- **The valid boundary.** Commit sets the target's cached length to len − 1 =
+  102: positions 0–101 hold K/V of committed tokens, and the context K/V
+  follows the same boundary. t at 102 has none, which is the round-entry
+  state again, so the next block starts at 102 with t as its anchor.
+- **No rollback.** Positions 102–106 still hold K/V computed for d3–d7, and
+  their blocks stay with the sequence. Nothing reads them: attention reads a
+  sequence's KV only below its length, and the next round overwrites them
+  first. Its draft block writes its own K/V at 102–108 of the draft cache for
+  that one forward, and verification and the context store then write 102–109.
+  The same holds within a round: the block's K/V written at 99–105 is replaced
+  by the context store.
+- **All 7 accepted.** Tokens 100–106 are d1–d7 and the bonus token lands at
+  107: len 108, KV valid at 0–106, nothing stale and nothing missing.
+- **The 0.6B draft.** Its k decode steps write its own KV for the last
+  committed token and d1 … d(k−1). After a rejection the same overwrite
+  applies; after a full acceptance its KV lacks d_k, which the next round's
+  catch-up step computes (§5).
 
 ## 1. Goal and success criterion
 

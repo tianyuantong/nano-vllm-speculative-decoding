@@ -9,6 +9,7 @@ Measurement, gates and analysis for bench-v2 (`benchmarks/protocol-v2.json`). `v
 | `stall_stats.py` | How much of the steady window prefill steps take, and the throughput they cost |
 | `itl_stats.py` | Inter-token latency, split by whether a prefill step fell inside the interval |
 | `plot_speedup.py` | The README figure: speedup over plain decoding by concurrency, median and range over seeds |
+| `gain_factors.py` | One line's paired gain over another, split into tokens per round, round time, prefill share and the rest |
 | `bench_vllm.py` | The vLLM baselines on the same panel and GPU |
 | `fetch_panels.py` | Downloads the D48 development panel |
 | `build_panel_k128.py` | Builds the confirmation panels (K128, then K128b) from SPEED-Bench `throughput_1k` |
