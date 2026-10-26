@@ -4,7 +4,7 @@
 
 Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): a separate draft model, the DFlash block draft, and DSpark's Markov-corrected blocks.
 
-**2.08–2.20× at C=1 · 1.73–1.80× at C=8 · 1.43× at C=32 · 1.15× at C=64**
+**2.10× at C=1 · 1.78× at C=8 · 1.43× at C=32 · 1.15× at C=64**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -24,12 +24,12 @@ DSpark draft on Qwen3-8B, RTX PRO 6000. Lossless in distribution by the acceptan
 
 | C | DFlash (k=7) | DSpark (k=7) | DSpark ÷ DFlash | tokens per round (DFlash / DSpark) |
 |---:|---|---|---|---|
-| 1 | 1.94–2.06× | 2.08–2.20× | 1.07 (1.04–1.08) | 2.59 / 2.82 |
-| 8 | 1.68× (1.67–1.71) | 1.73–1.80× | 1.01–1.08 | 2.53 / 2.81 |
-| 32 | 1.31× (1.31–1.33) | 1.43× (1.42–1.45) | 1.10 (1.09–1.10) | 2.70 / 2.95 |
-| 64 | 1.01× (1.00–1.01) | 1.15× (1.13–1.15) | 1.14 (1.11–1.15) | 2.65 / 2.93 |
+| 1 | 2.00× | 2.10× | 1.07 | 2.59 / 2.82 |
+| 8 | 1.68× | 1.78× | 1.06 | 2.53 / 2.81 |
+| 32 | 1.31× | 1.43× | 1.10 | 2.70 / 2.95 |
+| 64 | 1.01× | 1.15× | 1.14 | 2.65 / 2.93 |
 
-Measured: steady-state tok/s against plain decoding in the same engine and job, on an unseen 128-prompt panel, 3 seeds per concurrency, median (min–max). [Protocol, gates, open questions →](docs/RESULTS.md)
+Measured: steady-state tok/s against plain decoding in the same engine and job, on an unseen 128-prompt panel. Table values are medians over 3 seeds per concurrency, rounded to two decimals. [Ranges, protocol and gates →](docs/RESULTS.md)
 
 ## Where the speedup comes from
 

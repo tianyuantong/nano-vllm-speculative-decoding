@@ -4,7 +4,7 @@
 
 为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现投机解码：独立 draft 模型、DFlash 块式 draft，以及带 Markov 修正的 DSpark。
 
-**C=1 吞吐 2.08–2.20 倍 · C=8 为 1.73–1.80 倍 · C=32 为 1.43 倍 · C=64 为 1.15 倍**
+**C=1 吞吐 2.10 倍 · C=8 为 1.78 倍 · C=32 为 1.43 倍 · C=64 为 1.15 倍**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -24,12 +24,12 @@ Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布�
 
 | C | DFlash（k=7） | DSpark（k=7） | DSpark ÷ DFlash | 每轮 token 数（DFlash / DSpark） |
 |---:|---|---|---|---|
-| 1 | 1.94–2.06 倍 | 2.08–2.20 倍 | 1.07（1.04–1.08） | 2.59 / 2.82 |
-| 8 | 1.68 倍（1.67–1.71） | 1.73–1.80 倍 | 1.01–1.08 | 2.53 / 2.81 |
-| 32 | 1.31 倍（1.31–1.33） | 1.43 倍（1.42–1.45） | 1.10（1.09–1.10） | 2.70 / 2.95 |
-| 64 | 1.01 倍（1.00–1.01） | 1.15 倍（1.13–1.15） | 1.14（1.11–1.15） | 2.65 / 2.93 |
+| 1 | 2.00 倍 | 2.10 倍 | 1.07 | 2.59 / 2.82 |
+| 8 | 1.68 倍 | 1.78 倍 | 1.06 | 2.53 / 2.81 |
+| 32 | 1.31 倍 | 1.43 倍 | 1.10 | 2.70 / 2.95 |
+| 64 | 1.01 倍 | 1.15 倍 | 1.14 | 2.65 / 2.93 |
 
-怎么测的：同一引擎、同一作业内对不投机的稳态吞吐，未看过的 128 条确认集，每档 3 个 seed，写中位数（最小–最大）。[测量协议、闸门和待解的问题 →](docs/RESULTS.md)
+怎么测的：同一引擎、同一作业内对不投机的稳态吞吐，未看过的 128 条确认集。表中数值取每档 3 个 seed 的中位数，四舍五入到两位小数。[波动范围、测量协议和闸门 →](docs/RESULTS.md)
 
 ## 加速从哪来
 
