@@ -101,7 +101,7 @@ python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json
     --concurrency 8 --seed 17011 --commit <sha> --output result.json
 ```
 
-面板由 `tools/fetch_panels.py`（D48）和 `tools/build_panel_k128.py`（K128、K128b）生成；`tools/report_v2.py` 按 protocol 的判据出结论，`tools/gain_factors.py` 把一条线对另一条线的增益拆成几个因子，`tools/plot_speedup.py` 画上面那张图。
+面板由 `tools/fetch_panels.py`（D48）和 `tools/build_panel_k128.py`（K128、K128b）生成；`tools/report_v2.py` 按 protocol 的判据出结论，`tools/gain_factors.py` 把一条线对另一条线的增益拆成几个因子，`tools/plot_speedup.py` 画上面那张图。所有表格背后的结果文件、闸门输出和面板都在 release 附件 [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 里。
 
 ## 深入了解
 
