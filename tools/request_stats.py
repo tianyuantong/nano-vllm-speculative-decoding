@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from itl_stats import itl  # noqa: E402
 from plot_speedup import BAR_PITCH, BAR_WIDTH, LINES, THEMES, column, text  # noqa: E402
 from report_v2 import BASELINE, count_runs, load_runs  # noqa: E402
-from summarize_bench import percentile, round_weighted_tokens, tokens_per_round  # noqa: E402
+from summarize_bench import percentile, steady_window, tokens_per_round  # noqa: E402
 
 CATEGORIES = {"code_completion": "code completion", "NIAH": "NIAH", "creative_writing": "creative writing",
               "open_books": "open-book QA"}
@@ -40,15 +40,23 @@ def valid_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> dict[tuple
     return {key: (result, summary) for key, (name, result, summary) in latest.items() if not invalid[name]}
 
 
+def tokens_per_delivery(result: dict, concurrency: int) -> float:
+    """Tokens delivered per delivery, over the deliveries whose gaps itl_stats measures: inside the steady window and
+    after each request's first, the prefill's. Counted as delivered, after the scheduler's cut at EOS or max_tokens."""
+    first, last = steady_window(result["steps"], concurrency)
+    sizes = [n for request in result["requests"] for step, n in request["deliveries"][1:] if first <= step <= last]
+    return sum(sizes) / len(sizes)
+
+
 def latency(result: dict, summary: dict) -> dict[str, float]:
     """One run's TTFT, gaps between deliveries (with and without the gaps that hold a prefill step), round time, and
-    tokens per delivery: tokens per round for a speculative line, 1 for plain decoding."""
-    gaps = itl(result, result["config"]["concurrency"])
-    stats = result["speculative_stats"]
+    tokens per delivery."""
+    concurrency = result["config"]["concurrency"]
+    gaps = itl(result, concurrency)
     return {"ttft_p50": summary["ttft_ms"]["p50"], "ttft_p99": summary["ttft_ms"]["p99"],
             "itl_p50": gaps["p50"], "itl_p99": gaps["p99"], "itl_p99_clean": gaps["p99_clean"],
             "stalled_share": gaps["stalled_share"], "round_p50": summary["round_ms"]["p50"],
-            "round_p99": summary["round_ms"]["p99"], "tokens_per_delivery": round_weighted_tokens(stats) if stats else 1.0}
+            "round_p99": summary["round_ms"]["p99"], "tokens_per_delivery": tokens_per_delivery(result, concurrency)}
 
 
 def latency_table(valid: dict) -> dict[tuple[str, int, str], dict[str, float]]:
@@ -77,9 +85,15 @@ def category_tokens(valid: dict) -> tuple[dict[tuple, list[int]], dict[tuple, se
     return totals, prompts
 
 
-def pooled(totals: dict, panel: str, line: str, category: str, concurrencies: list[int]) -> float:
+def pooled(totals: dict, panel: str, line: str, category: str, concurrencies: list[int]) -> float | None:
+    """One category's tokens per round over the given concurrencies, weighted by rounds; None when none has runs."""
     rows = [totals.get((panel, c, line, category), (0, 0)) for c in concurrencies]
-    return sum(tokens for tokens, _ in rows) / sum(deliveries for _, deliveries in rows)
+    deliveries = sum(count for _, count in rows)
+    return sum(tokens for tokens, _ in rows) / deliveries if deliveries else None
+
+
+def _two_decimals_or_dash(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
 
 
 def prompt_count(prompts: dict, panel: str, category: str, concurrencies: list[int]) -> int:
@@ -113,8 +127,8 @@ def print_tables(valid: dict) -> None:
     for panel in sorted({key[0] for key in totals}):
         concurrencies = sorted({key[1] for key in totals if key[0] == panel})
         for category in sorted({key[3] for key in totals if key[0] == panel}):
-            cells = [f"{pooled(totals, panel, line, category, [1]):.2f} / {pooled(totals, panel, line, category, concurrencies):.2f}"
-                     for line in lines]
+            cells = [f"{_two_decimals_or_dash(pooled(totals, panel, line, category, [1]))} / "
+                     f"{_two_decimals_or_dash(pooled(totals, panel, line, category, concurrencies))}" for line in lines]
             counts = f"{prompt_count(prompts, panel, category, [1])} / {prompt_count(prompts, panel, category, concurrencies)}"
             print(f"| {panel} | {category} | {counts} | " + " | ".join(cells) + " |")
 
