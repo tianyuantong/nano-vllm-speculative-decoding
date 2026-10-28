@@ -28,6 +28,31 @@ Values are the median (min–max) over seeds, to two decimals, or only the range
 - Tokens per round, averaged over rounds: DSpark 2.81–2.95, DFlash 2.53–2.70.
 - **One void and its rerun.** One DFlash run (C = 1, seed 17011) had a round of 199 ms against a median of 15.7 ms, so the pre-registered rule voids it; the record is kept. Of those 199 ms, 182 went to the context-store step (median 0.26 ms); propose and verify were normal. The DFlash results' only void was the same cell and step (177 ms) at almost the same point: round 3549, 57.4 s into the run, against round 3544 and 57.3 s here, both the first DFlash run of a confirmation job. Of 78 runs at C = 1, these two are the only ones with a round over twice the median. The group's three lines were rerun back to back in one job: valid, with the same tokens as the first run on all three lines, and the group takes its values from the rerun (DFlash 2.06). The same seed and the same outputs did not reproduce the stall, so it does not follow from the data; the cause is not known.
 
+### Latency
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/k128b-gaps-dark.svg">
+  <img alt="Gaps between a request's deliveries on K128b, plain decoding against DSpark. ITL p50: 12 and 16 ms at C = 1, 13 and 20 at C = 8, 17 and 31 at C = 32, 21 and 52 at C = 64. ITL p99: 13 and 17, 65 and 76, 69 and 125, 109 and 187 ms." src="assets/k128b-gaps-light.svg" width="760">
+</picture>
+
+| C | line | TTFT p50 / p99 | ITL p50 / p99 | ITL p99 without prefill gaps | gaps with a prefill step | round p50 / p99 |
+|---:|---|---|---|---:|---:|---|
+| 1 | plain decoding | 52 / 61 | 12.3 / 12.5 | 12.5 | 0% | 12.3 / 12.5 |
+| 1 | DSpark | 54 / 63 | 16.2 / 16.6 | 16.6 | 0% | 16.2 / 16.6 |
+| 8 | plain decoding | 53 / 341 | 13.1 / 65.5 | 13.3 | 2% | 13.1 / 13.3 |
+| 8 | DSpark | 55 / 349 | 19.6 / 75.7 | 19.9 | 5% | 19.6 / 19.8 |
+| 32 | plain decoding | 52 / 1369 | 17.0 / 69.4 | 17.4 | 7% | 16.9 / 17.4 |
+| 32 | DSpark | 54 / 1395 | 30.6 / 125.1 | 30.9 | 22% | 30.4 / 30.8 |
+| 64 | plain decoding | 54 / 2748 | 21.4 / 108.5 | 22.2 | 13% | 21.2 / 22.0 |
+| 64 | DSpark | 90 / 2797 | 52.0 / 186.8 | 52.4 | 39% | 51.7 / 52.3 |
+
+Milliseconds, medians over the 3 seeds, from [`tools/request_stats.py`](../tools/request_stats.py).
+
+- **ITL** is the gap between two consecutive deliveries to one request, so it shows how tokens arrive, not how fast: in the steady window a DSpark delivery carries 2.80–2.99 tokens, plain decoding's one. On average a request still gets its tokens R times as fast, since in a closed loop its rate is Q_steady ÷ C: from 2.08–2.20× at C = 1 down to 1.15× at C = 64.
+- **The longest gaps hold a prefill step.** At C = 8–64, DSpark's ITL p99 is 1.2–1.8 times plain decoding's. Without the gaps that hold a prefill step (the notches), the p99 is about one round. Prefill steps do no decoding in this engine ([DFlash results](v2/RESULTS.md) §5.2), and DSpark, finishing requests sooner, takes in new ones more often: 22% of its gaps hold a prefill step at C = 32, against 7% for plain decoding.
+- **TTFT** is the same with and without speculation up to C = 32. A request prefilled alone gets its first token after about 52 ms, one that shares its prefill step with another after about 90. At C = 64, 39–40% of DSpark's requests that arrive after the start share it, against 29–32% for plain decoding, and that moves DSpark's median into the second group. The p99 comes from the start of each run, when all C requests arrive at once, and is the same for both.
+- DFlash's TTFT and gaps are within 6% of DSpark's.
+
 ## 2. Development panel (D48) and confirmation panel (K128b)
 
 | C | DFlash, D48 | DFlash, K128b | DSpark, D48 | DSpark, K128b |
@@ -69,6 +94,19 @@ DSpark's paired gain over DFlash, split per seed into four factors that multiply
   - C = 32 and 64: with the same sampling, DSpark's propose could not be shorter than DFlash's, since it does all of DFlash's propose plus the row-by-row correction. If the other phases and the prefill share stayed as measured, the shorter round on D48 (2.1 and 5.7 points; verification differs there by at most 0.18 ms) would all be the asymmetry's, and DSpark's lead without it would be about +7% and +5%. This is a conditional estimate, not a bound. On K128b, DSpark's verification is also 0.29 and 0.42 ms shorter, so not all of its 3.1 and 5.9 points are sampling.
   - C = 1 and 16: profiled, DFlash's logits-and-sampling step spends only 0.23 ms and 0.60 ms outside the logits matrix multiply (lm_head). Candidate sampling could save at most that, 1.5% and 2.8% of a round, so the asymmetry accounts for at most 1.5 and 2.8 points there.
 - Measuring the same-sampling number exactly needs DFlash on candidate sampling too; that has not been done.
+
+### By prompt category
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/k128b-categories-dark.svg">
+  <img alt="Tokens per round by prompt category on K128b, DFlash against DSpark: code completion 3.41 and 3.74, NIAH 3.00 and 3.48, creative writing 2.75 and 3.11, open-book QA 2.18 and 2.37." src="assets/k128b-categories-light.svg" width="760">
+</picture>
+
+Tokens per round over every C and seed of K128b, weighted by rounds as in §1, from [`tools/request_stats.py`](../tools/request_stats.py).
+
+- **DSpark's extra tokens come from every category**: +8% on open-book QA up to +16% on NIAH. D48 gives +7% to +14%, in the same order.
+- **The kind of text matters more than the draft.** With either draft, code completion yields about 1.6 times the tokens per round of open-book QA.
+- **Per request**, DSpark's tokens per round have a p10 of 2.39–2.46 and a p90 of 4.00–4.15 at the four concurrencies, DFlash's 2.12–2.24 and 3.65–3.81. Per-request values run higher than the round-weighted ones, because requests with low acceptance take more rounds.
 
 ## 4. Against vLLM (D48, wall-clock tok/s)
 
@@ -142,7 +180,7 @@ Measurement scope as in the DFlash results: offline closed loop, one GPU model, 
 | models | target Qwen3-8B; drafts DeepSpec's `dflash_qwen3_8b_block7` and `dspark_qwen3_8b_block7` (`deepseek-ai/dspark_qwen3_8b_block7` at `03326e5`) |
 | protocol | [`benchmarks/protocol-v2.1.json`](../benchmarks/protocol-v2.1.json), SHA256 `f8adddb463ffb268…` |
 | panels | D48 `071befa6898b3187…`; K128b `cfd53af26e0cdcc2…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
-| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/gain_factors.py`](../tools/gain_factors.py) splits DSpark's gain (§3); [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure |
+| tools | [`tools/report_v2.py`](../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/gain_factors.py`](../tools/gain_factors.py) splits DSpark's gain (§3); [`tools/plot_speedup.py`](../tools/plot_speedup.py) draws the README figure; [`tools/request_stats.py`](../tools/request_stats.py) gives the latency and per-category tables and their figures (§1, §3) |
 
 Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run. Every run's file and log, the gates' outputs, the job scripts and the panels are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark), whose README gives the commands that regenerate these tables.
 

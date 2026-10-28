@@ -8,6 +8,7 @@ Measurement, gates and analysis for bench-v2 (`benchmarks/protocol-v2.json`). `v
 | `report_v2.py` | The protocol's verdicts over a set of results: timing noise, R against k0, line against line, crossover, invalid runs |
 | `stall_stats.py` | How much of the steady window prefill steps take, and the throughput they cost |
 | `itl_stats.py` | Inter-token latency, split by whether a prefill step fell inside the interval |
+| `request_stats.py` | What a request sees: TTFT, gaps between deliveries and round time (p50, p99), tokens per round by prompt category and over requests, and the two figures of `docs/RESULTS.md` |
 | `plot_speedup.py` | The README figure: speedup over plain decoding by concurrency, median and range over seeds |
 | `gain_factors.py` | One line's paired gain over another, split into tokens per round, round time, prefill share and the rest |
 | `bench_vllm.py` | The vLLM baselines on the same panel and GPU |
