@@ -56,7 +56,7 @@ D48 is the 48-prompt panel of the September release, with 5 seeds per C. It also
 
 The two panels agree on the direction and on every verdict.
 
-The engine is the same on both panels; what differs is acceptance. K128 yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round):
+The engine is the same on both panels; what differs is acceptance. K128 yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round, from [`tools/request_stats.py`](../../tools/request_stats.py)):
 
 | category | D48 | K128 |
 |---|---:|---:|

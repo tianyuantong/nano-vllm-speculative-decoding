@@ -18,9 +18,9 @@ from report_v2 import BASELINE, count_runs, load_runs, range_of  # noqa: E402
 
 THEMES = {
     "light": {"surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e", "grid": "#e1e0d9", "reference": "#898781",
-              "series": {"dflash_k7": "#2a78d6", "dspark_k7": "#1baf7a", "model_k3": "#eb6834"}},
+              "series": {"dflash_k7": "#2a78d6", "dspark_k7": "#1baf7a", "model_k3": "#eb6834", "k0": "#c8c7c0"}},
     "dark": {"surface": "#1a1a19", "text": "#f0efec", "muted": "#c3c2b7", "grid": "#2c2c2a", "reference": "#898781",
-             "series": {"dflash_k7": "#3987e5", "dspark_k7": "#199e70", "model_k3": "#d95926"}},
+             "series": {"dflash_k7": "#3987e5", "dspark_k7": "#199e70", "model_k3": "#d95926", "k0": "#5c5b57"}},
 }
 LINES = {"dflash_k7": "DFlash draft, k = 7", "dspark_k7": "DSpark draft, k = 7",
          "model_k3": "Qwen3-0.6B draft, k = 3"}    # drawn in this order

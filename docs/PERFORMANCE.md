@@ -1,5 +1,7 @@
 # Performance analysis: why speculative decoding broke even
 
+> The September analysis of the first engine, with the 0.6B draft. The DFlash and DSpark results, latency included, are in [the DSpark results](RESULTS.md) and [the DFlash results](v2/RESULTS.md).
+
 This document consolidates the measurements from PRs #3–#7 and adds the
 decomposition that explains them. Every number below is either quoted from a
 PR description or computed from the archived result files with
