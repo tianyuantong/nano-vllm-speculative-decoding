@@ -1,5 +1,7 @@
 # Glossary of experiment codes
 
+> The codes of the September engine, with the 0.6B draft, as [the performance analysis](PERFORMANCE.md) and the September documents use them. Its G1 / G2 are the greedy screens of PR #7, not the current gates G1-draft, G1-wide, G2-multi, G2-real and G5 (GSM8K accuracy), which [the DSpark results](RESULTS.md) §5 describe.
+
 The PR descriptions, reports and docstrings use short codes for modes, stages
 and panels. This table is the single place they are defined.
 

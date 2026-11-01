@@ -14,13 +14,10 @@ class SequenceStatus(Enum):
 
 @dataclass
 class KVState:
-    """KV-cache bookkeeping of one sequence in one model; the target and the draft each own one."""
+    """KV-cache bookkeeping of one sequence in the target's cache; a block draft's context K/V uses the same blocks."""
     num_cached_tokens: int = 0
     num_scheduled_tokens: int = 0
     block_table: list[int] = field(default_factory=list)
-
-
-KV_ROLES = ("target", "draft")
 
 
 class Sequence:
@@ -35,7 +32,6 @@ class Sequence:
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.target_kv = KVState()
-        self.draft_kv = KVState()
         self.is_prefill = True
         self.temperature = sampling_params.temperature
         self.top_k = sampling_params.top_k
@@ -44,10 +40,6 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
         self.first_token_step = -1
         self.finish_step = -1
-
-    def kv(self, role: str) -> KVState:
-        assert role in KV_ROLES, role
-        return self.target_kv if role == "target" else self.draft_kv
 
     # The upstream engine addresses the target KV state through these names.
     @property
@@ -119,7 +111,6 @@ class Sequence:
 
     def __setstate__(self, state):
         self.target_kv = KVState()
-        self.draft_kv = KVState()
         self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state

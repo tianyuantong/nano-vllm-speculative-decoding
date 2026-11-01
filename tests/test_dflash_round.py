@@ -7,10 +7,12 @@ committed token there, never a block's K/V or a rejected draft's features.
 """
 import random
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
 
+from nanovllm.engine import speculative
 from nanovllm.engine.batch_metadata import prefill_metadata, slot_of
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.speculative import DFlashDrafter, SpeculativeDecoder
@@ -36,7 +38,6 @@ class FakeTarget:
 
     def __init__(self):
         self.block_size = BLOCK_SIZE
-        self.kv_role = "target"
         self.device = CPU
         self.generator = torch.Generator().manual_seed(0)
         self.pad_block_id = 99
@@ -56,7 +57,7 @@ class FakeTarget:
 
     def prefill(self, seqs, aux):
         """ModelRunner.run's prefill for the scheduled chunk, without sampling."""
-        metadata = prefill_metadata(seqs, "target", self.block_size)
+        metadata = prefill_metadata(seqs, self.block_size)
         set_context(True, slot_mapping=torch.tensor(metadata.slot_mapping))
         self.run_model(torch.tensor(metadata.input_ids), torch.tensor(metadata.positions), True, aux_out=aux)
         reset_context()
@@ -115,7 +116,8 @@ def make_decoder(is_right):
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=512,
                              hf_config=SimpleNamespace(vocab_size=VOCAB))
     target = FakeTarget()
-    decoder = Decoder(target, object(), config)    # builds a ModelDrafter, replaced below
+    with mock.patch.object(speculative, "DFlashDrafter", lambda config, decoder: None):    # it would load a checkpoint
+        decoder = Decoder(target, config)
     drafter = object.__new__(DFlashDrafter)
     drafter.decoder, drafter.model = decoder, FakeDFlash(decoder, is_right)
     drafter.aux_width, drafter.aux_dtype, drafter.graphs = 2, torch.float32, {}

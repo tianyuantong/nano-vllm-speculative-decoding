@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): a separate draft model, the DFlash block draft, and DSpark's Markov-corrected blocks.
+Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): the DFlash block draft and DSpark's Markov-corrected blocks.
 
 **2.10× at C=1 · 1.78× at C=8 · 1.43× at C=32 · 1.15× at C=64**
 
@@ -11,7 +11,7 @@ Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-**English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Results](docs/RESULTS.md) · [Design](docs/design/batched-speculative-decoding.md)
+**English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Results](docs/RESULTS.md) · [Usage guide](docs/DECODING.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128b-dark.svg">
@@ -39,7 +39,7 @@ Measured: steady-state tok/s against plain decoding in the same engine and job, 
 
 ## What this adds
 
-On top of the 0.6B-draft release; the engine is now 2,839 lines.
+The engine is now 2,570 lines. It grew out of the September release, which drafted with a separate 0.6B model ([`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)); that draft lives on as a baseline on branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), the last version with all three drafts.
 - **A DFlash block draft**: one 7-query, non-causal pass through the decode path, reading 5 target layers, with context K/V written for every verified position in the target's own blocks. 12 engine files, +434/−107.
 - **DSpark on top of it**: a Markov head draws the 7 rows left to right, and each row hands the acceptance rule the distribution it was drawn from. 4 engine files, +224/−12.
 - **CUDA graphs** for verification, the draft block and DSpark's 7 sampling steps.
@@ -90,13 +90,13 @@ finally:
     llm.exit()
 ```
 
-A DSpark or DFlash draft proposes its block size (7) per round and keeps its context K/V in the target's blocks, so it needs no `num_speculative_tokens` or draft KV budget; `draft_type` must match the checkpoint. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for the 0.6B draft, `draft_model="/models/Qwen3-0.6B"`, `num_speculative_tokens=3` and `draft_kv_cache_memory_bytes`; for plain decoding, leave out `draft_model`.
+A DSpark or DFlash draft proposes its block size (7) per round and keeps its context K/V in the target's blocks, so it needs no `num_speculative_tokens` or draft KV budget; `draft_type` must match the checkpoint. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for plain decoding, leave out `draft_model`. The 0.6B draft runs on branch `baseline/qwen3-0.6b-draft`.
 [Model configuration and API →](docs/DECODING.md)
 
 ## Reproduce
 
 ```bash
-python -m pytest -q    # CPU tests: 220 pass in about 6 s
+python -m pytest -q    # CPU tests, about 6 s
 python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json --panel K128b --line dspark_k7 \
     --concurrency 8 --seed 17011 --commit <sha> --output result.json
 ```
@@ -109,7 +109,7 @@ The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k12
 |---|---|
 | [Results](docs/RESULTS.md) | DSpark against DFlash on both panels, where the lead comes from, the vLLM comparison and the gates |
 | [DFlash results](docs/v2/RESULTS.md) | The DFlash port on K128: against the 0.6B draft, a round's phases and the prefill stall |
-| [Design](docs/design/batched-speculative-decoding.md) | Draft/target execution, KV state, batching and CUDA Graphs |
+| [September design](docs/design/batched-speculative-decoding.md) | The 0.6B-draft release: draft/target execution, KV state, batching and CUDA Graphs |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
 | [Tools](tools/README.md) | One line per measurement, gate and analysis script |
 | [September results](docs/v1/RESULTS.md) | The 0.6B-draft release: batch-size comparisons, phase timings, repeatability |

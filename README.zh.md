@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现投机解码：独立 draft 模型、DFlash 块式 draft，以及带 Markov 修正的 DSpark。
+为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现投机解码：DFlash 块式 draft，以及带 Markov 修正的 DSpark。
 
 **C=1 吞吐 2.10 倍 · C=8 为 1.78 倍 · C=32 为 1.43 倍 · C=64 为 1.15 倍**
 
@@ -11,7 +11,7 @@
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-[English](README.md) | **简体中文** · [快速开始](#快速开始) · [结果](docs/RESULTS.md) · [实现设计](docs/design/batched-speculative-decoding.md)
+[English](README.md) | **简体中文** · [快速开始](#快速开始) · [结果](docs/RESULTS.md) · [使用指南](docs/DECODING.md)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128b-dark.svg">
@@ -39,7 +39,7 @@ Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布�
 
 ## 新增了什么
 
-在 0.6B draft 版本之上；引擎现共 2839 行。
+引擎现共 2,570 行。它从 9 月的版本发展而来，那一版用独立的 0.6B 模型当 draft（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）；这个 draft 现在作为基线留在分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft) 上，那是三种 draft 都在的最后一版。
 - **DFlash 块式 draft**：走 decode 路径，一次 7 个 query、非因果的注意力，读 target 的 5 层；每个被验证的位置都把上下文 K/V 写进 target 自己的块。12 个引擎文件，+434/−107。
 - **在它上面加 DSpark**：Markov head 让 7 行从左到右逐个抽，每行交给接受规则的就是它实际被抽样时用的分布。4 个引擎文件，+224/−12。
 - **CUDA graph**：verify、draft 块前向，以及 DSpark 的 7 步采样。
@@ -90,13 +90,13 @@ finally:
     llm.exit()
 ```
 
-DSpark 和 DFlash 的 draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算；`draft_type` 必须和权重对得上。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；用 0.6B draft 时传 `draft_model="/models/Qwen3-0.6B"`、`num_speculative_tokens=3` 和 `draft_kv_cache_memory_bytes`；普通解码省略 `draft_model` 即可。
+DSpark 和 DFlash 的 draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算；`draft_type` 必须和权重对得上。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；普通解码省略 `draft_model` 即可。0.6B draft 在分支 `baseline/qwen3-0.6b-draft` 上运行。
 [模型配置与 API →](docs/DECODING.md)
 
 ## 复现
 
 ```bash
-python -m pytest -q    # CPU 测试：220 个通过，约 6 秒
+python -m pytest -q    # CPU 测试，约 6 秒
 python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json --panel K128b --line dspark_k7 \
     --concurrency 8 --seed 17011 --commit <sha> --output result.json
 ```
@@ -109,7 +109,7 @@ python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json
 |---|---|
 | [结果](docs/RESULTS.md) | 两个面板上 DSpark 对 DFlash、领先从哪来、和 vLLM 的对比、闸门 |
 | [DFlash 结果](docs/v2/RESULTS.md) | K128 上的 DFlash 移植：对 0.6B draft、一轮的各阶段、prefill 停顿 |
-| [实现设计](docs/design/batched-speculative-decoding.md) | 双模型执行、KV 状态、批处理与 CUDA Graph |
+| [9 月版设计](docs/design/batched-speculative-decoding.md) | 0.6B draft 版本：双模型执行、KV 状态、批处理与 CUDA Graph |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
 | [工具](tools/README.md) | 测量、闸门和分析脚本，每个一行说明 |
 | [9 月结果](docs/v1/RESULTS.md) | 0.6B draft 版本：不同 batch size 的性能、阶段耗时、重复性 |

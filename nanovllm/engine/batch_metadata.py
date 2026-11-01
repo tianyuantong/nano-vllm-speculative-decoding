@@ -47,10 +47,10 @@ class PrefillMetadata:
         return self.cu_seqlens_k[-1] > self.cu_seqlens_q[-1]
 
 
-def prefill_metadata(seqs: list[Sequence], role: str, block_size: int) -> PrefillMetadata:
+def prefill_metadata(seqs: list[Sequence], block_size: int) -> PrefillMetadata:
     metadata = PrefillMetadata()
     for seq in seqs:
-        kv = seq.kv(role)
+        kv = seq.target_kv
         start = kv.num_cached_tokens
         seqlen_q = kv.num_scheduled_tokens
         end = start + seqlen_q
@@ -70,22 +70,18 @@ class DecodeMetadata:
     input_ids: list[int] = field(default_factory=list)      # last committed token per row
     positions: list[int] = field(default_factory=list)      # len(seq) - 1 per row
     context_lens: list[int] = field(default_factory=list)   # len(seq) per row
-    slot_mapping: list[list[int]] = field(default_factory=list)   # [num_steps][B]: slot of position len-1+step
+    slot_mapping: list[int] = field(default_factory=list)   # slot of position len - 1 per row
 
 
-def decode_metadata(seqs: list[Sequence], role: str, block_size: int, num_steps: int = 1,
-                    position_offset: int = 0) -> DecodeMetadata:
-    """Single-token steps. Offset 0: the last token at position len-1 (ordinary decode / draft step 0).
-    Offset -1: the token before it, at position len-2 (the draft's catch-up of one missing KV entry)."""
-    metadata = DecodeMetadata(slot_mapping=[[] for _ in range(num_steps)])
+def decode_metadata(seqs: list[Sequence], block_size: int) -> DecodeMetadata:
+    """One single-token step: each row's last token, at position len-1."""
+    metadata = DecodeMetadata()
     for seq in seqs:
-        block_table = seq.kv(role).block_table
-        position = len(seq) - 1 + position_offset
-        metadata.input_ids.append(seq.last_token if position_offset == 0 else seq[position])
+        position = len(seq) - 1
+        metadata.input_ids.append(seq.last_token)
         metadata.positions.append(position)
         metadata.context_lens.append(position + 1)
-        for step in range(num_steps):
-            metadata.slot_mapping[step].append(slot_of(block_table, block_size, position + step))
+        metadata.slot_mapping.append(slot_of(seq.target_kv.block_table, block_size, position))
     return metadata
 
 
@@ -122,8 +118,8 @@ def draft_block_metadata(seqs: list[Sequence], block_size: int, query_len: int, 
     return metadata
 
 
-def padded_block_tables(seqs: list[Sequence], role: str) -> list[list[int]]:
-    tables = [seq.kv(role).block_table for seq in seqs]
+def padded_block_tables(seqs: list[Sequence]) -> list[list[int]]:
+    tables = [seq.target_kv.block_table for seq in seqs]
     width = max(len(table) for table in tables)
     return [table + [PAD_BLOCK_ENTRY] * (width - len(table)) for table in tables]
 

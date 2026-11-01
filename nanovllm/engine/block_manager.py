@@ -2,7 +2,7 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from nanovllm.engine.sequence import KVState, Sequence
+from nanovllm.engine.sequence import Sequence
 
 
 class Block:
@@ -24,19 +24,15 @@ class Block:
 
 
 class BlockManager:
-    """Block allocation for one model's KV cache; `role` selects which KVState of a sequence it owns."""
+    """Block allocation for the target's KV cache; a block draft's context K/V uses the same blocks."""
 
-    def __init__(self, num_blocks: int, block_size: int, enable_prefix_cache: bool, role: str = "target"):
+    def __init__(self, num_blocks: int, block_size: int, enable_prefix_cache: bool):
         self.block_size = block_size
         self.enable_prefix_cache = enable_prefix_cache
-        self.role = role
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
-
-    def _kv(self, seq: Sequence) -> KVState:
-        return seq.kv(self.role)
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -82,7 +78,7 @@ class BlockManager:
         return num_cached_blocks
 
     def allocate(self, seq: Sequence, num_cached_blocks: int):
-        kv = self._kv(seq)
+        kv = seq.target_kv
         assert not kv.block_table
         h = -1
         for i in range(num_cached_blocks):
@@ -102,7 +98,7 @@ class BlockManager:
         kv.num_cached_tokens = num_cached_blocks * self.block_size
 
     def deallocate(self, seq: Sequence):
-        kv = self._kv(seq)
+        kv = seq.target_kv
         for block_id in reversed(kv.block_table):
             block = self.blocks[block_id]
             block.ref_count -= 1
@@ -112,21 +108,21 @@ class BlockManager:
         kv.block_table.clear()
 
     def _blocks_needed(self, seq: Sequence, num_tokens: int) -> int:
-        return (num_tokens + self.block_size - 1) // self.block_size - len(self._kv(seq).block_table)
+        return (num_tokens + self.block_size - 1) // self.block_size - len(seq.target_kv.block_table)
 
     def can_reserve(self, seq: Sequence, num_tokens: int) -> bool:
         return len(self.free_block_ids) >= self._blocks_needed(seq, num_tokens)
 
     def reserve(self, seq: Sequence, num_tokens: int):
         """Grow the block table until it covers `num_tokens` positions."""
-        kv = self._kv(seq)
+        kv = seq.target_kv
         for _ in range(self._blocks_needed(seq, num_tokens)):
             kv.block_table.append(self._allocate_block())
 
     def hash_blocks(self, seq: Sequence):
         if not self.enable_prefix_cache:
             return
-        kv = self._kv(seq)
+        kv = seq.target_kv
         start = kv.num_cached_tokens // self.block_size
         end = (kv.num_cached_tokens + kv.num_scheduled_tokens) // self.block_size
         if start == end: return
