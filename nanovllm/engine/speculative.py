@@ -95,7 +95,7 @@ class DFlashDrafter:
     def prefill(self, seqs: list[Sequence], aux: torch.Tensor) -> None:
         """Context K/V of the chunk the target just prefilled, from the aux features its forward exported."""
         decoder = self.decoder
-        metadata = prefill_metadata(seqs, "target", decoder.block_size)
+        metadata = prefill_metadata(seqs, decoder.block_size)
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
                                     decoder._device_tensor(metadata.slot_mapping, torch.int32))

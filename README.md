@@ -39,7 +39,7 @@ Measured: steady-state tok/s against plain decoding in the same engine and job, 
 
 ## What this adds
 
-The engine is now 2,594 lines. It grew out of the September release, which drafted with a separate 0.6B model ([`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)); that draft lives on as a baseline on branch [`baseline/model-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/model-draft), the last version with all three drafts.
+The engine is now 2,570 lines. It grew out of the September release, which drafted with a separate 0.6B model ([`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)); that draft lives on as a baseline on branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), the last version with all three drafts.
 - **A DFlash block draft**: one 7-query, non-causal pass through the decode path, reading 5 target layers, with context K/V written for every verified position in the target's own blocks. 12 engine files, +434/−107.
 - **DSpark on top of it**: a Markov head draws the 7 rows left to right, and each row hands the acceptance rule the distribution it was drawn from. 4 engine files, +224/−12.
 - **CUDA graphs** for verification, the draft block and DSpark's 7 sampling steps.
@@ -90,7 +90,7 @@ finally:
     llm.exit()
 ```
 
-A DSpark or DFlash draft proposes its block size (7) per round and keeps its context K/V in the target's blocks, so it needs no `num_speculative_tokens` or draft KV budget; `draft_type` must match the checkpoint. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for plain decoding, leave out `draft_model`. The 0.6B draft runs on branch `baseline/model-draft`.
+A DSpark or DFlash draft proposes its block size (7) per round and keeps its context K/V in the target's blocks, so it needs no `num_speculative_tokens` or draft KV budget; `draft_type` must match the checkpoint. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for plain decoding, leave out `draft_model`. The 0.6B draft runs on branch `baseline/qwen3-0.6b-draft`.
 [Model configuration and API →](docs/DECODING.md)
 
 ## Reproduce

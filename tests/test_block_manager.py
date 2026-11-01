@@ -14,14 +14,13 @@ def small_blocks():
     Sequence.block_size = previous
 
 
-def test_allocate_and_deallocate_use_the_manager_role():
-    manager = BlockManager(num_blocks=4, block_size=BLOCK_SIZE, enable_prefix_cache=False, role="draft")
+def test_allocate_and_deallocate_fill_and_free_the_block_table():
+    manager = BlockManager(num_blocks=4, block_size=BLOCK_SIZE, enable_prefix_cache=False)
     seq = Sequence(list(range(5)))
     manager.allocate(seq, 0)
-    assert seq.draft_kv.block_table == [0, 1]
-    assert seq.target_kv.block_table == []
+    assert seq.target_kv.block_table == [0, 1]
     manager.deallocate(seq)
-    assert seq.draft_kv.block_table == [] and len(manager.free_block_ids) == 4
+    assert seq.target_kv.block_table == [] and len(manager.free_block_ids) == 4
 
 
 def test_reserve_grows_the_table_to_cover_the_tokens():
