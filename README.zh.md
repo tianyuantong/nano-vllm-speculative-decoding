@@ -39,7 +39,7 @@ Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布�
 
 ## 新增了什么
 
-引擎现共 2,594 行。它从 9 月的版本发展而来，那一版用独立的 0.6B 模型当 draft（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）；这个 draft 现在作为基线留在分支 [`baseline/model-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/model-draft) 上，那是三种 draft 都在的最后一版。
+引擎现共 2,570 行。它从 9 月的版本发展而来，那一版用独立的 0.6B 模型当 draft（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）；这个 draft 现在作为基线留在分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft) 上，那是三种 draft 都在的最后一版。
 - **DFlash 块式 draft**：走 decode 路径，一次 7 个 query、非因果的注意力，读 target 的 5 层；每个被验证的位置都把上下文 K/V 写进 target 自己的块。12 个引擎文件，+434/−107。
 - **在它上面加 DSpark**：Markov head 让 7 行从左到右逐个抽，每行交给接受规则的就是它实际被抽样时用的分布。4 个引擎文件，+224/−12。
 - **CUDA graph**：verify、draft 块前向，以及 DSpark 的 7 步采样。
@@ -90,7 +90,7 @@ finally:
     llm.exit()
 ```
 
-DSpark 和 DFlash 的 draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算；`draft_type` 必须和权重对得上。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；普通解码省略 `draft_model` 即可。0.6B draft 在分支 `baseline/model-draft` 上运行。
+DSpark 和 DFlash 的 draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算；`draft_type` 必须和权重对得上。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；普通解码省略 `draft_model` 即可。0.6B draft 在分支 `baseline/qwen3-0.6b-draft` 上运行。
 [模型配置与 API →](docs/DECODING.md)
 
 ## 复现
