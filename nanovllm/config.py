@@ -32,7 +32,7 @@ class Config:
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         if self.kv_cache_memory_bytes is not None:
-            if type(self.kv_cache_memory_bytes) is not int or self.kv_cache_memory_bytes <= 0:
+            if not isinstance(self.kv_cache_memory_bytes, int) or self.kv_cache_memory_bytes <= 0:
                 raise ValueError("kv_cache_memory_bytes must be a positive integer")
         if self.draft_model is not None:
             self._validate_speculative()

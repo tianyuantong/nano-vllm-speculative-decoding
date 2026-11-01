@@ -38,7 +38,6 @@ class FakeTarget:
 
     def __init__(self):
         self.block_size = BLOCK_SIZE
-        self.kv_role = "target"
         self.device = CPU
         self.generator = torch.Generator().manual_seed(0)
         self.pad_block_id = 99
@@ -58,7 +57,7 @@ class FakeTarget:
 
     def prefill(self, seqs, aux):
         """ModelRunner.run's prefill for the scheduled chunk, without sampling."""
-        metadata = prefill_metadata(seqs, "target", self.block_size)
+        metadata = prefill_metadata(seqs, self.block_size)
         set_context(True, slot_mapping=torch.tensor(metadata.slot_mapping))
         self.run_model(torch.tensor(metadata.input_ids), torch.tensor(metadata.positions), True, aux_out=aux)
         reset_context()
