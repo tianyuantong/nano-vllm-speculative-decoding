@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): the DFlash block draft and DSpark's Markov-corrected blocks (against the separate-draft baseline on [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)).
+Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): the DFlash block draft and DSpark's Markov-corrected blocks.
 
 **2.10× at C=1 · 1.78× at C=8 · 1.43× at C=32 · 1.15× at C=64**
 
@@ -31,18 +31,18 @@ Measured on Qwen3-8B and an RTX PRO 6000. Standard rejection sampling preserves 
 
 Steady-state tok/s relative to plain decoding in the same engine and job, on an unseen 128-prompt confirmation panel (K128b); table values are medians over 3 seeds per concurrency. [Ranges, protocol and gates →](docs/RESULTS.md)
 
-**Against the separate-draft baseline (Qwen3-0.6B, k=3, branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft))**: on the K128 confirmation panel, the standalone 0.6B draft reaches **1.54× / 1.21× / 0.96× / 0.82×** at C = 1 / 8 / 32 / 64 (2.49–2.53 tokens per round), dropping below plain decoding from C = 32; DFlash on the same panel reaches **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×** (2.75–2.85 tokens per round), **1.29–1.56×** the 0.6B baseline at every concurrency. [K128 comparison →](docs/v2/RESULTS.md)
+**Against the separate-draft baseline** (Qwen3-0.6B, k=3, branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)): on the K128 confirmation panel, the standalone 0.6B draft drops below plain decoding from C = 32 (**1.54× / 1.21× / 0.96× / 0.82×** at C = 1 / 8 / 32 / 64, 2.49–2.53 tokens per round); DFlash on the same panel reaches **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×** (2.75–2.85 tokens per round), **1.29–1.56×** the 0.6B baseline at every concurrency. [K128 comparison →](docs/v2/RESULTS.md)
 
 ## Where the speedup comes from
 
-- **Block drafting removes serial draft steps.** A standalone 0.6B draft runs 3 sequential decode steps per round and maintains its own KV cache; DFlash reads 5 target hidden layers and proposes 7 tokens in a single non-causal forward pass.
-- **DSpark leads on acceptance.** Its Markov head conditions each row on the token sampled at the previous row, raising tokens per round by 7–12% over DFlash. At C=32–64, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for an estimated 2–6 points of the lead).
+- **Block drafting removes serial draft steps.** A standalone 0.6B draft runs 3 sequential decode steps per round and maintains its own KV cache; a block draft proposes all 7 tokens in a single forward pass.
+- **DSpark leads on acceptance.** Its Markov head raises tokens per round by 7–12% over DFlash. At C=32–64, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for an estimated 2–6 points of the lead).
 - **The gain shrinks with C.** Verification costs more per row at high concurrency, and prefill steps, which pause decoding in this engine, take 31% of DSpark's steady state at C=32.
 - **Against vLLM's DSpark** (same weights, same GPU model, dev build `372477d`, D48 panel, wall-clock): 7.6–7.9% behind at C=1–32. Without speculation, nano is 1–5% faster than vLLM.
 
 ## What this adds
 
-The engine is now 2,570 lines. It grew out of the September release, which drafted with a separate 0.6B model ([`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)); that draft lives on as a baseline on branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), the last version with all three drafts.
+The engine is now 2,570 lines, grown out of the September 0.6B-draft release ([`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)):
 - **A DFlash block draft**: one 7-query, non-causal pass through the decode path, reading 5 target layers, with context K/V written for every verified position in the target's own blocks. 12 engine files, +434/−107.
 - **DSpark on top of it**: a Markov head draws the 7 rows left to right, and each row hands the acceptance rule the distribution it was drawn from. 4 engine files, +224/−12.
 - **CUDA graphs** for verification, the draft block and DSpark's 7 sampling steps.
@@ -112,9 +112,9 @@ The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k12
 |---|---|
 | [Results](docs/RESULTS.md) | DSpark against DFlash on both panels, where the lead comes from, the vLLM comparison and the gates |
 | [DFlash results](docs/v2/RESULTS.md) | The DFlash port on K128: against the 0.6B draft, a round's phases and the prefill stall |
-| [September design](docs/design/batched-speculative-decoding.md) | The 0.6B-draft release: draft/target execution, KV state, batching and CUDA Graphs |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
 | [Tools](tools/README.md) | One line per measurement, gate and analysis script |
+| [September design](docs/design/batched-speculative-decoding.md) | The 0.6B-draft release: draft/target execution, KV state, batching and CUDA Graphs |
 | [September results](docs/v1/RESULTS.md) | The 0.6B-draft release: batch-size comparisons, phase timings, repeatability |
 | [Optimization history](docs/PERFORMANCE.md) | Profiling the first implementation and the bottlenecks behind the rewrite |
 

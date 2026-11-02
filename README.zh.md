@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-在 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 上实现块式投机解码：DFlash 与带 Markov 修正的 DSpark（对照独立小模型基线 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）。
+在 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 上实现块式投机解码：DFlash 与带 Markov 修正的 DSpark。
 
 **C=1 吞吐 2.10× · C=8 为 1.78× · C=32 为 1.43× · C=64 为 1.15×**
 
@@ -31,18 +31,18 @@
 
 口径：同一引擎与作业下相对普通解码的稳态吞吐比，在未接触过的 128 条确认集（K128b）上取 3 个 seed 的中位数。[波动范围、测量协议和闸门 →](docs/RESULTS.md)
 
-**对比独立小模型基线（Qwen3-0.6B，k=3，分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）**：在 K128 确认集上，独立 0.6B draft 在 C = 1 / 8 / 32 / 64 的吞吐倍数为 **1.54× / 1.21× / 0.96× / 0.82×**（每轮 2.49–2.53 个 token），C ≥ 32 时慢于普通解码；DFlash 在同一确认集上为 **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×**（每轮 2.75–2.85 个 token），在所有并发下均为 0.6B 基线的 **1.29–1.56 倍**。[K128 详细对照 →](docs/v2/RESULTS.md)
+**对比独立小模型基线**（Qwen3-0.6B，k=3，分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）：在 K128 确认集上，0.6B draft 从 C=32 起慢于普通解码（C = 1 / 8 / 32 / 64 为 **1.54× / 1.21× / 0.96× / 0.82×**，每轮 2.49–2.53 token）；DFlash 在同面板上为 **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×**（每轮 2.75–2.85 token），各并发均为 0.6B 基线的 **1.29–1.56 倍**。[K128 详细对照 →](docs/v2/RESULTS.md)
 
 ## 加速从哪来
 
-- **块式草稿消除了串行自回归开销。** 独立 0.6B 模型每轮要串行跑 3 次 decode 并维护双份 KV；DFlash 直接读取 target 的 5 层中间特征，一次 7-query 非因果前向就能提出 7 个候选 token。
-- **DSpark 靠 Markov 头进一步拉高接受率。** 块内 7 行从左到右依次叠加前一个采样 token 的 Markov 偏置，每轮接受 token 数比 DFlash 高 7–12%。在 C=32–64 下，针对 top-k 候选窗口裁剪的采样路径还省去了全词表 softmax 开销（在领先幅度中约占 2–6 个百分点）。
+- **块式草稿消除了串行自回归开销。** 独立 0.6B 模型每轮要串行跑 3 步 decode 并维护双份 KV；块式 draft 一次前向同时提出 7 个候选 token，将草稿耗时压低。
+- **DSpark 靠 Markov 头进一步拉高接受率。** 每轮接受 token 数比 DFlash 高 7–12%。在 C=32–64 下，针对 top-k 候选窗口裁剪的采样路径还省去了全词表 softmax 开销（在领先幅度中约占 2–6 个百分点）。
 - **高并发下收益收窄。** 并发升高后，target 验证步每行的计算成本上升；同时本引擎的 prefill 步会暂停 decode，在 C=32 时占了 DSpark 稳态窗口 31% 的时间。
 - **对比 vLLM 的 DSpark**（同权重、同型号 GPU，开发版 `372477d`，D48 开发集，全流程挂钟吞吐）：C=1–32 下比 vLLM 慢 7.6–7.9%；关闭投机时，nano 比 vLLM 快 1–5%。
 
 ## 新增了什么
 
-当前引擎共 2,570 行。项目从 9 月份的 0.6B 独立小模型版本（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）演进而来，独立小模型路线保留在基线分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)，`main` 分支聚焦块式投机解码：
+当前引擎共 2,570 行，从 9 月份的 0.6B 独立小模型版（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）演进而来：
 - **DFlash 块式 draft**：复用 decode 注意力路径，一次跑 7 个 query 的非因果注意力，读取 target 的 5 层辅助特征，并将所有被验证位置的上下文 K/V 直接写入与 target 共用的块表（12 个引擎文件，+434/−107）。
 - **DSpark 块内修正**：通过 Markov head 由左向右依次采样 7 行，并将每行加偏置后的实际采样分布交给接受规则（4 个引擎文件，+224/−12）。
 - **三段 CUDA Graph**：覆盖 target 验证前向、draft 块前向，以及 DSpark 的 7 步块内采样。
@@ -110,13 +110,13 @@ python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json
 
 | 文档 | 内容 |
 |---|---|
-| [结果](docs/RESULTS.md) | 两个面板上 DSpark 对 DFlash、领先从哪来、和 vLLM 的对比、闸门 |
-| [DFlash 结果](docs/v2/RESULTS.md) | K128 上的 DFlash 移植：对 0.6B draft、一轮的各阶段、prefill 停顿 |
-| [9 月版设计](docs/design/batched-speculative-decoding.md) | 0.6B draft 版本：双模型执行、KV 状态、批处理与 CUDA Graph |
+| [结果](docs/RESULTS.md) | 两个面板上 DSpark 对 DFlash、领先来源、与 vLLM 对比及各项闸门 |
+| [DFlash 结果](docs/v2/RESULTS.md) | K128 上的 DFlash 移植：对比 0.6B draft、单轮阶段耗时与 prefill 停顿 |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
-| [工具](tools/README.md) | 测量、闸门和分析脚本，每个一行说明 |
-| [9 月结果](docs/v1/RESULTS.md) | 0.6B draft 版本：不同 batch size 的性能、阶段耗时、重复性 |
-| [优化历程](docs/PERFORMANCE.md) | 第一版的性能分析，以及推动本次重写的主要瓶颈 |
+| [工具](tools/README.md) | 测量、闸门与分析脚本清单 |
+| [9 月版设计](docs/design/batched-speculative-decoding.md) | 0.6B draft 版本：双模型执行、KV 状态、批处理与 CUDA Graph |
+| [9 月结果](docs/v1/RESULTS.md) | 0.6B draft 版本：不同 batch size 的性能、阶段耗时与重复性 |
+| [优化历程](docs/PERFORMANCE.md) | 第一版性能剖析，以及推动本次重写的主要瓶颈 |
 
 CPU 测试通过 [GitHub Actions](.github/workflows/cpu-tests.yml) 运行。
 
