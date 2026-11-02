@@ -58,6 +58,7 @@ class DFlashDrafter:
     With graphs, the block forward replays one graph per padded batch size. DFlash's logits and sampling stay
     outside; DSpark's logits and k rows replay a sampling graph per padded batch size and sampling_graph_key,
     captured for every batch size when that key first appears, for the first MAX_SAMPLING_KEYS keys only.
+    DSpark's confidence logits, when asked for, are computed eagerly after the drafts, outside the graphs.
     """
 
     def __init__(self, config: Config, decoder: SpeculativeDecoder):
@@ -101,10 +102,19 @@ class DFlashDrafter:
                                     decoder._device_tensor(metadata.slot_mapping, torch.int32))
 
     @torch.inference_mode()
-    def propose(self, seqs: list[Sequence], sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """One block forward; returns drafts [B, k] and probabilities [B, k, V] (None when greedy)."""
-        decoder, k = self.decoder, self.decoder.num_drafts
+    def propose(self, seqs: list[Sequence], sampling: SamplingTensors,
+                with_confidence: bool = False) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """One block forward; returns drafts [B, k], probabilities [B, k, V] (None when greedy) and, with_confidence,
+        DSpark's confidence logits [B, k] (None otherwise)."""
         hidden = self._forward_graph(seqs) if self.graphs else self._forward_eager(seqs)
+        drafts, draft_probs = self._draw(seqs, hidden, sampling)
+        confidence = self._confidence_logits(seqs, hidden, drafts) if with_confidence else None
+        return drafts, draft_probs, confidence
+
+    def _draw(self, seqs: list[Sequence], hidden: torch.Tensor,
+              sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The drafts and their q from the block outputs: DSpark's rows left to right, DFlash's at once."""
+        decoder, k = self.decoder, self.decoder.num_drafts
         if self.model.markov_head is not None and self.graphs and self._has_sampling_graphs(sampling):
             return self._sample_markov_graph(len(seqs), sampling)    # reads the block graph's outputs
         logits = self.model.compute_logits(hidden).view(len(seqs), k, -1)
@@ -114,6 +124,13 @@ class DFlashDrafter:
             return logits.argmax(dim=-1), None
         draft_probs = probs_from_logits(logits, sampling)
         return sample(draft_probs, decoder.target.generator), draft_probs
+
+    def _confidence_logits(self, seqs: list[Sequence], hidden: torch.Tensor, drafts: torch.Tensor) -> torch.Tensor:
+        """DSpark's confidence logits [B, k] from the block outputs and, per row, the token before its draft: the
+        anchor for row 0, draft j-1 for row j. Read after the drafts are drawn, but row j never reads draft j."""
+        anchors = self.decoder._device_tensor([seq.last_token for seq in seqs], torch.int64)
+        prev = torch.cat([anchors.unsqueeze(1), drafts[:, :-1]], dim=1)
+        return self.model.confidence_logits(hidden.view(len(seqs), self.decoder.num_drafts, -1), prev)
 
     def _sample_markov(self, seqs: list[Sequence], logits: torch.Tensor,
                        sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -375,7 +392,7 @@ class SpeculativeDecoder:
             assert seq.target_kv.num_cached_tokens == len(seq) - 1
         mark = self._mark("start", None)
         sampling = sampling_tensors(seqs, self.device)
-        drafts, draft_probs = self.drafter.propose(seqs, sampling)
+        drafts, draft_probs, _ = self.drafter.propose(seqs, sampling)
         mark = self._mark("propose", mark)
         aux = self._aux_buffer(len(seqs))
         target_logits = self.verify_logits(seqs, drafts, aux)

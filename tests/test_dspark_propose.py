@@ -72,6 +72,16 @@ def test_without_a_bias_the_rows_draw_what_dflash_draws():
     assert torch.equal(drafter.decoder.target.generator.get_state(), generator.get_state())
 
 
+def test_row_j_confidence_reads_the_token_before_draft_j():
+    # Variable-length verification may decide whether draft j is verified from row j's confidence only if row j
+    # never reads draft j: row j's previous token is the anchor for row 0, draft j-1 after it.
+    seqs = [Sequence([2, 0]), Sequence([1, 2])]
+    drafter = make_drafter(k=3)
+    drafter.model.confidence_logits = lambda hidden, prev: prev.float()    # hands back what each row read
+    drafts = torch.tensor([[1, 0, 1], [0, 1, 0]])
+    assert drafter._confidence_logits(seqs, torch.zeros(6, 4), drafts).tolist() == [[0, 1, 0], [2, 0, 1]]
+
+
 def test_candidate_rows_give_the_whole_vocabulary_distribution():
     # Every row truncates, so each row is drawn among its top max_top_k + TIE_MARGIN logits (20 + 64). In the top-3
     # row, thirty tokens tie with the cut value 3, out to rank 31: the truncation keeps them, and so do the candidates.

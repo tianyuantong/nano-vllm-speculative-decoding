@@ -67,10 +67,10 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
     propose, verify = decoder.drafter.propose, decoder.verify_logits
     seen = {}
 
-    def propose_and_keep(seqs, sampling_tensors):
-        drafts, draft_probs = propose(seqs, sampling_tensors)
+    def propose_and_keep(seqs, sampling_tensors, with_confidence=False):
+        drafts, draft_probs, confidence = propose(seqs, sampling_tensors, with_confidence)
         seen["q"], seen["sampling"] = draft_probs[0, 0], sampling_tensors
-        return drafts, draft_probs
+        return drafts, draft_probs, confidence
 
     def verify_and_keep(seqs, drafts, aux_out=None):
         logits = verify(seqs, drafts, aux_out)
