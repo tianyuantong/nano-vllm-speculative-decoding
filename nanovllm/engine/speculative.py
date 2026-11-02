@@ -14,6 +14,7 @@ from nanovllm.engine.batch_metadata import (
     verify_varlen_metadata,
 )
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.verify_schedule import VerifySchedule, verify_token_counts
 from nanovllm.layers.spec_sampler import (
     SamplingTensors,
     accept_greedy,
@@ -54,14 +55,6 @@ def sampling_graph_key(sampling: SamplingTensors) -> tuple[int, bool, bool] | No
     truncation settings (the top-k width, whether top-p runs, whether every row truncates), which fix its shapes
     and branches."""
     return None if sampling.temperatures is None else (sampling.max_top_k, sampling.has_top_p, sampling.all_top_k)
-
-
-def verify_token_counts(max_batch_size: int, query_len: int) -> list[int]:
-    """Token counts of the variable-length verification graphs: 1, 2, 4 below query_len, then every multiple of
-    query_len up to max_batch_size * query_len. B rows of at most query_len tokens each fit the graph of
-    B * query_len tokens, which is always one of them."""
-    return [size for size in (1, 2, 4) if size < query_len] + list(range(query_len, max_batch_size * query_len + 1,
-                                                                         query_len))
 
 
 class DFlashDrafter:
@@ -352,7 +345,8 @@ class SpeculativeDecoder:
     verifies all of them, so the verification graphs have B row slots of k+1 tokens for each padded batch size B.
     With variable_length, row r may verify only its first verified_lens[r] - 1, and the graphs have one token count
     each (verify_token_counts), with a row slot per token up to the largest batch size; the slots a round does not
-    use are empty rows.
+    use are empty rows. The lengths come from the round's caller or from the verify schedule, which reads DSpark's
+    confidences.
     """
 
     def __init__(self, target: ModelRunner, config: Config):
@@ -363,7 +357,9 @@ class SpeculativeDecoder:
         self.max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
         self.vocab_size = config.hf_config.vocab_size
         self.device = target.device
-        self.variable_length = False
+        self.variable_length = config.variable_length
+        self.schedule = None if config.verify_schedule is None else VerifySchedule.load(
+            config.verify_schedule, self.num_drafts, config.max_num_seqs)
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}            # verification graphs by token count
         self.graph_shapes: list[tuple[int, int]] = []                # their (row slots, tokens), by tokens
         self.graph_batch_sizes: list[int] = []
@@ -413,13 +409,19 @@ class SpeculativeDecoder:
     @torch.inference_mode()
     def run_round(self, seqs: list[Sequence], verified_lens: list[int] | None = None) -> list[list[int]]:
         """Return, per sequence, the accepted drafts followed by the tail token. With verified_lens, row r verifies
-        only its last token and its first verified_lens[r] - 1 drafts."""
+        only its last token and its first verified_lens[r] - 1 drafts; with variable_length and no verified_lens,
+        the verify schedule picks them from DSpark's confidences."""
         for seq in seqs:
             assert seq.target_kv.num_cached_tokens == len(seq) - 1
         mark = self._mark("start", None)
         sampling = sampling_tensors(seqs, self.device)
-        drafts, draft_probs, _ = self.drafter.propose(seqs, sampling)
+        scheduled = self.variable_length and verified_lens is None
+        drafts, draft_probs, confidence = self.drafter.propose(seqs, sampling, with_confidence=scheduled)
         mark = self._mark("propose", mark)
+        if scheduled:
+            assert self.schedule is not None, "a variable-length round needs a verify schedule or its lengths"
+            verified_lens = self.schedule.verify_lengths(confidence.cpu().numpy())    # the round's one extra sync
+            mark = self._mark("schedule", mark)
         num_tokens = len(seqs) * (self.num_drafts + 1) if verified_lens is None else sum(verified_lens)
         aux = self._aux_buffer(num_tokens)
         target_logits = self.verify_logits(seqs, drafts, aux, verified_lens)

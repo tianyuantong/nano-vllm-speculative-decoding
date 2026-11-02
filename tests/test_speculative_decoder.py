@@ -7,7 +7,7 @@ import torch
 from nanovllm.engine import speculative
 from nanovllm.engine.batch_metadata import verify_varlen_metadata
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.speculative import SpeculativeDecoder, verify_token_counts
+from nanovllm.engine.speculative import SpeculativeDecoder
 from nanovllm.layers.spec_sampler import probs_from_logits
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.context import get_context
@@ -77,9 +77,10 @@ class FakeDrafter:
                 row.append(token)
             rows.append(row)
         drafts = torch.tensor(rows)
+        confidence = torch.zeros(len(seqs), self.decoder.num_drafts) if with_confidence else None
         if sampling.temperatures is None:
-            return drafts, None, None
-        return drafts, probs_from_logits(peaked(drafts), sampling), None
+            return drafts, None, confidence
+        return drafts, probs_from_logits(peaked(drafts), sampling), confidence
 
     def after_verify(self, seqs, aux, verified_lens=None):
         pass
@@ -88,7 +89,7 @@ class FakeDrafter:
 def make_decoder():
     target = FakeRunner(target_rule)
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=64,
-                             hf_config=SimpleNamespace(vocab_size=VOCAB))
+                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None)
     with mock.patch.object(speculative, "DFlashDrafter", FakeDrafter):    # the real one loads a checkpoint
         decoder = SpeculativeDecoder(target, config)
     return decoder, target, decoder.drafter
@@ -188,9 +189,22 @@ def test_graph_inputs_hold_the_metadata_and_the_drafts():
     assert buffers["block_tables"][:4].tolist() == [[3, 4], [8, 9], [99, 99], [99, 99]]
 
 
-def test_variable_length_graphs_hold_every_full_batch():
-    assert verify_token_counts(4, 8) == [1, 2, 4, 8, 16, 24, 32]
-    assert all(batch_size * 8 in verify_token_counts(64, 8) for batch_size in range(1, 65))
+def test_a_variable_length_round_takes_its_lengths_from_the_schedule():
+    # The same two rows as above, the lengths now picked by the schedule from the round's confidences, [B, k].
+    decoder, target, drafter = make_decoder()
+    shapes = []
+
+    def pick_lengths(logits):
+        shapes.append(logits.shape)
+        return [2, 4]
+
+    decoder.variable_length = True
+    decoder.schedule = SimpleNamespace(verify_lengths=pick_lengths)
+    decoder.enable_phase_timings(event_factory=FakeEvent, synchronize=lambda: None)
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=0)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=0)
+    assert decoder.run_round([first, second]) == [[12, 13], [5, 6]] and shapes == [(2, K)]
+    assert [phase["phase"] for phase in decoder.phase_timings()][:2] == ["propose", "schedule"]
 
 
 def test_round_entry_invariants_are_asserted():
