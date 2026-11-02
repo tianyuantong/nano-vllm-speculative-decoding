@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import gpu_import_stubs  # noqa: F401  (before the engine import)
 import numpy as np
 import pytest
 
