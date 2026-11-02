@@ -126,34 +126,56 @@ def padded_block_tables(seqs: list[Sequence]) -> list[list[int]]:
 
 @dataclass
 class VerifyMetadata:
-    """One verification forward: every row has k + 1 query tokens; padding rows read a zero block."""
+    """One verification forward over its row slots, the sequences' rows first, then the padding rows, which read a
+    zero block, then the empty ones."""
     input_ids: list[int] = field(default_factory=list)      # draft positions hold 0, filled on device
     positions: list[int] = field(default_factory=list)
     slot_mapping: list[int] = field(default_factory=list)
     cu_seqlens_q: list[int] = field(default_factory=lambda: [0])
     cu_seqlens_k: list[int] = field(default_factory=lambda: [0])
     block_tables: list[list[int]] = field(default_factory=list)
+    draft_index: list[int] = field(default_factory=list)    # where each verified draft goes in input_ids
+    draft_source: list[int] = field(default_factory=list)   # and where it is in the drafts [B, k], flattened
 
 
 def verify_metadata(seqs: list[Sequence], num_drafts: int, block_size: int,
                     padded_batch_size: int, pad_block_id: int, width: int) -> VerifyMetadata:
+    """Every row verifies [last token, its num_drafts drafts]; padded to padded_batch_size rows of as many tokens."""
+    query_len = num_drafts + 1
+    return verify_varlen_metadata(seqs, [query_len] * len(seqs), num_drafts, block_size, padded_batch_size,
+                                  padded_batch_size * query_len, pad_block_id, width)
+
+
+def verify_varlen_metadata(seqs: list[Sequence], verified_lens: list[int], num_drafts: int, block_size: int,
+                           num_rows: int, num_tokens: int, pad_block_id: int, width: int) -> VerifyMetadata:
+    """Row r verifies verified_lens[r] tokens, its last token and its first verified_lens[r] - 1 drafts, at
+    positions len-1 onward. The tokens left of num_tokens fill padding rows of at most num_drafts + 1 tokens, at
+    positions 0 onward of the zero block; the row slots left of num_rows after them are empty."""
     query_len = num_drafts + 1
     metadata = VerifyMetadata()
-    for seq in seqs:
+    for row, (seq, length) in enumerate(zip(seqs, verified_lens)):
         block_table = seq.target_kv.block_table
         start = len(seq) - 1
-        assert len(block_table) <= width and len(block_table) * block_size >= start + query_len
-        metadata.input_ids.extend([seq.last_token] + [0] * num_drafts)
-        metadata.positions.extend(range(start, start + query_len))
-        metadata.slot_mapping.extend(slot_of(block_table, block_size, position) for position in range(start, start + query_len))
-        metadata.cu_seqlens_q.append(metadata.cu_seqlens_q[-1] + query_len)
-        metadata.cu_seqlens_k.append(metadata.cu_seqlens_k[-1] + start + query_len)
+        assert 1 <= length <= query_len
+        assert len(block_table) <= width and len(block_table) * block_size >= start + length
+        first = len(metadata.input_ids)
+        metadata.input_ids.extend([seq.last_token] + [0] * (length - 1))
+        metadata.positions.extend(range(start, start + length))
+        metadata.slot_mapping.extend(slot_of(block_table, block_size, position) for position in range(start, start + length))
+        metadata.draft_index.extend(range(first + 1, first + length))
+        metadata.draft_source.extend(range(row * num_drafts, row * num_drafts + length - 1))
+        metadata.cu_seqlens_q.append(metadata.cu_seqlens_q[-1] + length)
+        metadata.cu_seqlens_k.append(metadata.cu_seqlens_k[-1] + start + length)
         metadata.block_tables.append(block_table + [pad_block_id] * (width - len(block_table)))
-    for _ in range(padded_batch_size - len(seqs)):
-        metadata.input_ids.extend([0] * query_len)
-        metadata.positions.extend(range(query_len))
-        metadata.slot_mapping.extend([PAD_SLOT] * query_len)
-        metadata.cu_seqlens_q.append(metadata.cu_seqlens_q[-1] + query_len)
-        metadata.cu_seqlens_k.append(metadata.cu_seqlens_k[-1] + query_len)
+    left = num_tokens - len(metadata.input_ids)
+    for _ in range(num_rows - len(seqs)):
+        length = min(left, query_len)
+        left -= length
+        metadata.input_ids.extend([0] * length)
+        metadata.positions.extend(range(length))
+        metadata.slot_mapping.extend([PAD_SLOT] * length)
+        metadata.cu_seqlens_q.append(metadata.cu_seqlens_q[-1] + length)
+        metadata.cu_seqlens_k.append(metadata.cu_seqlens_k[-1] + length)
         metadata.block_tables.append([pad_block_id] * width)
+    assert left == 0, "the padding rows cannot hold the tokens left"
     return metadata

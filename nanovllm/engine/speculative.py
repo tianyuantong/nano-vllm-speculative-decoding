@@ -6,16 +6,25 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from nanovllm.engine.batch_metadata import draft_block_metadata, prefill_metadata, verify_metadata
+from nanovllm.engine.batch_metadata import (
+    VerifyMetadata,
+    draft_block_metadata,
+    prefill_metadata,
+    verify_metadata,
+    verify_varlen_metadata,
+)
 from nanovllm.engine.sequence import Sequence
 from nanovllm.layers.spec_sampler import (
     SamplingTensors,
     accept_greedy,
+    accept_greedy_varlen,
     accept_random,
+    accept_random_varlen,
     exponential_noise_,
     probs_from_logits,
     race,
     sample,
+    sampling_per_token,
     sampling_tensors,
 )
 from nanovllm.utils.context import reset_context, set_context
@@ -47,14 +56,22 @@ def sampling_graph_key(sampling: SamplingTensors) -> tuple[int, bool, bool] | No
     return None if sampling.temperatures is None else (sampling.max_top_k, sampling.has_top_p, sampling.all_top_k)
 
 
+def verify_token_counts(max_batch_size: int, query_len: int) -> list[int]:
+    """Token counts of the variable-length verification graphs: 1, 2, 4 below query_len, then every multiple of
+    query_len up to max_batch_size * query_len. B rows of at most query_len tokens each fit the graph of
+    B * query_len tokens, which is always one of them."""
+    return [size for size in (1, 2, 4) if size < query_len] + list(range(query_len, max_batch_size * query_len + 1,
+                                                                         query_len))
+
+
 class DFlashDrafter:
     """DeepSpec's block draft: one forward over a block [anchor, mask x (k-1)] proposes k drafts. DFlash samples
     the k rows at once; DSpark, whose model has a Markov head, samples them left to right.
 
     Its KV holds context K/V computed from the target's aux features, written for every position the target
-    computes: each prefilled chunk, and all k+1 positions of each verification. A rejected position is
-    overwritten by the next block before any block reads it, so at round entry the context covers len-1
-    positions, like the target's KV. It shares the target's block table: same block count, same pad block.
+    computes: each prefilled chunk, and every verified position of each verification, all k+1 unless the row
+    verifies fewer. A rejected or unverified position is overwritten by the next block before any block reads it,
+    so at round entry the context covers len-1 positions, like the target's KV. It shares the target's block table: same block count, same pad block.
     With graphs, the block forward replays one graph per padded batch size. DFlash's logits and sampling stay
     outside; DSpark's logits and k rows replay a sampling graph per padded batch size and sampling_graph_key,
     captured for every batch size when that key first appears, for the first MAX_SAMPLING_KEYS keys only.
@@ -314,11 +331,14 @@ class DFlashDrafter:
                 reset_context()
 
     @torch.inference_mode()
-    def after_verify(self, seqs: list[Sequence], aux: torch.Tensor) -> None:
-        """Context K/V of all k+1 verified positions, from the aux features the verification exported."""
+    def after_verify(self, seqs: list[Sequence], aux: torch.Tensor, verified_lens: list[int] | None = None) -> None:
+        """Context K/V of every verified position, all k+1 per row unless verified_lens, from the aux features the
+        verification exported."""
         decoder = self.decoder
+        lens = [decoder.num_drafts + 1] * len(seqs) if verified_lens is None else verified_lens
         width = max(len(seq.target_kv.block_table) for seq in seqs)
-        metadata = verify_metadata(seqs, decoder.num_drafts, decoder.block_size, len(seqs), decoder.target.pad_block_id, width)
+        metadata = verify_varlen_metadata(seqs, lens, decoder.num_drafts, decoder.block_size, len(seqs), sum(lens),
+                                          decoder.target.pad_block_id, width)
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
                                     decoder._device_tensor(metadata.slot_mapping, torch.int32))
@@ -328,8 +348,11 @@ class SpeculativeDecoder:
     """Drafts, one verification forward, batched acceptance, one D2H copy.
 
     Round-entry invariant (asserted): target KV covers len-1 positions, and so does the drafter's context K/V
-    that mirrors it. Every active sequence proposes exactly k drafts, so the verification shape is (B, k+1) and a
-    graph keyed by the padded batch size always matches.
+    that mirrors it. Every active sequence proposes exactly k drafts. In fixed-length verification each row
+    verifies all of them, so the verification graphs have B row slots of k+1 tokens for each padded batch size B.
+    With variable_length, row r may verify only its first verified_lens[r] - 1, and the graphs have one token count
+    each (verify_token_counts), with a row slot per token up to the largest batch size; the slots a round does not
+    use are empty rows.
     """
 
     def __init__(self, target: ModelRunner, config: Config):
@@ -340,7 +363,9 @@ class SpeculativeDecoder:
         self.max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
         self.vocab_size = config.hf_config.vocab_size
         self.device = target.device
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.variable_length = False
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}            # verification graphs by token count
+        self.graph_shapes: list[tuple[int, int]] = []                # their (row slots, tokens), by tokens
         self.graph_batch_sizes: list[int] = []
         self.graph_vars: dict[str, torch.Tensor] = {}
         self.stats: Counter = Counter()
@@ -386,24 +411,22 @@ class SpeculativeDecoder:
 
     # ------------------------------------------------------------------ the round
     @torch.inference_mode()
-    def run_round(self, seqs: list[Sequence]) -> list[list[int]]:
-        """Return, per sequence, the accepted drafts followed by the tail token."""
+    def run_round(self, seqs: list[Sequence], verified_lens: list[int] | None = None) -> list[list[int]]:
+        """Return, per sequence, the accepted drafts followed by the tail token. With verified_lens, row r verifies
+        only its last token and its first verified_lens[r] - 1 drafts."""
         for seq in seqs:
             assert seq.target_kv.num_cached_tokens == len(seq) - 1
         mark = self._mark("start", None)
         sampling = sampling_tensors(seqs, self.device)
         drafts, draft_probs, _ = self.drafter.propose(seqs, sampling)
         mark = self._mark("propose", mark)
-        aux = self._aux_buffer(len(seqs))
-        target_logits = self.verify_logits(seqs, drafts, aux)
+        num_tokens = len(seqs) * (self.num_drafts + 1) if verified_lens is None else sum(verified_lens)
+        aux = self._aux_buffer(num_tokens)
+        target_logits = self.verify_logits(seqs, drafts, aux, verified_lens)
         mark = self._mark("verify", mark)
-        self.drafter.after_verify(seqs, aux)
+        self.drafter.after_verify(seqs, aux, verified_lens)
         mark = self._mark("ctx_store", mark)
-        if sampling.temperatures is None:
-            n_accept, tail = accept_greedy(target_logits, drafts)
-        else:
-            target_probs = probs_from_logits(target_logits, sampling)
-            n_accept, tail = accept_random(target_probs, draft_probs, drafts, self.target.generator)
+        n_accept, tail = self._accept(target_logits, drafts, draft_probs, sampling, verified_lens)
         mark = self._mark("accept", mark)
         payload = torch.cat([drafts, n_accept.unsqueeze(1), tail.unsqueeze(1)], dim=1).tolist()   # the one D2H copy
         self._mark("commit_copy", mark)
@@ -412,68 +435,105 @@ class SpeculativeDecoder:
             count, tail_token = row[self.num_drafts], row[self.num_drafts + 1]
             appended.append(row[:count] + [tail_token])
             self.stats[f"accepted_{count}"] += 1
+        for length in verified_lens or ():
+            self.stats[f"verified_{length}"] += 1
         self.stats["rounds"] += 1
         return appended
 
-    def _aux_buffer(self, batch_size: int) -> torch.Tensor:
-        """Where the verification of batch_size rows writes the aux features: the verify graph's buffer when the
+    def _accept(self, target_logits: torch.Tensor, drafts: torch.Tensor, draft_probs: torch.Tensor | None,
+                sampling: SamplingTensors, verified_lens: list[int] | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Acceptance of every row's k drafts over [B, k+1, V] logits, or with verified_lens of each row's first
+        verified_lens[r] - 1 over the flat [T, V] ones."""
+        if verified_lens is None:
+            if sampling.temperatures is None:
+                return accept_greedy(target_logits, drafts)
+            return accept_random(probs_from_logits(target_logits, sampling), draft_probs, drafts, self.target.generator)
+        lens = self._device_tensor(verified_lens, torch.int64)
+        if sampling.temperatures is None:
+            return accept_greedy_varlen(target_logits, drafts, lens)
+        target_probs = probs_from_logits(target_logits, sampling_per_token(sampling, lens, target_logits.shape[0]))
+        return accept_random_varlen(target_probs, draft_probs, drafts, lens, self.target.generator)
+
+    def _aux_buffer(self, num_tokens: int) -> torch.Tensor:
+        """Where a verification of num_tokens tokens writes the aux features: the verify graph's buffer when the
         graphs exist, a new tensor otherwise."""
-        rows = batch_size * (self.num_drafts + 1)
         if self.graphs:
-            return self.graph_vars["aux"][:rows]
-        return torch.empty(rows, self.drafter.aux_width, dtype=self.drafter.aux_dtype, device=self.device)
+            return self.graph_vars["aux"][:num_tokens]
+        return torch.empty(num_tokens, self.drafter.aux_width, dtype=self.drafter.aux_dtype, device=self.device)
 
     @torch.inference_mode()
-    def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None) -> torch.Tensor:
-        """Target logits at the k+1 positions [last token, d1..dk] of every sequence: [B, k+1, V].
-        aux_out [B*(k+1), aux width] receives the target's aux features (DFlash). With graphs the verification
-        writes them into its own buffer, so aux_out must be the slice of it that _aux_buffer returns."""
-        batch_size, query_len = len(seqs), self.num_drafts + 1
-        hidden = self._verify_graph(seqs, drafts) if self.graphs else self._verify_eager(seqs, drafts, aux_out)
+    def verify_logits(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None,
+                      verified_lens: list[int] | None = None) -> torch.Tensor:
+        """Target logits at the verified positions. Without verified_lens every row verifies [last token, d1..dk]:
+        [B, k+1, V]. With them row r verifies its last token and its first verified_lens[r] - 1 drafts, row after
+        row: [T, V], T = sum(verified_lens). aux_out [T, aux width] receives the target's aux features (DFlash).
+        With graphs the verification writes them into its own buffer, so aux_out must be the slice of it that
+        _aux_buffer returns."""
+        lens = [self.num_drafts + 1] * len(seqs) if verified_lens is None else verified_lens
+        hidden = self._verify_graph(seqs, drafts, lens) if self.graphs else self._verify_eager(seqs, drafts, lens, aux_out)
         logits = self.target.model.compute_logits(hidden, all_logits=True)
-        return logits.view(batch_size, query_len, -1)
+        return logits if verified_lens is not None else logits.view(len(seqs), self.num_drafts + 1, -1)
 
-    def _verify_eager(self, seqs: list[Sequence], drafts: torch.Tensor, aux_out: torch.Tensor | None = None) -> torch.Tensor:
-        batch_size, query_len = len(seqs), self.num_drafts + 1
+    def _verify_eager(self, seqs: list[Sequence], drafts: torch.Tensor, verified_lens: list[int],
+                      aux_out: torch.Tensor | None = None) -> torch.Tensor:
         width = max(len(seq.target_kv.block_table) for seq in seqs)
-        metadata = verify_metadata(seqs, self.num_drafts, self.block_size, batch_size, self.target.pad_block_id, width)
+        metadata = verify_varlen_metadata(seqs, verified_lens, self.num_drafts, self.block_size, len(seqs),
+                                          sum(verified_lens), self.target.pad_block_id, width)
         input_ids = self._device_tensor(metadata.input_ids, torch.int64)
-        input_ids.view(batch_size, query_len)[:, 1:] = drafts
+        self._place_drafts(input_ids, drafts, metadata)
         positions = self._device_tensor(metadata.positions, torch.int64)
         set_context(True,
                     self._device_tensor(metadata.cu_seqlens_q, torch.int32),
                     self._device_tensor(metadata.cu_seqlens_k, torch.int32),
-                    query_len, self.max_model_len,
+                    self.num_drafts + 1, self.max_model_len,
                     self._device_tensor(metadata.slot_mapping, torch.int32), None,
                     self._device_tensor(metadata.block_tables, torch.int32))
         hidden = self.target.run_model(input_ids, positions, True, need_logits=False, aux_out=aux_out)
         reset_context()
         return hidden
 
-    def _verify_graph(self, seqs: list[Sequence], drafts: torch.Tensor) -> torch.Tensor:
-        batch_size, query_len = len(seqs), self.num_drafts + 1
-        padded = next(size for size in self.graph_batch_sizes if size >= batch_size)
-        metadata = verify_metadata(seqs, self.num_drafts, self.block_size, padded, self.target.pad_block_id, self.max_num_blocks)
-        num_tokens = padded * query_len
+    def _verify_graph(self, seqs: list[Sequence], drafts: torch.Tensor, verified_lens: list[int]) -> torch.Tensor:
+        """The smallest graph with as many tokens as the rows verify; its other tokens fill padding rows."""
+        num_verified = sum(verified_lens)
+        num_rows, num_tokens = next(shape for shape in self.graph_shapes if shape[1] >= num_verified)
+        assert num_rows >= len(seqs)
+        metadata = verify_varlen_metadata(seqs, verified_lens, self.num_drafts, self.block_size, num_rows, num_tokens,
+                                          self.target.pad_block_id, self.max_num_blocks)
+        self._load_graph_inputs(metadata, num_rows, num_tokens)
+        self._place_drafts(self.graph_vars["input_ids"], drafts, metadata)
+        self.graphs[num_tokens].replay()
+        return self.graph_vars["outputs"][:num_verified]
+
+    def _place_drafts(self, input_ids: torch.Tensor, drafts: torch.Tensor, metadata: VerifyMetadata) -> None:
+        """Write the verified drafts into the flat input ids, where the metadata puts them."""
+        source = self._device_tensor(metadata.draft_source, torch.int64)
+        input_ids[self._device_tensor(metadata.draft_index, torch.int64)] = drafts.flatten()[source]
+
+    def _load_graph_inputs(self, metadata: VerifyMetadata, num_rows: int, num_tokens: int) -> None:
+        """The metadata into the verification graphs' buffers: num_tokens token entries, num_rows row entries."""
         buffers = self.graph_vars
         buffers["input_ids"][:num_tokens].copy_(self._host_tensor(metadata.input_ids, torch.int64), non_blocking=True)
-        buffers["input_ids"].view(-1, query_len)[:batch_size, 1:] = drafts
         buffers["positions"][:num_tokens].copy_(self._host_tensor(metadata.positions, torch.int64), non_blocking=True)
         buffers["slot_mapping"][:num_tokens].copy_(self._host_tensor(metadata.slot_mapping, torch.int32), non_blocking=True)
-        buffers["cu_seqlens_q"][:padded + 1].copy_(self._host_tensor(metadata.cu_seqlens_q, torch.int32), non_blocking=True)
-        buffers["cu_seqlens_k"][:padded + 1].copy_(self._host_tensor(metadata.cu_seqlens_k, torch.int32), non_blocking=True)
-        buffers["block_tables"][:padded].copy_(self._host_tensor(metadata.block_tables, torch.int32), non_blocking=True)
-        self.graphs[padded].replay()
-        return buffers["outputs"][:batch_size * query_len]
+        buffers["cu_seqlens_q"][:num_rows + 1].copy_(self._host_tensor(metadata.cu_seqlens_q, torch.int32), non_blocking=True)
+        buffers["cu_seqlens_k"][:num_rows + 1].copy_(self._host_tensor(metadata.cu_seqlens_k, torch.int32), non_blocking=True)
+        buffers["block_tables"][:num_rows].copy_(self._host_tensor(metadata.block_tables, torch.int32), non_blocking=True)
 
     # ------------------------------------------------------------------ graphs
     @torch.inference_mode()
     def capture_graphs(self) -> None:
-        """One verification graph per batch size of the target's decode-graph table; query length fixed to k+1.
-        The drafter then captures its block forward for the same batch sizes."""
+        """One verification graph per (row slots, tokens) shape, into the target's pool. In fixed-length
+        verification, B slots of k+1 tokens for each batch size B of the target's decode-graph table; with
+        variable_length, each token count of verify_token_counts with a slot per token, up to the largest batch
+        size. Each is captured on padding rows. The drafter then captures its block forward for the batch sizes."""
         query_len = self.num_drafts + 1
         self.graph_batch_sizes = list(self.target.graph_bs)
         max_batch_size = self.graph_batch_sizes[-1]
+        if self.variable_length:
+            self.graph_shapes = [(min(num_tokens, max_batch_size), num_tokens)
+                                 for num_tokens in verify_token_counts(max_batch_size, query_len)]
+        else:
+            self.graph_shapes = [(batch_size, batch_size * query_len) for batch_size in self.graph_batch_sizes]
         hf_config = self.target.config.hf_config
         all_padding = verify_metadata([], self.num_drafts, self.block_size, max_batch_size,
                                       self.target.pad_block_id, self.max_num_blocks)
@@ -490,28 +550,29 @@ class SpeculativeDecoder:
                                device=self.device),
         }
         with torch.device(self.device):
-            for batch_size in reversed(self.graph_batch_sizes):
-                rows = batch_size * query_len
+            for num_rows, num_tokens in reversed(self.graph_shapes):
+                padding = verify_varlen_metadata([], [], self.num_drafts, self.block_size, num_rows, num_tokens,
+                                                 self.target.pad_block_id, self.max_num_blocks)
+                self._load_graph_inputs(padding, num_rows, num_tokens)
                 graph = torch.cuda.CUDAGraph()
-                self._set_graph_context(batch_size)
-                self.graph_vars["outputs"][:rows] = self._graph_forward(rows)    # warm-up
+                self._set_graph_context(num_rows, num_tokens)
+                self.graph_vars["outputs"][:num_tokens] = self._graph_forward(num_tokens)    # warm-up
                 with torch.cuda.graph(graph, self.target.graph_pool):
-                    self.graph_vars["outputs"][:rows] = self._graph_forward(rows)
-                self.graphs[batch_size] = graph
+                    self.graph_vars["outputs"][:num_tokens] = self._graph_forward(num_tokens)
+                self.graphs[num_tokens] = graph
                 torch.cuda.synchronize()
                 reset_context()
         self.drafter.capture_graphs()
 
-    def _graph_forward(self, rows: int) -> torch.Tensor:
-        return self.target.model(self.graph_vars["input_ids"][:rows], self.graph_vars["positions"][:rows],
-                                 self.graph_vars["aux"][:rows])
+    def _graph_forward(self, num_tokens: int) -> torch.Tensor:
+        return self.target.model(self.graph_vars["input_ids"][:num_tokens], self.graph_vars["positions"][:num_tokens],
+                                 self.graph_vars["aux"][:num_tokens])
 
-    def _set_graph_context(self, batch_size: int) -> None:
-        rows = batch_size * (self.num_drafts + 1)
+    def _set_graph_context(self, num_rows: int, num_tokens: int) -> None:
         buffers = self.graph_vars
-        set_context(True, buffers["cu_seqlens_q"][:batch_size + 1], buffers["cu_seqlens_k"][:batch_size + 1],
-                    self.num_drafts + 1, self.max_model_len, buffers["slot_mapping"][:rows], None,
-                    buffers["block_tables"][:batch_size])
+        set_context(True, buffers["cu_seqlens_q"][:num_rows + 1], buffers["cu_seqlens_k"][:num_rows + 1],
+                    self.num_drafts + 1, self.max_model_len, buffers["slot_mapping"][:num_tokens], None,
+                    buffers["block_tables"][:num_rows])
 
     def close(self) -> None:
         self.graphs.clear()
@@ -521,7 +582,8 @@ class SpeculativeDecoder:
 
     # ------------------------------------------------------------------ tensors
     def _host_tensor(self, values: list, dtype: torch.dtype) -> torch.Tensor:
-        return torch.tensor(values, dtype=dtype, pin_memory=self.device.type == "cuda")
+        # on the CPU even inside a torch.device context: graph capture loads its padding rows in one
+        return torch.tensor(values, dtype=dtype, device="cpu", pin_memory=self.device.type == "cuda")
 
     def _device_tensor(self, values: list, dtype: torch.dtype) -> torch.Tensor:
         return self._host_tensor(values, dtype).to(self.device, non_blocking=True)

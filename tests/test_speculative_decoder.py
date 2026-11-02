@@ -5,8 +5,9 @@ import pytest
 import torch
 
 from nanovllm.engine import speculative
+from nanovllm.engine.batch_metadata import verify_varlen_metadata
 from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.speculative import SpeculativeDecoder
+from nanovllm.engine.speculative import SpeculativeDecoder, verify_token_counts
 from nanovllm.layers.spec_sampler import probs_from_logits
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.context import get_context
@@ -80,7 +81,7 @@ class FakeDrafter:
             return drafts, None, None
         return drafts, probs_from_logits(peaked(drafts), sampling), None
 
-    def after_verify(self, seqs, aux):
+    def after_verify(self, seqs, aux, verified_lens=None):
         pass
 
 
@@ -153,6 +154,43 @@ def test_random_mode_with_peaked_distributions_matches_greedy():
     seq = make_sequence([1, 2, 3], 4, target_blocks=[3, 4], temperature=1.0)
     appended = decoder.run_round([seq])
     assert appended == [[5, 6]]
+
+
+@pytest.mark.parametrize("temperature", [0, 1.0], ids=["greedy", "random"])
+def test_rows_verify_lengths_of_their_own(temperature):
+    # Drafts 12, 13, 14 after 11 and 5, 0, 1 after 4. The first row verifies 12 only: accepted, then the bonus at
+    # its second position, 13. The second verifies all three: 5 accepted, 0 rejected for the target's 6.
+    decoder, target, drafter = make_decoder()
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=temperature)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=temperature)
+    appended = decoder.run_round([first, second], verified_lens=[2, 4])
+    assert appended == [[12, 13], [5, 6]]
+    (verify,) = target.calls
+    assert verify["input_ids"] == [11, 12, 4, 5, 0, 1] and verify["positions"] == [3, 4, 3, 4, 5, 6]
+    assert verify["slot_mapping"] == [15, 16, 35, 36, 37, 38]
+    assert verify["cu_seqlens_q"] == [0, 2, 6] and verify["cu_seqlens_k"] == [0, 5, 12]
+    assert (decoder.stats["verified_2"], decoder.stats["verified_4"], decoder.stats["accepted_1"]) == (1, 1, 2)
+
+
+def test_graph_inputs_hold_the_metadata_and_the_drafts():
+    # What _verify_graph writes before a replay, on CPU buffers: a graph of 8 tokens and 4 slots, rows of 2 and 3.
+    decoder, target, drafter = make_decoder()
+    decoder.graph_vars = {name: torch.zeros(size, dtype=torch.int64 if name in ("input_ids", "positions") else torch.int32)
+                          for name, size in [("input_ids", 32), ("positions", 32), ("slot_mapping", 32),
+                                             ("cu_seqlens_q", 9), ("cu_seqlens_k", 9), ("block_tables", (8, 2))]}
+    seqs = [make_sequence([8, 9, 10], 11, target_blocks=[3, 4]), make_sequence([1, 2, 3], 4, target_blocks=[8, 9])]
+    metadata = verify_varlen_metadata(seqs, [2, 3], K, BLOCK_SIZE, 4, 8, 99, 2)
+    decoder._load_graph_inputs(metadata, 4, 8)
+    decoder._place_drafts(decoder.graph_vars["input_ids"], torch.tensor([[12, 13, 14], [5, 0, 1]]), metadata)
+    buffers = decoder.graph_vars
+    assert buffers["input_ids"][:8].tolist() == [11, 12, 4, 5, 0, 0, 0, 0]
+    assert buffers["cu_seqlens_q"][:5].tolist() == [0, 2, 5, 8, 8]
+    assert buffers["block_tables"][:4].tolist() == [[3, 4], [8, 9], [99, 99], [99, 99]]
+
+
+def test_variable_length_graphs_hold_every_full_batch():
+    assert verify_token_counts(4, 8) == [1, 2, 4, 8, 16, 24, 32]
+    assert all(batch_size * 8 in verify_token_counts(64, 8) for batch_size in range(1, 65))
 
 
 def test_round_entry_invariants_are_asserted():
