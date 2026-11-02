@@ -41,7 +41,7 @@ Values are steady-state throughput multiples over plain decoding on 128-prompt h
 ## Core implementation (three-stage evolution)
 
 The `main` engine is 2,570 lines of Python, built across three generations:
-- **Stage 1 — 0.6B standalone draft (branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft))**: two separate models with independent block tables and KV caches; the 0.6B model runs $k=3$ autoregressive steps per round, the target verifies all positions in one fixed-length CUDA Graph pass, and a vectorized GPU sampler (`SpecSampler`) performs batched rejection sampling and KV rollback.
+- **Stage 1 — 0.6B standalone draft (branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft))**: two separate models with independent block tables and KV caches; the 0.6B model runs k=3 autoregressive steps per round, the target verifies all positions in one fixed-length CUDA Graph pass, and a vectorized GPU sampler (`SpecSampler`) performs batched rejection sampling and KV rollback.
 - **Stage 2 — DFlash parallel block draft**: replaces the standalone model with a single 7-query, non-causal pass through the decode attention path that reads 5 auxiliary target layers; a 5-layer draft KV cache shares the target's block table (`block_tables`) and stores context K/V for accepted positions after verification.
 - **Stage 3 — DSpark in-block Markov correction**: adds a Markov head on top of the DFlash block features to draw the 7 candidate positions left to right, passing each position's bias-adjusted distribution to the rejection sampler. Three CUDA Graphs cover target verification, the draft block forward pass, and DSpark's 7 sampling steps.
 
@@ -49,7 +49,7 @@ Entry points: `SpeculativeDecoder.run_round` (five-step round pipeline), `DFlash
 
 ## Correctness verification
 
-Candidates are verified via standard rejection sampling: accept $x$ when $u < \min(1, p_{\text{target}}(x) / p_{\text{draft}}(x))$, otherwise resample from $\text{normalize}(\max(p_{\text{target}} - p_{\text{draft}}, 0))$, guaranteeing the exact target output distribution (for DSpark, $p_{\text{draft}}$ is each position's distribution after its Markov bias).
+Candidates are verified via standard rejection sampling: accept $x$ when $u \lt \min(1, p_{\text{target}}(x) / p_{\text{draft}}(x))$, otherwise resample from $\text{normalize}(\max(p_{\text{target}} - p_{\text{draft}}, 0))$, guaranteeing the exact target output distribution (for DSpark, $p_{\text{draft}}$ is each position's distribution after its Markov bias).
 
 Verified on GPU across four checks:
 - Multi-step sampler output distribution (29 test cases)
