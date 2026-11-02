@@ -2,9 +2,9 @@
 
 # nano-vllm-speculative-decoding
 
-为 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 实现投机解码：DFlash 块式 draft，以及带 Markov 修正的 DSpark。
+在 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 上实现块式投机解码：DFlash 与带 Markov 修正的 DSpark（对照独立小模型基线 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）。
 
-**C=1 吞吐 2.10 倍 · C=8 为 1.78 倍 · C=32 为 1.43 倍 · C=64 为 1.15 倍**
+**C=1 吞吐 2.10× · C=8 为 1.78× · C=32 为 1.43× · C=64 为 1.15×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -15,46 +15,49 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128b-dark.svg">
-  <img alt="K128b 确认集上相对不投机的吞吐倍数，3 个 seed 的中位数和范围。DSpark：并发 1 为 2.08–2.20 倍，8 为 1.73–1.80 倍，32 为 1.43 倍，64 为 1.15 倍。DFlash：1.94–2.06、1.68、1.31、1.01 倍。" src="docs/assets/speedup-k128b-light.svg" width="760">
+  <img alt="K128b 确认集上相对普通解码的吞吐倍数，3 个 seed 的中位数和范围。DSpark：并发 1 为 2.08–2.20 倍，8 为 1.73–1.80 倍，32 为 1.43 倍，64 为 1.15 倍。DFlash：1.94–2.06、1.68、1.31、1.01 倍。" src="docs/assets/speedup-k128b-light.svg" width="760">
 </picture>
 
 </div>
 
-Qwen3-8B 接 DSpark draft，RTX PRO 6000。按标准接受规则，输出分布不变；采样器、draft 的分布和 logits 都检验过。GSM8K 准确率与不投机相差 −1.7 … +0.8 个百分点。
+基于 Qwen3-8B 与 RTX PRO 6000 实测。按标准拒绝采样保持 target 输出分布无损（GSM8K 准确率相差 −1.7 ~ +0.8 个百分点）。
 
 | C | DFlash（k=7） | DSpark（k=7） | DSpark ÷ DFlash | 每轮 token 数（DFlash / DSpark） |
 |---:|---|---|---|---|
-| 1 | 2.00 倍 | 2.10 倍 | 1.07 | 2.59 / 2.82 |
-| 8 | 1.68 倍 | 1.78 倍 | 1.06 | 2.53 / 2.81 |
-| 32 | 1.31 倍 | 1.43 倍 | 1.10 | 2.70 / 2.95 |
-| 64 | 1.01 倍 | 1.15 倍 | 1.14 | 2.65 / 2.93 |
+| 1 | 2.00× | 2.10× | 1.07 | 2.59 / 2.82 |
+| 8 | 1.68× | 1.78× | 1.06 | 2.53 / 2.81 |
+| 32 | 1.31× | 1.43× | 1.10 | 2.70 / 2.95 |
+| 64 | 1.01× | 1.15× | 1.14 | 2.65 / 2.93 |
 
-怎么测的：同一引擎、同一作业内对不投机的稳态吞吐，未看过的 128 条确认集。表中数值取每档 3 个 seed 的中位数，四舍五入到两位小数。[波动范围、测量协议和闸门 →](docs/RESULTS.md)
+口径：同一引擎与作业下相对普通解码的稳态吞吐比，在未接触过的 128 条确认集（K128b）上取 3 个 seed 的中位数。[波动范围、测量协议和闸门 →](docs/RESULTS.md)
+
+**对比独立小模型基线（Qwen3-0.6B，k=3，分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）**：在 K128 确认集上，独立 0.6B draft 在 C = 1 / 8 / 32 / 64 的吞吐倍数为 **1.54× / 1.21× / 0.96× / 0.82×**（每轮 2.49–2.53 个 token），C ≥ 32 时由于 3 步串行草稿和验证开销倒挂而慢于普通解码；DFlash 在同一确认集上为 **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×**（每轮 2.75–2.85 个 token），在所有并发下均为 0.6B 基线的 **1.29–1.56 倍**。[K128 详细对照 →](docs/v2/RESULTS.md)
 
 ## 加速从哪来
 
-- **DSpark 领先靠的是接受率。** 它的 Markov head 让每轮 token 数比 DFlash 多 7–12%。C=32 到 64 时，领先里估计有 2–6 个百分点来自 DSpark 更省的采样路径。
-- **并发越高收益越小。** verify 每行的成本在高并发时变陡；这个引擎的 prefill 步会让 decode 停下，C=32 时占 DSpark 稳态时间的 31%。
-- **和 vLLM 的 DSpark 比**（同一份权重、同型号的卡，开发版 `372477d`，开发集，挂钟吞吐）：C=1 到 32 慢 7.6–7.9%。不投机时，nano 比 vLLM 快 1–5%。
+- **块式草稿消除了串行自回归开销。** 独立 0.6B 模型每轮要串行跑 3 次 decode 并维护双份 KV；DFlash 直接读取 target 的 5 层中间特征，一次 7-query 非因果前向就能提出 7 个候选 token。
+- **DSpark 靠 Markov 头进一步拉高接受率。** 块内 7 行从左到右依次叠加前一个采样 token 的 Markov 偏置，每轮接受 token 数比 DFlash 高 7–12%。在 C=32–64 下，针对 top-k 候选窗口裁剪的采样路径还省去了全词表 softmax 开销（在领先幅度中约占 2–6 个百分点）。
+- **高并发下收益收窄。** 并发升高后，target 验证步每行的计算成本上升；同时本引擎的 prefill 步会暂停 decode，在 C=32 时占了 DSpark 稳态窗口 31% 的时间。
+- **对比 vLLM 的 DSpark**（同权重、同型号 GPU，开发版 `372477d`，D48 开发集，全流程挂钟吞吐）：C=1–32 下比 vLLM 慢 7.6–7.9%；关闭投机时，nano 比 vLLM 快 1–5%。
 
 ## 新增了什么
 
-引擎现共 2,570 行。它从 9 月的版本发展而来，那一版用独立的 0.6B 模型当 draft（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）；这个 draft 现在作为基线留在分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft) 上，那是三种 draft 都在的最后一版。
-- **DFlash 块式 draft**：走 decode 路径，一次 7 个 query、非因果的注意力，读 target 的 5 层；每个被验证的位置都把上下文 K/V 写进 target 自己的块。12 个引擎文件，+434/−107。
-- **在它上面加 DSpark**：Markov head 让 7 行从左到右逐个抽，每行交给接受规则的就是它实际被抽样时用的分布。4 个引擎文件，+224/−12。
-- **CUDA graph**：verify、draft 块前向，以及 DSpark 的 7 步采样。
+当前引擎共 2,570 行。项目从 9 月份的 0.6B 独立小模型版本（[`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/results-batched-v1)）演进而来，独立小模型路线保留在基线分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)，`main` 分支聚焦块式投机解码：
+- **DFlash 块式 draft**：复用 decode 注意力路径，一次跑 7 个 query 的非因果注意力，读取 target 的 5 层辅助特征，并将所有被验证位置的上下文 K/V 直接写入与 target 共用的块表（12 个引擎文件，+434/−107）。
+- **DSpark 块内修正**：通过 Markov head 由左向右依次采样 7 行，并将每行加偏置后的实际采样分布交给接受规则（4 个引擎文件，+224/−12）。
+- **三段 CUDA Graph**：覆盖 target 验证前向、draft 块前向，以及 DSpark 的 7 步块内采样。
 
-关键代码：`SpeculativeDecoder.run_round`（一轮五步）、`DFlashDrafter.propose`、`_markov_rows` 和 `after_verify`、`Attention.forward` 的 decode 分支。
+核心代码：`SpeculativeDecoder.run_round`（一轮五步流水）、`DFlashDrafter.propose`、`_markov_rows` 与 `after_verify`，以及 `Attention.forward` 的 decode 分支。
 
 ## 正确性
 
-接受规则是标准的投机采样：u < min(1, p_target(x) / p_draft(x)) 时保留 draft x，否则从 normalize(max(p_target − p_draft, 0)) 重新采样，所以输出分布就是 target 的分布；DSpark 的 p_draft 是每行加过 Markov 偏置之后的分布。在 GPU 上检验过：采样器的多步输出分布（29 例）、DSpark 的块 logits 和 Markov 修正后的 logits 对 DeepSpec（相对误差 0.59–1.08%，门槛 2%）、verify 对逐步 decode 的 logits（最大差 0.84，门槛 3.0）、GSM8K 准确率（与不投机相差 −1.7 … +0.8 个百分点）。
+候选 token 按标准拒绝采样验证：$u < \min(1, p_{\text{target}}(x) / p_{\text{draft}}(x))$ 时接受 $x$，否则从 $\text{normalize}(\max(p_{\text{target}} - p_{\text{draft}}, 0))$ 残差分布重采样，输出分布严格等于 target 分布（DSpark 中 $p_{\text{draft}}$ 取每行叠加 Markov 偏置后的分布）。GPU 实测闸门覆盖：采样器多步输出分布（29 个用例）、DSpark 块输出与 Markov 修正后 logits 对比参考实现 DeepSpec（相对误差 0.59–1.08%，阈值 2%）、验证步 logits 对比逐步 decode（最大绝对差 0.84，阈值 3.0），以及 GSM8K 准确率（相对普通解码 −1.7 ~ +0.8 个百分点）。
 
 ## 踩过的坑
 
-- 输入已经是 fp32 时，`x.float()` 返回的是同一个张量，所以上游的 RMSNorm 在 fp32 下会改写自己的输入。bf16 不受影响；是拿 draft 在 fp32 下对 DeepSpec 时发现的。
-- torch.compile 默认的重编译上限是 8，超了以后新形状走未编译的路径，graph 对 eager 的逐位一致因此被打破，上限调到 64 才恢复。
-- 和 vLLM 公平地比，要把它的 draft 采样从 greedy 改成按分布抽，并让 DeepSpec 的 DFlash 权重走 vLLM 的 `dspark` 路径，那条路径的块布局才和这份权重对得上（vLLM `372477d`）。
+- 输入已经是 fp32 时，`x.float()` 返回原张量引用，导致上游 RMSNorm 在 fp32 下原地改写了输入。bf16 运行不受影响，该问题是在 fp32 下与 DeepSpec 对齐 draft 数值时暴露的。
+- `torch.compile` 默认重编译上限为 8，超出后新形状会回退到未编译路径，破坏了 CUDA Graph 与 eager 模式的逐位一致性；将上限调至 64 后恢复。
+- 对齐 vLLM 基线时，需将其 draft 采样从默认的 greedy 改为按概率分布采样，并让 DeepSpec 的 DFlash 权重走 vLLM 的 `dspark` 路径以匹配块布局（vLLM `372477d`）。
 
 ## 快速开始
 
