@@ -31,7 +31,7 @@
 
 口径：同一引擎与作业下相对普通解码的稳态吞吐比，在未接触过的 128 条确认集（K128b）上取 3 个 seed 的中位数。[波动范围、测量协议和闸门 →](docs/RESULTS.md)
 
-**对比独立小模型基线（Qwen3-0.6B，k=3，分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）**：在 K128 确认集上，独立 0.6B draft 在 C = 1 / 8 / 32 / 64 的吞吐倍数为 **1.54× / 1.21× / 0.96× / 0.82×**（每轮 2.49–2.53 个 token），C ≥ 32 时由于 3 步串行草稿和验证开销倒挂而慢于普通解码；DFlash 在同一确认集上为 **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×**（每轮 2.75–2.85 个 token），在所有并发下均为 0.6B 基线的 **1.29–1.56 倍**。[K128 详细对照 →](docs/v2/RESULTS.md)
+**对比独立小模型基线（Qwen3-0.6B，k=3，分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）**：在 K128 确认集上，独立 0.6B draft 在 C = 1 / 8 / 32 / 64 的吞吐倍数为 **1.54× / 1.21× / 0.96× / 0.82×**（每轮 2.49–2.53 个 token），C ≥ 32 时慢于普通解码；DFlash 在同一确认集上为 **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×**（每轮 2.75–2.85 个 token），在所有并发下均为 0.6B 基线的 **1.29–1.56 倍**。[K128 详细对照 →](docs/v2/RESULTS.md)
 
 ## 加速从哪来
 
@@ -93,7 +93,7 @@ finally:
     llm.exit()
 ```
 
-DSpark 和 DFlash 的 draft 每轮提出块大小（7）个 token，上下文 K/V 存在 target 的块里，所以不用设 `num_speculative_tokens`，也不用 draft 的 KV 预算；`draft_type` 必须和权重对得上。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；普通解码省略 `draft_model` 即可。0.6B draft 在分支 `baseline/qwen3-0.6b-draft` 上运行。
+DSpark 与 DFlash 每轮固定提出 7 个候选 token（由权重的块大小决定），上下文 K/V 直接存在 target 的块中，因此无需设置 `num_speculative_tokens` 或单独的 draft KV 预算；`draft_type` 需与权重匹配。用 DFlash 时传 `draft_model="/models/dflash_qwen3_8b_block7"` 和 `draft_type="dflash"`；普通解码省略 `draft_model` 即可。0.6B draft 在分支 `baseline/qwen3-0.6b-draft` 上运行。
 [模型配置与 API →](docs/DECODING.md)
 
 ## 复现
@@ -104,7 +104,7 @@ python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json
     --concurrency 8 --seed 17011 --commit <sha> --output result.json
 ```
 
-面板由 `tools/fetch_panels.py`（D48）和 `tools/build_panel_k128.py`（K128、K128b）生成；`tools/report_v2.py` 按 protocol 的判据出结论，`tools/gain_factors.py` 把一条线对另一条线的增益拆成几个因子，`tools/plot_speedup.py` 画上面那张图。所有表格背后的结果文件、闸门输出和面板都在 release 附件 [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 里。
+测试面板由 `tools/fetch_panels.py`（D48）和 `tools/build_panel_k128.py`（K128、K128b）构建；`tools/report_v2.py` 按测量协议输出判定结论，`tools/gain_factors.py` 拆解各因素对加速比的贡献，`tools/plot_speedup.py` 绘制首屏对比图。各表对应的原始结果 JSON、闸门输出与测试面板均已打包在 release 附件 [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 中。
 
 ## 深入了解
 
@@ -122,7 +122,7 @@ CPU 测试通过 [GitHub Actions](.github/workflows/cpu-tests.yml) 运行。
 
 ## 致谢
 
-基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)。这个仓库加的是：9 月发布的、用独立 draft 模型的批量投机解码，以及[新增了什么](#新增了什么)里列的全部内容。DFlash 的 draft 设计来自 [DFlash](https://github.com/z-lab/dflash)（[arXiv:2602.06036](https://arxiv.org/abs/2602.06036)），DSpark 来自 DeepSeek（[arXiv:2607.05147](https://arxiv.org/abs/2607.05147)）；两份权重，以及移植时逐项比对的参考实现，都来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)。模型用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)，kernel 用 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的 *Fast Inference from Transformers via Speculative Decoding*（2023）和 Chen 等人的 *Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
+基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 构建。DFlash 的块式草稿设计源自 [DFlash](https://github.com/z-lab/dflash)（[arXiv:2602.06036](https://arxiv.org/abs/2602.06036)），DSpark 源自 DeepSeek（[arXiv:2607.05147](https://arxiv.org/abs/2607.05147)）；两份 draft 权重及对齐验证所用的参考实现均来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)。基座模型使用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)，底层算子基于 [FlashAttention](https://github.com/Dao-AILab/flash-attention) 与 [Triton](https://github.com/triton-lang/triton)。采样算法参考 Leviathan 等人的 *Fast Inference from Transformers via Speculative Decoding*（2023）与 Chen 等人的 *Accelerating Large Language Model Decoding with Speculative Sampling*（2023）。
 [上游版本与项目历史 →](docs/UPSTREAM.md)
 
 ## 许可
