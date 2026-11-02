@@ -1,7 +1,7 @@
 <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 440' width='760' height='440' role='img'><title>Speedup over plain decoding, by concurrency</title><desc>Left panel (128-prompt set A): Qwen3-0.6B draft (k=3) reaches 1.54×, 1.21×, 0.96×, 0.82× at C=1, 8, 32, 64; DFlash block draft (k=7) reaches 2.19×, 1.80×, 1.40×, 1.08×. Right panel (128-prompt set B): DFlash reaches 2.00×, 1.68×, 1.31×, 1.01×; DSpark (k=7) reaches 2.10×, 1.78×, 1.43×, 1.15×.</desc>
 <rect width='760' height='440' fill='#1a1a19' rx='8'/>
 <text x='56.0' y='28.0' font-size='18' fill='#f0efec' text-anchor='start' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Speedup over plain decoding, by concurrency</text>
-<text x='56.0' y='48.0' font-size='12' fill='#c3c2b7' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition · median (bars) and range (whiskers) over 3 seeds</text>
+<text x='56.0' y='48.0' font-size='12' fill='#c3c2b7' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition (600 W) · median (bars) and range (whiskers) over 3 seeds</text>
 <rect x='56.0' y='64' width='12' height='12' rx='3' fill='#d95926'/>
 <text x='74.0' y='74.5' font-size='12' fill='#f0efec' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-0.6B draft, k = 3</text>
 <rect x='236.0' y='64' width='12' height='12' rx='3' fill='#3987e5'/>
@@ -10,9 +10,9 @@
 <text x='406.0' y='74.5' font-size='12' fill='#f0efec' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DSpark draft, k = 7</text>
 <line x1='540.0' y1='70' x2='556.0' y2='70' stroke='#898781' stroke-width='1.5'/>
 <text x='562.0' y='74.5' font-size='12' fill='#f0efec' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>plain decoding (1×)</text>
-<text x='218.0' y='100.0' font-size='12' fill='#f0efec' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Block draft vs 0.6B model draft</text>
+<text x='218.0' y='100.0' font-size='12' fill='#f0efec' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DFlash vs 0.6B draft</text>
 <text x='218.0' y='115.0' font-size='11' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>128 unseen prompts · confirmation set A</text>
-<text x='574.0' y='100.0' font-size='12' fill='#f0efec' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DSpark Markov head vs DFlash</text>
+<text x='574.0' y='100.0' font-size='12' fill='#f0efec' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DSpark vs DFlash</text>
 <text x='574.0' y='115.0' font-size='11' fill='#c3c2b7' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>128 unseen prompts · confirmation set B</text>
 <line x1='56' y1='380.0' x2='736' y2='380.0' stroke='#2c2c2a' stroke-width='1'/>
 <text x='48.0' y='384.0' font-size='11' fill='#c3c2b7' text-anchor='end' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>0×</text>
