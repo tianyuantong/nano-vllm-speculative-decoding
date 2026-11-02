@@ -14,6 +14,13 @@ DFlash in the same engine and jobs gives 1.94–2.06 / 1.68 / 1.31 / 1.01×, and
 
 K128b has K128's quotas (NIAH 43, code completion 40, open-book QA 37, creative writing 8), drawn from SPEED-Bench `throughput_1k` with a new salt; prompts used in D48 or K128 are excluded by question id and by prompt text. Categories are interleaved in proportion to their quotas, so creative writing is 6% of the first 48 prompts (used at C = 1 and 8), as in the whole panel; in K128 it was 17%.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/speedup-k128b-dark.svg">
+    <img alt="Speedup over plain decoding on the K128b panel, median and range over 3 seeds. DSpark draft: 2.08–2.20× at 1 concurrent request, 1.73–1.80× at 8, 1.43× at 32 and 1.15× at 64. DFlash draft: 1.94–2.06×, 1.68×, 1.31× and 1.01×." src="assets/speedup-k128b-light.svg" width="760">
+  </picture>
+</p>
+
 | C | DFlash (k = 7) | DSpark (k = 7) | DSpark over DFlash, per seed |
 |---:|---|---|---|
 | 1 | **1.94–2.06** | **2.08–2.20** | +4.4 … +8.1% |

@@ -14,8 +14,8 @@ Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm
 **English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Results](docs/RESULTS.md) · [Usage guide](docs/DECODING.md)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128b-dark.svg">
-  <img alt="Speedup over plain decoding on the K128b panel, median and range over 3 seeds. DSpark draft: 2.08–2.20× at 1 concurrent request, 1.73–1.80× at 8, 1.43× at 32 and 1.15× at 64. DFlash draft: 1.94–2.06×, 1.68×, 1.31× and 1.01×." src="docs/assets/speedup-k128b-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-overview-dark.svg">
+  <img alt="Speedup over plain decoding across two held-out 128-prompt confirmation sets (medians over 3 seeds). Left (block draft vs 0.6B draft): Qwen3-0.6B reaches 1.54×, 1.21×, 0.96×, 0.82× at C=1, 8, 32, 64; DFlash reaches 2.19×, 1.80×, 1.40×, 1.08×. Right (DSpark vs DFlash): DFlash reaches 2.00×, 1.68×, 1.31×, 1.01×; DSpark reaches 2.10×, 1.78×, 1.43×, 1.15×." src="docs/assets/speedup-overview-light.svg" width="760">
 </picture>
 
 </div>
@@ -29,16 +29,16 @@ Measured on Qwen3-8B and an RTX PRO 6000. Standard rejection sampling preserves 
 | 32 | 1.31× | 1.43× | 1.10 | 2.70 / 2.95 |
 | 64 | 1.01× | 1.15× | 1.14 | 2.65 / 2.93 |
 
-Steady-state tok/s relative to plain decoding in the same engine and job, on an unseen 128-prompt confirmation panel (K128b); table values are medians over 3 seeds per concurrency. [Ranges, protocol and gates →](docs/RESULTS.md)
+Steady-state tok/s relative to plain decoding in the same engine and job, on a held-out 128-prompt confirmation set; table values are medians over 3 seeds per concurrency (at C=64, DFlash is essentially level with plain decoding while DSpark stays faster). [Ranges, protocol and gates →](docs/RESULTS.md)
 
-**Against the separate-draft baseline** (Qwen3-0.6B, k=3, branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)): on the K128 confirmation panel, the standalone 0.6B draft drops below plain decoding from C = 32 (**1.54× / 1.21× / 0.96× / 0.82×** at C = 1 / 8 / 32 / 64, 2.49–2.53 tokens per round); DFlash on the same panel reaches **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×** (2.75–2.85 tokens per round), **1.29–1.56×** the 0.6B baseline at every concurrency. [K128 comparison →](docs/v2/RESULTS.md)
+**Against the separate-draft baseline** (Qwen3-0.6B, k=3, branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)): on an earlier held-out 128-prompt confirmation set, the standalone 0.6B draft drops below plain decoding from C = 32 (**1.54× / 1.21× / 0.96× / 0.82×** at C = 1 / 8 / 32 / 64, 2.49–2.53 tokens per round); DFlash on the same set reaches **2.11–2.24× / 1.75–1.85× / 1.32–1.40× / 1.08×** (2.75–2.85 tokens per round), **1.29–1.56×** the 0.6B baseline at every concurrency. [0.6B baseline comparison →](docs/v2/RESULTS.md)
 
 ## Where the speedup comes from
 
 - **Block drafting removes serial draft steps.** A standalone 0.6B draft runs 3 sequential decode steps per round and maintains its own KV cache; a block draft proposes all 7 tokens in a single forward pass.
 - **DSpark leads on acceptance.** Its Markov head raises tokens per round by 7–12% over DFlash. At C=32–64, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for an estimated 2–6 points of the lead).
 - **The gain shrinks with C.** Verification costs more per row at high concurrency, and prefill steps, which pause decoding in this engine, take 31% of DSpark's steady state at C=32.
-- **Against vLLM's DSpark** (same weights, same GPU model, dev build `372477d`, D48 panel, wall-clock): 7.6–7.9% behind at C=1–32. Without speculation, nano is 1–5% faster than vLLM.
+- **Against vLLM's DSpark** (same weights, same GPU model, dev build `372477d`, 48-prompt dev set, wall-clock): 7.6–7.9% behind at C=1–32. Without speculation, nano is 1–5% faster than vLLM.
 
 ## What this adds
 
@@ -110,8 +110,8 @@ The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k12
 
 | Document | What's inside |
 |---|---|
-| [Results](docs/RESULTS.md) | DSpark against DFlash on both panels, where the lead comes from, the vLLM comparison and the gates |
-| [DFlash results](docs/v2/RESULTS.md) | The DFlash port on K128: against the 0.6B draft, a round's phases and the prefill stall |
+| [Results](docs/RESULTS.md) | DSpark against DFlash, where the lead comes from, the vLLM comparison and the gates |
+| [DFlash results](docs/v2/RESULTS.md) | DFlash against the 0.6B draft, a round's phases and the prefill stall |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
 | [Tools](tools/README.md) | One line per measurement, gate and analysis script |
 | [September design](docs/design/batched-speculative-decoding.md) | The 0.6B-draft release: draft/target execution, KV state, batching and CUDA Graphs |
