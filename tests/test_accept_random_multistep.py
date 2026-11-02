@@ -1,4 +1,5 @@
-"""G2-multi: the output distribution of k drafts per round through the production sample() and accept_random().
+"""G2-multi: the output distribution of k drafts per round through the production sample() and accept_random(),
+and through accept_random_varlen() when each row verifies a length of its own.
 
 Each frozen Markov case of random_sampling_cases runs N independent rows round by round until they stop; the
 frequency of every output sequence must lie within a Hoeffding bound of the target's exact probability.
@@ -9,7 +10,7 @@ from collections import Counter
 import pytest
 import torch
 
-from nanovllm.layers.spec_sampler import accept_random, sample
+from nanovllm.layers.spec_sampler import accept_random, accept_random_varlen, sample
 from random_sampling_cases import CASES, K7_CASE, expected_distribution
 
 TRIALS, FAILURE_PROBABILITY = 100_000, 0.001
@@ -22,14 +23,17 @@ def frequency_bound(num_categories: int, num_trials: int, failure_probability: f
     return math.sqrt(math.log(2 * num_categories / failure_probability) / (2 * num_trials))
 
 
-def simulate_rounds(case: dict, num_drafts: int, num_trials: int, generator: torch.Generator,
-                    device: torch.device) -> tuple[list[tuple[int, ...]], float]:
-    """Rows of the case run round by round until each stops; returns their outputs and the acceptance rate.
+def simulate_rounds(case: dict, num_drafts: int, num_trials: int, generator: torch.Generator, device: torch.device,
+                    lengths_generator: torch.Generator | None = None) -> tuple[list[tuple[int, ...]], float]:
+    """Rows of the case run round by round until each stops; returns their outputs and the acceptance rate over
+    the verified drafts.
 
     Markov state: row 0 before any token, row x + 1 after token x. Draft i is sampled from q_rows at the state
     before it; p at position i uses that same state, and the bonus position the state after draft k.
     Tensors: p [n, k+1, V], q [n, k, V], drafts [n, k]. A round's output is the accepted drafts and the tail,
-    cut after EOS (inclusive) or at max_tokens, which also stops the row.
+    cut after EOS (inclusive) or at max_tokens, which also stops the row. With lengths_generator, every round
+    each row verifies 1..k+1 positions, drawn uniformly before its drafts and apart from them, through
+    accept_random_varlen on p's verified positions; without it, all k drafts through accept_random.
     """
     p_rows = torch.tensor(case["p_rows"], dtype=torch.float32, device=device)
     q_rows = torch.tensor(case["q_rows"], dtype=torch.float32, device=device)
@@ -40,16 +44,24 @@ def simulate_rounds(case: dict, num_drafts: int, num_trials: int, generator: tor
     accepted = proposed = 0
     while active:
         index = torch.tensor(active, device=device)
+        verified_lens = None if lengths_generator is None else torch.randint(
+            1, num_drafts + 2, (len(active),), generator=lengths_generator, device=device)
         states, drafts = [state[index]], []
         for _ in range(num_drafts):
             drafts.append(sample(q_rows[states[-1]], generator))
             states.append(drafts[-1] + 1)
         p = torch.stack([p_rows[s] for s in states], dim=1)
         q = torch.stack([q_rows[s] for s in states[:-1]], dim=1)
-        n_accept, tail = accept_random(p, q, torch.stack(drafts, dim=1), generator)
+        drafts = torch.stack(drafts, dim=1)
+        if verified_lens is None:
+            n_accept, tail = accept_random(p, q, drafts, generator)
+            proposed += len(active) * num_drafts
+        else:
+            verified = torch.arange(num_drafts + 1, device=device) < verified_lens.unsqueeze(1)
+            n_accept, tail = accept_random_varlen(p[verified], q, drafts, verified_lens, generator)
+            proposed += int(verified_lens.sum()) - len(active)
         accepted += int(n_accept.sum())
-        proposed += len(active) * num_drafts
-        rounds = torch.cat([torch.stack(drafts, dim=1), tail[:, None]], dim=1).tolist()
+        rounds = torch.cat([drafts, tail[:, None]], dim=1).tolist()
         still_active = []
         for row, tokens, count in zip(active, rounds, n_accept.tolist()):
             for token in tokens[:count] + [tokens[num_drafts]]:
@@ -94,4 +106,28 @@ def test_self_check_q_equals_p(case, num_drafts, device):
 def test_gate(case, num_drafts, device):
     generator = torch.Generator(device=device).manual_seed(17011)
     outputs, _ = simulate_rounds(case, num_drafts, TRIALS, generator, torch.device(device))
+    assert_matches_target(case, outputs)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("case, num_drafts", [(case, 3) for case in MULTISTEP] + [(K7_CASE, 7)],
+                         ids=lambda value: value["name"] if isinstance(value, dict) else f"k{value}")
+def test_self_check_varlen_q_equals_p(case, num_drafts, device):
+    """A perfect draft with lengths of their own: every verified draft is accepted. A failure here is in this test."""
+    perfect = {**case, "q_rows": case["p_rows"]}
+    generator = torch.Generator(device=device).manual_seed(7)
+    lengths_generator = torch.Generator(device=device).manual_seed(8)
+    outputs, acceptance = simulate_rounds(perfect, num_drafts, TRIALS, generator, torch.device(device),
+                                          lengths_generator)
+    assert acceptance == 1.0
+    assert_matches_target(perfect, outputs)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("case, num_drafts", [(case, k) for case in MULTISTEP for k in (2, 3)] + [(K7_CASE, 7)],
+                         ids=lambda value: value["name"] if isinstance(value, dict) else f"k{value}")
+def test_gate_varlen(case, num_drafts, device):
+    generator = torch.Generator(device=device).manual_seed(17011)
+    lengths_generator = torch.Generator(device=device).manual_seed(110017)
+    outputs, _ = simulate_rounds(case, num_drafts, TRIALS, generator, torch.device(device), lengths_generator)
     assert_matches_target(case, outputs)
