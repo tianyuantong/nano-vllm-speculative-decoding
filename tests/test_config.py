@@ -93,6 +93,17 @@ def test_variable_length_needs_dsparks_confidence_head(model_dir, dflash_dir, ds
         Config(model_dir, variable_length=True)                                     # no draft
 
 
+def test_recording_confidences_needs_dsparks_confidence_head(model_dir, dspark_dir, tmp_path):
+    kwargs = dict(enable_prefix_cache=False, kv_cache_memory_bytes=1 << 20, enforce_eager=True, record_confidences=True)
+    with_head = block_draft_dir(tmp_path, "dspark_head", markov_rank=8, markov_head_type="vanilla",
+                                enable_confidence_head=True)
+    assert Config(model_dir, draft_model=with_head, draft_type="dspark", **kwargs).record_confidences
+    with pytest.raises(ValueError):
+        Config(model_dir, draft_model=dspark_dir, draft_type="dspark", **kwargs)     # no confidence head
+    with pytest.raises(ValueError):
+        Config(model_dir, record_confidences=True)                                  # no draft
+
+
 def test_a_verify_schedule_needs_variable_length_and_a_file(model_dir, tmp_path):
     draft = block_draft_dir(tmp_path, "dspark_head", markov_rank=8, markov_head_type="vanilla",
                             enable_confidence_head=True)

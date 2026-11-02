@@ -48,13 +48,14 @@ def test_add_request_still_checks_the_length_budget():
 
 def test_start_measurement_clears_timings_stats_and_steps():
     resets = []
-    speculative = SimpleNamespace(stats=Counter(rounds=3), reset_phase_timings=lambda: resets.append(1))
+    speculative = SimpleNamespace(stats=Counter(rounds=3), confidence_log=[{"logits": [[0.0]], "accepted": [0]}],
+                                  reset_phase_timings=lambda: resets.append(1))
     engine = make_engine(speculative=speculative, num_steps=7)
     for _ in range(2):
         engine.step_timer.end(engine.step_timer.begin(), "round", 1, 2)
     engine.start_measurement()
     assert engine.step_timer.timings() == []
-    assert engine.num_steps == 0 and not speculative.stats and len(resets) == 1
+    assert engine.num_steps == 0 and not speculative.stats and not speculative.confidence_log and len(resets) == 1
 
 
 def test_start_measurement_without_a_draft():
