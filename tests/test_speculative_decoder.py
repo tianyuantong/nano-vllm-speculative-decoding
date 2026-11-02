@@ -67,7 +67,7 @@ class FakeDrafter:
     def __init__(self, config, decoder):
         self.decoder = decoder
 
-    def propose(self, seqs, sampling):
+    def propose(self, seqs, sampling, with_confidence=False):
         rows = []
         for seq in seqs:
             token, row = seq.last_token, []
@@ -77,8 +77,8 @@ class FakeDrafter:
             rows.append(row)
         drafts = torch.tensor(rows)
         if sampling.temperatures is None:
-            return drafts, None
-        return drafts, probs_from_logits(peaked(drafts), sampling)
+            return drafts, None, None
+        return drafts, probs_from_logits(peaked(drafts), sampling), None
 
     def after_verify(self, seqs, aux):
         pass

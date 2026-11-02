@@ -8,6 +8,7 @@ import os
 import sys
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +20,7 @@ import gpu_import_stubs  # noqa: F401  (before the engine imports)
 from nanovllm.layers import attention
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.models import qwen3
-from nanovllm.models.dflash import DFlashDraftModel, MarkovHead
+from nanovllm.models.dflash import ConfidenceHead, DFlashDraftModel, MarkovHead
 from nanovllm.utils.context import reset_context, set_context
 from nanovllm.utils.loader import load_model
 
@@ -90,6 +91,31 @@ def test_markov_head_matches_deepspec():
     ours.markov_w2.weight.data.copy_(reference.markov_w2.weight.data)
     prev = torch.tensor([0, 5, 63, 5])
     assert torch.equal(ours(prev), reference.compute_step_bias(prev, None))
+
+
+@pytest.mark.skipif(not os.environ.get("DEEPSPEC_DIR"), reason="needs DEEPSPEC_DIR")
+@pytest.mark.parametrize("with_markov", [True, False])
+def test_confidence_logits_match_deepspec(with_markov):
+    # DeepSpec's own predict_confidence_step on a stand-in model that has only the attributes it reads.
+    sys.path.insert(0, os.environ["DEEPSPEC_DIR"])
+    from deepspec.modeling.dspark.common import AcceptRatePredictor
+    from deepspec.modeling.dspark.markov_head import VanillaMarkov
+    from deepspec.modeling.dspark.qwen3 import Qwen3DSparkModel
+
+    torch.manual_seed(0)
+    hidden_size, rank, vocab_size = 16, 8, 64
+    markov_width = rank if with_markov else 0
+    reference = SimpleNamespace(confidence_head=AcceptRatePredictor(hidden_size + markov_width),
+                                confidence_head_with_markov=with_markov,
+                                markov_head=VanillaMarkov(vocab_size=vocab_size, markov_rank=rank))
+    ours = SimpleNamespace(confidence_head=ConfidenceHead(hidden_size, markov_width),
+                           markov_head=MarkovHead(vocab_size=vocab_size, rank=rank))
+    ours.confidence_head.proj.weight.data.copy_(reference.confidence_head.proj.weight.data)
+    ours.confidence_head.proj.bias.data.copy_(reference.confidence_head.proj.bias.data)
+    ours.markov_head.markov_w1.weight.data.copy_(reference.markov_head.markov_w1.weight.data)
+    hidden, prev = torch.randn(3, 7, hidden_size), torch.randint(vocab_size, (3, 7))
+    expected = Qwen3DSparkModel.predict_confidence_step(reference, hidden, prev_token_ids=prev)
+    assert torch.equal(DFlashDraftModel.confidence_logits(ours, hidden, prev), expected)
 
 
 # ---------------------------------------------------------------- against DeepSpec, with real weights

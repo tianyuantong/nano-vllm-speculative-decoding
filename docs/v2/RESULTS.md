@@ -25,13 +25,6 @@ One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.
 - All three lines of that group take their values from the rerun: DFlash 2.19, and the 0.6B line 1.567 against 1.566 in the first run.
 - All 48 requests of all three lines produced the same tokens as the first run.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="../assets/speedup-k128-dark.svg">
-    <img alt="Steady-state throughput relative to plain decoding on K128: DFlash (k=7) reaches 2.11–2.24x at C=1, 1.75–1.85x at C=8, 1.32–1.40x at C=32 and 1.08x at C=64; 0.6B draft (k=3) reaches 1.54x, 1.21x, 0.96x and 0.82x" src="../assets/speedup-k128-light.svg" width="760">
-  </picture>
-</p>
-
 | C | 0.6B draft (k = 3) | DFlash (k = 7) | DFlash ÷ 0.6B |
 |---:|---|---|---|
 | 1 | **1.54 (1.54–1.57)** | **2.11–2.24** | 1.37–1.45 |
