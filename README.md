@@ -1,69 +1,77 @@
 <div align="center">
 
-# nano-vllm-speculative-decoding
+# nano-vllm-speculative-decoding · 0.6B Standalone Draft Baseline
 
-Speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): a separate draft model, the DFlash block draft, and DSpark's Markov-corrected blocks.
+Batched speculative decoding with a standalone draft model (Qwen3-0.6B) for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm).
 
-**2.10× at C=1 · 1.78× at C=8 · 1.43× at C=32 · 1.15× at C=64**
+**Single-request 1.54× · 8 concurrent 1.21× · 32 concurrent 0.96× · 64 concurrent 0.82×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-**English** | [简体中文](README.zh.md) · [Quick start](#usage) · [Results](docs/RESULTS.md) · [Design](docs/design/batched-speculative-decoding.md)
+**English** | [简体中文](README.zh.md) · [Quick start](#quick-start) · [Full results](docs/v2/RESULTS.md) · [Design](docs/design/batched-speculative-decoding.md) · [Main branch (DFlash / DSpark) →](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-k128b-dark.svg">
-  <img alt="Speedup over plain decoding on the K128b panel, median and range over 3 seeds. DSpark draft: 2.08–2.20× at 1 concurrent request, 1.73–1.80× at 8, 1.43× at 32 and 1.15× at 64. DFlash draft: 1.94–2.06×, 1.68×, 1.31× and 1.01×." src="docs/assets/speedup-k128b-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-06b-k128-dark.svg">
+  <img alt="Steady-state throughput speedup of the Qwen3-0.6B standalone draft (k=3) over plain decoding. Left (128-prompt confirmation set K128, 3-seed medians): 1.54×, 1.21×, 0.96×, 0.82× at 1, 8, 32, 64 concurrent requests. Right (48-prompt crossover curve D48, 5-seed medians): 1.47×, 1.42×, 1.32×, 1.17×, 1.03×, 0.94×, 0.79× at 1, 2, 4, 8, 16, 32, 64 concurrent requests." src="docs/assets/speedup-06b-k128-light.svg" width="760">
 </picture>
 
 </div>
 
-DSpark draft on Qwen3-8B, RTX PRO 6000. Lossless in distribution by the acceptance rule, with the sampler, the drafts' distributions and the logits checked; GSM8K accuracy within −1.7…+0.8 pt.
+> **Branch note**: This branch (`baseline/qwen3-0.6b-draft`) preserves the Stage 1 **Qwen3-0.6B standalone draft** implementation, dual-model KV scheduler, and baseline benchmarks. The subsequent **DFlash parallel block draft and DSpark** implementations (2.10× single-request, 1.15× at 64 concurrent requests) live on [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main).
 
-| C | DFlash (k=7) | DSpark (k=7) | DSpark ÷ DFlash | tokens per round (DFlash / DSpark) |
+Measured on Qwen3-8B (target) + Qwen3-0.6B (draft, k=3) on a single RTX PRO 6000 (600 W), with standard rejection sampling preserving the target model's output distribution.
+
+| Concurrent requests | 0.6B draft (k=3) | 3-seed range | Tokens / round | vs Plain decoding |
 |---:|---|---|---|---|
-| 1 | 2.00× | 2.10× | 1.07 | 2.59 / 2.82 |
-| 8 | 1.68× | 1.78× | 1.06 | 2.53 / 2.81 |
-| 32 | 1.31× | 1.43× | 1.10 | 2.70 / 2.95 |
-| 64 | 1.01× | 1.15× | 1.14 | 2.65 / 2.93 |
+| 1 | **1.54×** | 1.54–1.57× | 2.52 | Faster |
+| 8 | **1.21×** | 1.19–1.21× | 2.49 | Faster |
+| 32 | 0.96× | 0.95–0.96× | 2.53 | Overtaken by verification cost |
+| 64 | 0.82× | 0.81–0.82× | 2.53 | Overtaken by verification cost |
 
-Measured: steady-state tok/s against plain decoding in the same engine and job, on an unseen 128-prompt panel. Table values are medians over 3 seeds per concurrency, rounded to two decimals. [Ranges, protocol and gates →](docs/RESULTS.md)
+Values are steady-state throughput multiples over plain decoding in the same job on the 128-prompt held-out test set (`K128`, left panel, medians over 3 seeds). The right panel shows the full decay curve across 1 / 2 / 4 / 8 / 16 / 32 / 64 concurrent requests on the 48-prompt development set (`D48`, medians over 5 seeds: **1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**), placing the break-even point between 16 and 32 concurrent requests. [K128 comparison details →](docs/v2/RESULTS.md) · [September v1 report →](docs/v1/RESULTS.md)
 
-## Where the speedup comes from
+## Performance breakdown and bottlenecks (why we moved to block drafting)
 
-- **DSpark leads on acceptance.** Its Markov head raises tokens per round by 7–12% over DFlash. At C=32–64, an estimated 2–6 points of the lead come from DSpark's cheaper sampling path instead.
-- **The gain shrinks with C.** Verification costs more per row at high concurrency, and prefill steps, which pause decoding in this engine, take 31% of DSpark's steady state at C=32.
-- **Against vLLM's DSpark** (same weights, same GPU model, dev build `372477d`, dev panel, wall-clock): 7.6–7.9% behind at C=1–32. Without speculation, nano is 1–5% faster than vLLM.
+- **Serial autoregressive drafting takes over a third of each round.** Although reading Qwen3-0.6B's 1.2 GB of weights takes only 0.7 ms at peak bandwidth, launching ~300 kernels across its 28 layers costs 2.1–3.6 ms per step. Running k=3 serial draft steps plus the catch-up step takes 6–13 ms out of a 19–31 ms round, making larger k unprofitable.
+- **Verification compute overtakes draft savings at high concurrency.** The target model scores k+1 positions per request in one forward pass; as concurrency rises, verification cost grows linearly, reaching break-even near 16 concurrent requests (1.03×, range 0.99–1.04×) and falling below 1× from 32 concurrent requests onward (0.94–0.96×).
+- **Motivation for Stage 2 block drafting (`main` branch).** Eliminating serial draft steps and dual KV caches with a 5-layer non-causal block draft (DFlash / DSpark) proposes 7 tokens in a single forward pass and raises speedups on the same `K128` panel to **2.19× / 1.80× / 1.40× / 1.08×** (1.31–1.48× faster than this 0.6B baseline).
 
-## What this adds
+## Core implementation
 
-On top of the 0.6B-draft release; the engine is now 2,839 lines.
-- **A DFlash block draft**: one 7-query, non-causal pass through the decode path, reading 5 target layers, with context K/V written for every verified position in the target's own blocks. 12 engine files, +434/−107.
-- **DSpark on top of it**: a Markov head draws the 7 rows left to right, and each row hands the acceptance rule the distribution it was drawn from. 4 engine files, +224/−12.
-- **CUDA graphs** for verification, the draft block and DSpark's 7 sampling steps.
+This branch integrates standalone-model drafting, single-pass target verification, and batched GPU rejection sampling into nano-vLLM's decoding loop:
 
-Key code: `SpeculativeDecoder.run_round` (the five steps of a round), `DFlashDrafter.propose`, `_markov_rows` and `after_verify`, and the decode branch of `Attention.forward`.
+- **Dual-model execution and independent KV management**: the scheduler manages separate block tables and memory pools for the target and draft models (`kv_cache_memory_bytes` and `draft_kv_cache_memory_bytes`), keeping both KV states synchronized across prefill, token acceptance, rejection rollback, and sequence completion ([`nanovllm/engine/scheduler.py`](nanovllm/engine/scheduler.py)).
+- **Fixed-length CUDA Graph verification**: fixed-length drafts (k=3) and padded batch shapes allow both target verification and draft steps to reuse captured CUDA Graphs across rounds ([`nanovllm/engine/speculative.py`](nanovllm/engine/speculative.py)).
+- **Vectorized GPU rejection sampling**: proposal probabilities, target ratios, and residual resampling stay entirely on the GPU via `SpecSampler`, copying results to the CPU once per round in 0.03–0.5 ms ([`nanovllm/layers/spec_sampler.py`](nanovllm/layers/spec_sampler.py)).
 
-## Correctness
+```mermaid
+flowchart LR
+    D["0.6B serial draft (k steps)"] --> V["8B single-pass verify (k+1 pos)"]
+    V --> A["Batched GPU rejection sampling"]
+    A --> C["Sync & rollback dual KV states"]
+```
 
-Drafts are accepted by the standard rule: keep draft x when u < min(1, p_target(x) / p_draft(x)), otherwise resample from normalize(max(p_target − p_draft, 0)), so the output distribution is the target's; for DSpark, p_draft is each row's distribution after its Markov bias. Checked on the GPU: the sampler's multi-step output distribution (29 cases), DSpark's block and Markov-corrected logits against DeepSpec (relative error 0.59–1.08%, bound 2%), verification logits against step-by-step decoding (worst gap 0.84 against a bound of 3.0), and GSM8K accuracy (−1.7…+0.8 pt against plain decoding).
+## Correctness verification
 
-## Pitfalls we hit
+Candidates are verified via standard rejection sampling: accept $x$ when $u \lt \min(1, p_{\text{target}}(x) / p_{\text{draft}}(x))$, otherwise resample from $\text{normalize}(\max(p_{\text{target}} - p_{\text{draft}}, 0))$, guaranteeing the exact target output distribution.
 
-- `x.float()` returns the same tensor when `x` is already fp32, so the upstream RMSNorm overwrote its input in fp32 runs. bf16 runs were unaffected; it surfaced when the draft was checked against DeepSpec in fp32.
-- torch.compile's default recompile limit (8) sent new shapes to the uncompiled path, which broke graph-against-eager bit identity until the limit was raised to 64.
-- A fair vLLM baseline needed its draft sampling switched from greedy to probabilistic, and DeepSpec's DFlash checkpoint run through vLLM's `dspark` path, whose block layout matches it (vLLM `372477d`).
+Verified on GPU across four checks:
+- Multi-step sampler output distribution (29 test cases, total variation distance ≤ 0.0031)
+- Acceptance rate and residual frequency on real model distributions (0.453 observed vs 0.456 analytic acceptance rate, 0.0008 max frequency gap)
+- Verification logits against step-by-step decoding (0.75 max absolute difference, identical argmax at all decided positions)
+- GSM8K math reasoning accuracy (85.6% vs 85.2% plain decoding, +0.4 pt difference, 95% CI −0.8 to +1.6 pt)
 
-## Usage
+## Quick start
 
-Python 3.10–3.12 and a CUDA GPU with room for both models and their KV caches.
+Requires Python 3.10–3.12 and a CUDA GPU with enough memory for Qwen3-8B, Qwen3-0.6B, and both KV caches.
 
 ```bash
-git clone https://github.com/tianyuantong/nano-vllm-speculative-decoding.git
+git clone -b baseline/qwen3-0.6b-draft https://github.com/tianyuantong/nano-vllm-speculative-decoding.git
 cd nano-vllm-speculative-decoding
-pip install torch triton flash-attn "transformers>=4.51" xxhash
+pip install torch triton flash-attn "transformers>=4.51" xxhash pytest
 python -m pip install -e . --no-deps
 ```
 
@@ -74,11 +82,12 @@ from nanovllm import LLM, SamplingParams
 
 llm = LLM(
     "/models/Qwen3-8B",
-    draft_model="/models/dspark_qwen3_8b_block7",    # deepseek-ai/dspark_qwen3_8b_block7
-    draft_type="dspark",
+    draft_model="/models/Qwen3-0.6B",
+    num_speculative_tokens=3,
     max_num_seqs=8,
     enable_prefix_cache=False,
     kv_cache_memory_bytes=10 << 30,
+    draft_kv_cache_memory_bytes=6 << 30,
     seed=0,
 )
 params = SamplingParams(temperature=0.7, top_k=20, top_p=0.8, max_tokens=256)
@@ -90,36 +99,43 @@ finally:
     llm.exit()
 ```
 
-A DSpark or DFlash draft proposes its block size (7) per round and keeps its context K/V in the target's blocks, so it needs no `num_speculative_tokens` or draft KV budget; `draft_type` must match the checkpoint. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for the 0.6B draft, `draft_model="/models/Qwen3-0.6B"`, `num_speculative_tokens=3` and `draft_kv_cache_memory_bytes`; for plain decoding, leave out `draft_model`.
+Omit `draft_model` and `num_speculative_tokens` for plain decoding.
 [Model configuration and API →](docs/DECODING.md)
 
 ## Reproduce
 
+Build the prompt panels first, then run plain decoding (`k0`) and the 0.6B speculative line (`model_k3`) across concurrencies and seeds in one directory:
+
 ```bash
-python -m pytest -q    # CPU tests: 220 pass in about 6 s
-python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json --panel K128b --line dspark_k7 \
-    --concurrency 8 --seed 17011 --commit <sha> --output result.json
+python -m pytest -q    # CPU tests
+python tools/fetch_panels.py && python tools/build_panel_k128.py
+for c in 1 8 32 64; do
+  for s in 17011 110017 130031; do
+    for line in k0 model_k3; do
+      python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.json --panel K128 \
+          --line "$line" --concurrency "$c" --seed "$s" --models-root /path/to/models \
+          --commit "$(git rev-parse --short HEAD)" --output "runs/${line}_c${c}_s${s}.json"
+    done
+  done
+done
+python tools/report_v2.py --protocol benchmarks/protocol-v2.json --results runs
 ```
 
-The panels are built by `tools/fetch_panels.py` (D48) and `tools/build_panel_k128.py` (K128, K128b); `tools/report_v2.py` applies the protocol's verdicts, `tools/gain_factors.py` splits one line's gain over another into its factors, and `tools/plot_speedup.py` draws the figure above. The result files behind every table, with the gates' outputs and the panels, are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark).
+Raw result JSONs and prompt panels are packaged in the release assets [`results-batched-v1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-batched-v1) and [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark).
 
 ## Explore the project
 
-| Document | What's inside |
+| Document | Contents |
 |---|---|
-| [Results](docs/RESULTS.md) | DSpark against DFlash on both panels, where the lead comes from, the vLLM comparison and the gates |
-| [DFlash results](docs/v2/RESULTS.md) | The DFlash port on K128: against the 0.6B draft, a round's phases and the prefill stall |
-| [Design](docs/design/batched-speculative-decoding.md) | Draft/target execution, KV state, batching and CUDA Graphs |
+| [Architecture & design](docs/design/batched-speculative-decoding.md) | Dual-model execution, KV state management, batching and CUDA Graphs |
+| [K128 results & DFlash comparison](docs/v2/RESULTS.md) | 0.6B vs DFlash, per-round phase timings and correctness checks |
+| [September v1 results](docs/v1/RESULTS.md) | Batch-size scaling, sampling comparisons, phase timings and repeatability |
+| [Optimization history](docs/PERFORMANCE.md) | Profiling the initial implementation and the bottlenecks behind the rewrite |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
-| [Tools](tools/README.md) | One line per measurement, gate and analysis script |
-| [September results](docs/v1/RESULTS.md) | The 0.6B-draft release: batch-size comparisons, phase timings, repeatability |
-| [Optimization history](docs/PERFORMANCE.md) | Profiling the first implementation and the bottlenecks behind the rewrite |
-
-CPU tests run in [GitHub Actions](.github/workflows/cpu-tests.yml).
 
 ## Acknowledgments
 
-Built on [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm). This repository adds batched speculative decoding with a separate draft model, released in September, and everything under [What this adds](#what-this-adds). The DFlash draft design is from [DFlash](https://github.com/z-lab/dflash) ([arXiv:2602.06036](https://arxiv.org/abs/2602.06036)), and DSpark from DeepSeek ([arXiv:2607.05147](https://arxiv.org/abs/2607.05147)); both checkpoints, and the reference implementation the port is checked against, are from [DeepSpec](https://github.com/deepseek-ai/DeepSpec). Models: [Qwen3](https://huggingface.co/Qwen/Qwen3-8B); kernels: [FlashAttention](https://github.com/Dao-AILab/flash-attention) and [Triton](https://github.com/triton-lang/triton). The sampling algorithm follows Leviathan et al., *Fast Inference from Transformers via Speculative Decoding* (2023), and Chen et al., *Accelerating Large Language Model Decoding with Speculative Sampling* (2023).
+Built on [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm), using [Qwen3](https://huggingface.co/Qwen/Qwen3-8B), [FlashAttention](https://github.com/Dao-AILab/flash-attention) and [Triton](https://github.com/triton-lang/triton). The sampling algorithm follows Leviathan et al., *Fast Inference from Transformers via Speculative Decoding* (2023), and Chen et al., *Accelerating Large Language Model Decoding with Speculative Sampling* (2023).
 [Upstream history →](docs/UPSTREAM.md)
 
 ## License
