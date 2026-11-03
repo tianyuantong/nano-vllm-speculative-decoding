@@ -72,8 +72,8 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
         seen["q"], seen["sampling"] = draft_probs[0, 0], sampling_tensors
         return drafts, draft_probs, confidence
 
-    def verify_and_keep(seqs, drafts, aux_out=None):
-        logits = verify(seqs, drafts, aux_out)
+    def verify_and_keep(seqs, drafts, aux_out=None, verified_lens=None):
+        logits = verify(seqs, drafts, aux_out, verified_lens)
         seen["p"] = probs_from_logits(logits, seen["sampling"])[0, 0]
         return logits
 

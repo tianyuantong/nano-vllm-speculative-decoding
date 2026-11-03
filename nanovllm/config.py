@@ -24,6 +24,9 @@ class Config:
     draft_model: str | None = None            # enables speculative decoding
     draft_type: str = "dflash"                # one of BLOCK_DRAFTS; the draft's KV mirrors the target's blocks
     num_speculative_tokens: int = 0           # k: drafts proposed per round, the draft's block size; 0 without a draft
+    variable_length: bool = False             # DSpark's variable-length verification: each row verifies a length of its own
+    verify_schedule: str | None = None        # frozen verify-schedule JSON that picks the lengths; without it, every
+                                              # variable-length round must be given them
     seed: int | None = None                  # seed of the engine's sampling generator
     record_step_timings: bool = False         # record a pair of CUDA events per engine step
 
@@ -36,8 +39,8 @@ class Config:
                 raise ValueError("kv_cache_memory_bytes must be a positive integer")
         if self.draft_model is not None:
             self._validate_speculative()
-        elif self.num_speculative_tokens != 0:
-            raise ValueError("num_speculative_tokens requires draft_model")
+        elif self.num_speculative_tokens != 0 or self.variable_length or self.verify_schedule is not None:
+            raise ValueError("num_speculative_tokens, variable_length and verify_schedule require draft_model")
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
 
@@ -53,6 +56,12 @@ class Config:
                              "DFlash has no Markov head, DSpark has one")
         if markov_rank > 0 and draft_config.markov_head_type != "vanilla":
             raise ValueError(f"only DSpark's vanilla Markov head is implemented, not {draft_config.markov_head_type!r}")
+        if self.variable_length and not getattr(draft_config, "enable_confidence_head", False):
+            raise ValueError("variable_length needs a DSpark checkpoint with a confidence head")
+        if self.verify_schedule is not None and not self.variable_length:
+            raise ValueError("verify_schedule requires variable_length")
+        if self.verify_schedule is not None and not os.path.isfile(self.verify_schedule):
+            raise ValueError(f"verify_schedule is not a file: {self.verify_schedule}")
         block_size = draft_config.block_size
         if self.num_speculative_tokens not in (0, block_size):
             raise ValueError(f"a block draft proposes its block size ({block_size}) tokens per round")

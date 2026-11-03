@@ -107,14 +107,14 @@ class FakeDFlash:
 
 
 class Decoder(SpeculativeDecoder):
-    def run_round(self, seqs):
+    def run_round(self, seqs, verified_lens=None):
         self.current_seqs = seqs
-        return super().run_round(seqs)
+        return super().run_round(seqs, verified_lens)
 
 
 def make_decoder(is_right):
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=512,
-                             hf_config=SimpleNamespace(vocab_size=VOCAB))
+                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None)
     target = FakeTarget()
     with mock.patch.object(speculative, "DFlashDrafter", lambda config, decoder: None):    # it would load a checkpoint
         decoder = Decoder(target, config)
@@ -183,6 +183,19 @@ def test_context_reads_come_from_committed_tokens_over_random_rounds():
     prefill(decoder, target, seqs)
     for _ in range(20):
         commit(seqs, decoder.run_round(seqs))
+    assert draft.context_reads > 1000 and not draft.bad_reads
+    assert all(seq.token_ids == [right(position) for position in range(len(seq))] for seq in seqs)
+
+
+def test_context_reads_come_from_committed_tokens_with_lengths_of_their_own():
+    # Each round every row verifies 1..k+1 positions, so the context K/V is written at the verified ones only; the
+    # block K/V left at the others must be overwritten before any block reads them.
+    rng = random.Random(130031)
+    decoder, target, draft = make_decoder(lambda position: rng.random() < 0.6)
+    seqs = [new_sequence(3 + index, first_block=100 * index) for index in range(10)]
+    prefill(decoder, target, seqs)
+    for _ in range(20):
+        commit(seqs, decoder.run_round(seqs, verified_lens=[rng.randint(1, K + 1) for _ in seqs]))
     assert draft.context_reads > 1000 and not draft.bad_reads
     assert all(seq.token_ids == [right(position) for position in range(len(seq))] for seq in seqs)
 
