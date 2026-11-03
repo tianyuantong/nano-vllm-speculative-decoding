@@ -25,7 +25,7 @@ def make_drafter(k: int, bias: torch.Tensor = BIAS) -> DFlashDrafter:
     """A drafter whose Markov head looks the bias up by previous token and whose hidden states are its logits."""
     config = SimpleNamespace(num_speculative_tokens=k, kvcache_block_size=256, max_model_len=64,
                              hf_config=SimpleNamespace(vocab_size=bias.shape[1]), variable_length=False,
-                             verify_schedule=None)
+                             verify_schedule=None, record_confidences=False)
     target = SimpleNamespace(device=CPU, generator=torch.Generator().manual_seed(0))
     with mock.patch.object(speculative, "DFlashDrafter", lambda config, decoder: None):    # it would load a checkpoint
         decoder = SpeculativeDecoder(target, config)

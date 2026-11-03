@@ -89,7 +89,8 @@ class FakeDrafter:
 def make_decoder():
     target = FakeRunner(target_rule)
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=64,
-                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None)
+                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None,
+                             record_confidences=False)
     with mock.patch.object(speculative, "DFlashDrafter", FakeDrafter):    # the real one loads a checkpoint
         decoder = SpeculativeDecoder(target, config)
     return decoder, target, decoder.drafter
@@ -205,6 +206,16 @@ def test_a_variable_length_round_takes_its_lengths_from_the_schedule():
     second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=0)
     assert decoder.run_round([first, second]) == [[12, 13], [5, 6]] and shapes == [(2, K)]
     assert [phase["phase"] for phase in decoder.phase_timings()][:2] == ["propose", "schedule"]
+
+
+def test_a_recording_round_keeps_its_confidences_and_accepted_counts():
+    # Fixed length: the first row accepts all three drafts, the second one of 5, 0, 1.
+    decoder, target, drafter = make_decoder()
+    decoder.record_confidences = True
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=0)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=0)
+    decoder.run_round([first, second])
+    assert decoder.confidence_log == [{"logits": [[0.0] * K, [0.0] * K], "accepted": [3, 1]}]
 
 
 def test_round_entry_invariants_are_asserted():

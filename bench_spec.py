@@ -23,6 +23,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "bench-v2"
+CONFIDENCE_SCHEMA = "confidence-log-v1"
 RESULT_KEYS = ("schema", "protocol_sha256", "manifest", "gpu_state_start", "gpu_state_end", "config",
                "wall_seconds", "steps", "phases", "requests", "speculative_stats")
 QUERY_FIELDS = ("name", "power.limit", "clocks.max.sm", "clocks.max.memory",
@@ -75,7 +76,7 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
                   models_root: str) -> tuple[str, str | None, dict]:
     """Target directory, draft directory and LLM keyword arguments of one protocol line. Every line gets the target
     KV budget of the largest k; a block draft's KV mirrors the target's blocks. The protocol names block drafts by
-    their draft_type (dflash, dspark)."""
+    their draft_type (dflash, dspark); a variable-length line (v2.2) verifies by the protocol's frozen schedule."""
     max_tokens = protocol["sampling"]["max_tokens"]
     budget_k = max(spec["k"] for spec in protocol["lines"].values())
     target = f"{models_root}/{protocol['models']['target']}"
@@ -87,6 +88,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
     if line["drafter"] is not None:
         draft = f"{models_root}/{protocol['models']['drafts'][line['drafter']]}"
         kwargs.update(draft_model=draft, num_speculative_tokens=line["k"], draft_type=line["drafter"])
+        if line.get("variable_length"):
+            kwargs.update(variable_length=True, verify_schedule=str(ROOT / protocol["verify_schedule"]["file"]))
     return target, draft, kwargs
 
 
@@ -163,6 +166,9 @@ def parse_closed_loop_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True, help="git commit of the synced tree (the sync step refuses a dirty tree)")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--record-confidences", action="store_true",
+                        help="keep every round's DSpark confidence logits and accepted counts in <output>.confidences.json "
+                             "(job A's calibration; the extra copy each round makes it no timing run)")
     return parser.parse_args(argv)
 
 
@@ -179,6 +185,8 @@ def closed_loop(args: argparse.Namespace) -> None:
     line = protocol["lines"][args.line]
     sampling = protocol["sampling"]
     target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
+    if args.record_confidences:
+        kwargs["record_confidences"] = True
     llm = LLM(target, **kwargs)
     rec = dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
                ignore_eos=sampling["ignore_eos"])
@@ -198,16 +206,23 @@ def closed_loop(args: argparse.Namespace) -> None:
               "repeat": args.repeat, "num_requests": len(panel), "sampling": {**rec, "max_tokens": sampling["max_tokens"]},
               "target": target, "draft": draft,
               **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                  "draft_type")}}
+                                                  "draft_type", "variable_length", "record_confidences")}}
+    schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
+                       if "verify_schedule" in kwargs else None)
     result = build_result(
         protocol_sha256=hashlib.sha256(protocol_text.encode()).hexdigest(),
         manifest={**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
-                  "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest()},
+                  "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
+                  "verify_schedule_sha256": schedule_sha256},
         gpu_state_start=state_start, gpu_state_end=state_end, config=config, wall_seconds=wall_seconds,
         steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result))
     args.output.with_name("packages.txt").write_text(packages)
+    if args.record_confidences:
+        log = {"schema": CONFIDENCE_SCHEMA, "line": args.line, "panel": args.panel, "concurrency": args.concurrency,
+               "seed": args.seed, "commit": args.commit, "rounds": llm.speculative.confidence_log}
+        args.output.with_suffix(".confidences.json").write_text(json.dumps(log))
     tokens = sum(len(request["token_ids"]) for request in record["requests"])
     print(f"{args.output}: {tokens} tokens in {wall_seconds:.1f}s wall")
     llm.exit()

@@ -114,7 +114,8 @@ class Decoder(SpeculativeDecoder):
 
 def make_decoder(is_right):
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=512,
-                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None)
+                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None,
+                             record_confidences=False)
     target = FakeTarget()
     with mock.patch.object(speculative, "DFlashDrafter", lambda config, decoder: None):    # it would load a checkpoint
         decoder = Decoder(target, config)

@@ -360,6 +360,8 @@ class SpeculativeDecoder:
         self.variable_length = config.variable_length
         self.schedule = None if config.verify_schedule is None else VerifySchedule.load(
             config.verify_schedule, self.num_drafts, config.max_num_seqs)
+        self.record_confidences = config.record_confidences
+        self.confidence_log: list[dict] = []    # with record_confidences, per round: each row's logits and accepted count
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}            # verification graphs by token count
         self.graph_shapes: list[tuple[int, int]] = []                # their (row slots, tokens), by tokens
         self.graph_batch_sizes: list[int] = []
@@ -416,7 +418,8 @@ class SpeculativeDecoder:
         mark = self._mark("start", None)
         sampling = sampling_tensors(seqs, self.device)
         scheduled = self.variable_length and verified_lens is None
-        drafts, draft_probs, confidence = self.drafter.propose(seqs, sampling, with_confidence=scheduled)
+        drafts, draft_probs, confidence = self.drafter.propose(seqs, sampling,
+                                                               with_confidence=scheduled or self.record_confidences)
         mark = self._mark("propose", mark)
         if scheduled:
             assert self.schedule is not None, "a variable-length round needs a verify schedule or its lengths"
@@ -440,6 +443,8 @@ class SpeculativeDecoder:
         for length in verified_lens or ():
             self.stats[f"verified_{length}"] += 1
         self.stats["rounds"] += 1
+        if self.record_confidences:
+            self.confidence_log.append({"logits": confidence.tolist(), "accepted": [row[self.num_drafts] for row in payload]})
         return appended
 
     def _accept(self, target_logits: torch.Tensor, drafts: torch.Tensor, draft_probs: torch.Tensor | None,
