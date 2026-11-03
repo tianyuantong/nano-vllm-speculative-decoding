@@ -1,6 +1,6 @@
 {
   "version": "2.2",
-  "frozen": false,
+  "frozen": true,
   "derived_from": {"file": "benchmarks/protocol-v2.1.json", "sha256": "f8adddb463ffb268a547846d2715df89f006a9efc7dd27703721a7e0d929d1c9"},
   "changes_from_v2_1": [
     "gpu: NTU cluster02, nodes gpu-pro6000-8 and -9 (Server Edition, 300 W power limit); results are not mixed with the Nebius ones",
@@ -10,7 +10,7 @@
     "verify_schedule.cost_curve: v2.1's external.cost_curve revised to time the whole round with forced lengths, not the verify forward alone",
     "order: the 3 dev lines on D48, the 5 confirmation lines on K128b",
     "gates: G2_multi with the schedule in the loop and the paper's appendix A; G1_wide with a length of its own per row; graph against eager on those batches; equivalence of the M4 engine's fixed-length mode with the cluster reproduction; dflash_alignment dropped (M2's)",
-    "decision.report: outside the README's headline, total table and figures, the median of the 3 seeds only, marked as such; the ranges go in RESULTS (2026-11-02)",
+    "decision.report: the README's headline, total table and figures give the median of the 3 seeds only, marked as such; the ranges go in RESULTS (2026-11-02)",
     "hypotheses, report_only and stop_if: pre-registered for M4",
     "external: vLLM is not run; its v2.1 numbers stand"
   ],
@@ -72,7 +72,7 @@
   "decision": {
     "faster": "all seeds R > 1 + 2*N_t",
     "a_beats_b": "all paired gains same sign and abs(median) > 2*N_t",
-    "report": "median (min-max), two decimals; range only if max-min > 0.05. Outside the README's headline, total table and figures, only the median of the 3 seeds, marked as such; the ranges go in RESULTS",
+    "report": "median (min-max), two decimals; range only if max-min > 0.05. The README's headline, total table and figures are the exception: only the median of the 3 seeds, marked as such; the ranges go in RESULTS",
     "crossover": "smallest C with median R < 1",
     "revised": "2026-11-02: the README rule of report decided by the author; the verdicts are unchanged"
   },
@@ -86,8 +86,8 @@
   ],
   "verify_schedule": {
     "file": "benchmarks/inputs/verify-schedule-v1.json",
-    "sha256": null,
-    "made_by": "job A on gpu-pro6000-8 or -9: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; reviewed by the author before this protocol is frozen",
+    "sha256": "0c96adc65b8efb11497e745003fa85ae7302efd943336ddc87656ad40b275d24",
+    "made_by": "job A (242012) on gpu-pro6000-8 at 9316ab3: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 4.20 x its median) and rerun once in job 243769, whose confidences and refit are byte-identical; reviewed by the author before this protocol is frozen",
     "cost_curve": {"line": "dspark_var", "batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 2048, "warmup": 25, "iters": 100, "statistic": "median", "report": ["median", "p95"],
                    "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
                    "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"},
