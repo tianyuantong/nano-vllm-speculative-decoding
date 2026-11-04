@@ -1,6 +1,6 @@
 {
   "version": "2.3",
-  "frozen": false,
+  "frozen": true,
   "derived_from": {"file": "benchmarks/protocol-v2.2.json", "sha256": "550b4b9049c3eceed3a197c01ca072cde882168120c6a4bb7d0556341ce18b65"},
   "changes_from_v2_2": [
     "gpu: Colab's G4 runtime, a whole RTX PRO 6000 at 600 W, the main environment from 2026-11-04; the cluster's 300 W limit was a property of its nodes, not of the experiment. Results stay apart from the cluster's and Nebius's until the cross-environment review at the end of the experiments",
@@ -81,8 +81,8 @@
   ],
   "verify_schedule": {
     "file": "benchmarks/inputs/verify-schedule-g4.json",
-    "sha256": null,
-    "made_by": "job A on a G4 runtime: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; reviewed by the author before this protocol is frozen",
+    "sha256": "10017b48c9ea36dca41eb6482491d9fd829e62cdcafb53d72f87e70834d0c1c6",
+    "made_by": "job A on a G4 runtime at 5bf4cbc: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 5.15 x its median). The first rerun ran on kernels compiled under TORCH_LOGS=recompiles, which changes the kernels and the outputs, so it is not job A's command and does not count; a clean rerun passed with byte-identical confidences; reviewed by the author before this protocol is frozen",
     "cost_curve": {"line": "dspark_var", "batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 2048, "warmup": 25, "iters": 100, "statistic": "median", "report": ["median", "p95"],
                    "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
                    "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"},
