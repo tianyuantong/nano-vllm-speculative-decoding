@@ -65,7 +65,7 @@ Milliseconds, medians over the 3 seeds, from [`tools/request_stats.py`](../tools
 
 D48 has 5 seeds per C and also covers C = 2, 4 and 16: DSpark 1.99–2.06, 1.78–1.88 and 1.56–1.65; DFlash 1.91–1.96, 1.71–1.84 and 1.54 (1.54–1.58). DSpark is faster than DFlash at all seven. The two panels agree on the direction and on every verdict.
 
-- **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`3dc0dba`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
+- **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`ed4a35c`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
 - **Releasing the confirmation set.** The design's stop rule, revised after the first matrix and before the second, released the confirmation set when, at every C, DSpark's tokens per round were higher and the median paired gain was positive; both held at all seven.
 - **A new machine.** The cloud instance changed between the DFlash and DSpark runs. Plain decoding on the new one gives 80.1 / 557.4 / 1459.0 / 2031.9 tok/s at C = 1 / 8 / 32 / 64, against 80.4 / 554.8 / 1466.0 / 2040.5 before: within ±0.5%, below the timing noise, so §4 compares the new nano numbers with vLLM's from the old machine.
 
@@ -149,7 +149,7 @@ All 1319 questions × 2 seeds, paired by question and seed. The gate requires th
 | G2-real | acceptance rate and output distribution on a real distribution | acceptance error 0.003 (bound 0.02), worst frequency gap 0.0023 (bound 0.0064) |
 
 - **Decided position**: one where the reference's top logit leads the second by more than 0.5.
-- G1-draft and G1-wide ran on the engine before candidate sampling (`3dc0dba`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
+- G1-draft and G1-wide ran on the engine before candidate sampling (`ed4a35c`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
 
 ## 6. Estimates made beforehand
 
@@ -174,7 +174,7 @@ Measurement scope as in the DFlash results: offline closed loop, one GPU model, 
 
 | item | value |
 |---|---|
-| engine | `f30ed0a` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `3dc0dba` for G1-draft, G1-wide and the first matrix |
+| engine | `2d64fa4` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `ed4a35c` for G1-draft, G1-wide and the first matrix |
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts DeepSpec's `dflash_qwen3_8b_block7` and `dspark_qwen3_8b_block7` (`deepseek-ai/dspark_qwen3_8b_block7` at `03326e5`) |

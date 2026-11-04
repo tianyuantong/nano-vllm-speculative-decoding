@@ -1,0 +1,133 @@
+{
+  "version": "2.2",
+  "frozen": true,
+  "derived_from": {"file": "benchmarks/protocol-v2.1.json", "sha256": "f8adddb463ffb268a547846d2715df89f006a9efc7dd27703721a7e0d929d1c9"},
+  "changes_from_v2_1": [
+    "gpu: NTU cluster02, nodes gpu-pro6000-8 and -9 (Server Edition, 300 W power limit); results are not mixed with the Nebius ones",
+    "trees: every line names the source tree it runs from and the k0 line its R divides by; the 0.6B baseline runs from baseline/qwen3-0.6b-draft (engine ad87956) as k0_base and model_k3",
+    "lines: dspark_var added, M4's variable-length verification on the frozen verify schedule; dflash_k7 dropped, its v2.1 numbers stand",
+    "verify_schedule: the cost table and the 7 STS temperatures, measured and fitted once by job A and pinned here by sha256 before the protocol is frozen",
+    "verify_schedule.cost_curve: v2.1's external.cost_curve revised to time the whole round with forced lengths, not the verify forward alone",
+    "order: the 3 dev lines on D48, the 5 confirmation lines on K128b",
+    "gates: G2_multi with the schedule in the loop and the paper's appendix A; G1_wide with a length of its own per row; graph against eager on those batches; equivalence of the M4 engine's fixed-length mode with the cluster reproduction; dflash_alignment dropped (M2's)",
+    "decision.report: the README's headline, total table and figures give the median of the 3 seeds only, marked as such; the ranges go in RESULTS (2026-11-02)",
+    "hypotheses, report_only and stop_if: pre-registered for M4",
+    "external: vLLM is not run; its v2.1 numbers stand"
+  ],
+  "gpu": {"node": ["gpu-pro6000-8.cluster02.eee.ntu.edu.sg", "gpu-pro6000-9.cluster02.eee.ntu.edu.sg"], "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "power_limit_w": 300},
+  "models": {
+    "target": "Qwen3-8B",
+    "dtype": "bfloat16",
+    "drafts": {
+      "model_0p6b": "Qwen3-0.6B",
+      "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
+      "dspark": "dspark_qwen3_8b_block7-03326e504381"
+    }
+  },
+  "sampling": {"temperature": 0.7, "top_k": 20, "top_p": 0.8, "max_tokens": 512, "ignore_eos": false},
+  "trees": {
+    "main": {"branch": "feat/m4-variable-verify", "rule": "a clean clone of one commit; every main line's --commit"},
+    "baseline": {"branch": "baseline/qwen3-0.6b-draft", "engine": "ad87956", "rule": "the engine stays at ad87956; this protocol and the measurement tools are synced to it first, by a PR that leaves the engine alone"}
+  },
+  "lines": {
+    "k0": {"tree": "main", "drafter": null, "k": 0, "k0_line": "k0"},
+    "dspark_k7": {"tree": "main", "drafter": "dspark", "k": 7, "k0_line": "k0"},
+    "dspark_var": {"tree": "main", "drafter": "dspark", "k": 7, "variable_length": true, "k0_line": "k0"},
+    "k0_base": {"tree": "baseline", "drafter": null, "k": 0, "k0_line": "k0_base"},
+    "model_k3": {"tree": "baseline", "drafter": "model_0p6b", "k": 3, "k0_line": "k0_base"}
+  },
+  "max_model_len": 4096,
+  "max_num_batched_tokens": 16384,
+  "concurrency": [1, 2, 4, 8, 16, 32, 64],
+  "seeds": {
+    "dev": [17011, 110017, 130031, 170041, 210011],
+    "confirm": [17011, 110017, 130031],
+    "gate_g5": [17011, 110017]
+  },
+  "order": "all lines of one (C, seed) run back to back in one job; the i-th seed (0-based) of a panel starts with the (i mod n)-th of that panel's n lines (dev.lines on D48, confirm.versions on K128b) and continues in listed order",
+  "panels": {
+    "D48": {"file": "benchmarks/inputs/panel-48.json", "sha256": "071befa6898b31870770b653656e9e54465530d4d553f79b84a1aa8ec4958235", "take": "full_cycles"},
+    "K128": {
+      "file": "benchmarks/inputs/panel-K128.json",
+      "sha256": "44f6fb6b4922c3d85feb7f8e9eb6610c50a2865e106777bb1440d6a5cca70140",
+      "take": "prefix",
+      "salt": "bench-v2-confirm:",
+      "quotas": {"code_completion": 40, "NIAH": 43, "open_books": 37, "creative_writing": 8},
+      "max_formatted_tokens": 2816
+    },
+    "K128b": {
+      "file": "benchmarks/inputs/panel-K128b.json",
+      "sha256": "cfd53af26e0cdcc2e5aee8680440ff0d35d78277d66795107c163158628ba710",
+      "take": "prefix",
+      "salt": "bench-v2.1-confirm:",
+      "quotas": {"code_completion": 40, "NIAH": 43, "open_books": 37, "creative_writing": 8},
+      "max_formatted_tokens": 2816,
+      "interleave": "proportional"
+    }
+  },
+  "kv_budget": "C * ceil((max_prompt_len + max_tokens + 7) / 256) target blocks for every line of both trees; a block draft's cache mirrors the target's blocks",
+  "warmup": {"requests": "first C of the panel, cycled", "max_tokens": 64},
+  "metrics": {"primary": "Q_steady", "secondary": "Q_full"},
+  "timing_noise": {"concurrency": [1, 8, 32], "seed": 17011, "repeats": 2},
+  "decision": {
+    "faster": "all seeds R > 1 + 2*N_t",
+    "a_beats_b": "all paired gains same sign and abs(median) > 2*N_t",
+    "report": "median (min-max), two decimals; range only if max-min > 0.05. The README's headline, total table and figures are the exception: only the median of the 3 seeds, marked as such; the ranges go in RESULTS",
+    "crossover": "smallest C with median R < 1",
+    "revised": "2026-11-02: the README rule of report decided by the author; the verdicts are unchanged"
+  },
+  "invalid_if": [
+    "gpu name mismatch",
+    "preemption > 0",
+    "non-finite value or assertion failure",
+    "decode step or round > 3 x median",
+    "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its own tree",
+    "timing-noise repeats differ in tokens"
+  ],
+  "verify_schedule": {
+    "file": "benchmarks/inputs/verify-schedule-v1.json",
+    "sha256": "0c96adc65b8efb11497e745003fa85ae7302efd943336ddc87656ad40b275d24",
+    "made_by": "job A (242012) on gpu-pro6000-8 at 9316ab3: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 4.20 x its median) and rerun once in job 243769, whose confidences and refit are byte-identical; reviewed by the author before this protocol is frozen",
+    "cost_curve": {"line": "dspark_var", "batch": [1, 2, 4, 8, 16, 32, 64], "query_len": [1, 2, 3, 4, 5, 6, 7, 8], "context_len": 2048, "warmup": 25, "iters": 100, "statistic": "median", "report": ["median", "p95"],
+                   "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
+                   "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"},
+    "calibration": {"line": "dspark_k7", "panel": "D48", "concurrency": 64, "seeds": "dev",
+                    "record": "every round, each row's 7 confidence logits and its accepted count; all 8 positions are verified, so 'the first i drafts all accepted' is observed for every i",
+                    "method": "STS: for i = 1..7 in turn, T_i on the grid minimizing the binary cross-entropy of the survival prod_{j<=i} sigmoid(z_j / T_j) against 'the first i drafts all accepted', T_1..T_{i-1} fixed",
+                    "grid": {"low": 0.1, "high": 10.0, "points": 401, "spacing": "geometric"},
+                    "report_only": ["ECE over 10 equal-width bins, per position and pooled, raw and after STS", "AUROC of the survival pooled over positions, raw and after STS"]},
+    "replay": {"concurrency": 64, "rounds": "the calibration runs' rounds of C rows",
+               "rule": "a row with n of its 7 drafts accepted accepts min(n, L - 1) when it verifies L positions; a round's time is the cost table's at its token count, the fixed-length round's at 8 per row",
+               "stop_if_gain_below": 0.0252, "source": "2 x N_t, N_t = 1.26% in job 236550"}
+  },
+  "dev": {"panel": "D48", "lines": ["k0", "dspark_k7", "dspark_var"]},
+  "hypotheses": {
+    "H1": {"a": "dspark_var", "b": "dspark_k7", "rule": "a_beats_b", "expect": "faster at C = 32 and 64, undecided at C <= 8"},
+    "H2": {"rule": "the smallest C at which H1 finds dspark_var faster on D48", "compare": "DeepInfer's MoE estimate: -1.5% at 16 requests per GPU, +11% at 96"},
+    "H3": {"rule": "faster", "of": "every line against its k0_line; crossover as decision.crossover"}
+  },
+  "report_only": ["verified positions per row", "tokens per round, round-weighted and per request", "round phases, schedule included", "TTFT, ITL and round time p50 / p99", "the confidence's ECE and AUROC, raw and after STS"],
+  "stop_if": [
+    "any gate fails: no performance numbers; find the cause",
+    "verify_schedule.replay predicts a C=64 round throughput gain below stop_if_gain_below: no dev matrix; check the calibration and the cost table first",
+    "on the dev matrix at C=64 dspark_var is slower than dspark_k7 for every seed: no confirmation job",
+    "an invalid run: its whole (C, seed) rerun once, per invalid_if"
+  ],
+  "gates": {
+    "G2_multi": {"trials": 100000, "delta": 0.001, "k": [2, 3, 7], "scheduled_batch": 4, "appendix_a_trials": 20000,
+                 "appendix_a": "the early stop emits A within the bound of the target's 0.70; the global maximum's 0.85 lies outside it"},
+    "equivalence": {"protocol": "benchmarks/protocol-v2.1.json", "lines": ["dspark_k7", "dflash_k7"], "panel": "K128b", "concurrency": [1, 8], "seed": 17011,
+                    "reference": "repeat 1 of the cluster reproduction, job 236550", "rule": "token-identical"},
+    "G1_wide": {"prompts": 8, "block_crossing_lengths": [1022, 2046], "batch": [1, 4, 16], "floor_multiple": 2, "margin": 0.5,
+                "revised": "2026-10-23 after the first run: decode alone moves logits by up to 1.5 between B=1 and B=16 on these prompts, so the fixed bound 0.5 was below the reference path's own batch-size noise; the bound is now floor_multiple x the decode-only noise floor measured on the same prompts in the same job (the rule G1-aux had)",
+                "varlen": {"lengths": [1, 2, 3, 4, 5, 6, 7, 8], "rule": "one batch of the 8 prompts per rotation of the lengths, so each prompt verifies each length once, with the graph's empty row slots and padding tokens; each row's first L positions against the reference's first L decode steps, under the same bound and argmax rule"}},
+    "graph_eager_varlen": {"rule": "the G1_wide varlen batches through the verification graph and eagerly: bit-identical logits"},
+    "G2_real": {"line": "dspark_var", "scan_rounds": 64, "accept_mass": [0.2, 0.9], "min_draft_support": 2, "min_target_support": 2, "accept_trials": 16384, "accept_tolerance": 0.02, "emit_trials": 100000, "delta": 0.001,
+                "revised": "2026-10-23 after the first run: both lines picked the same position, where the target split 0.5/0.5 over two tokens and the draft put all its mass on one; a one-hot q tests only the trivial residual, so q must now be positive on at least min_draft_support tokens",
+                "revised_again": "2026-10-23 after the second run: both picked positions had a one-hot target p, so every rejection emits the one target token and the output-distribution check passes trivially (gap 0); p must now be positive on at least min_target_support tokens (decision D3)"},
+    "G5": {"lines": ["dspark_var", "k0"], "dataset": "openai/grade-school-math test.jsonl", "commit": "3101c7d5072418e28b9008a6636bde82a006892c", "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14", "rows": 1319, "concurrency": 32, "ci_low_min": -0.03, "max_unparseable": 0.02, "min_k0_accuracy": 0.80}
+  },
+  "confirm": {"panel": "K128b", "concurrency": [1, 8, 32, 64], "versions": ["k0", "dspark_k7", "dspark_var", "k0_base", "model_k3"],
+              "cross_tree": "at each C the two k0 lines are compared seed by seed; only when every |Q_steady(k0) / Q_steady(k0_base) - 1| <= 2*N_t do the baseline's R and the main lines' R go in one table, otherwise each line reports its R against its own k0_line only",
+              "date": "end of M4"}
+}
