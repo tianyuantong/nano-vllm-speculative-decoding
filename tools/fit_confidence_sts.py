@@ -4,7 +4,7 @@ round throughput gain at C=64, all written into the verify-schedule-v1 JSON that
 
 Exit status 1 when the replay's gain is below the protocol's stop_if_gain_below: no dev matrix then.
 
-  python tools/fit_confidence_sts.py --protocol benchmarks/protocol-v2.2.json --cost COST.json \
+  python tools/fit_confidence_sts.py --protocol benchmarks/protocol-v2.3.json --cost COST.json \
       --logs RUN.confidences.json [RUN.confidences.json ...] --out benchmarks/inputs/verify-schedule-v1.json
 """
 import argparse
@@ -109,7 +109,7 @@ def sha256_of(path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--protocol", type=Path, default=ROOT / "benchmarks" / "protocol-v2.2.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "benchmarks" / "protocol-v2.3.json")
     parser.add_argument("--cost", type=Path, required=True, help="tools/profile_verify_cost.py's output")
     parser.add_argument("--logs", type=Path, nargs="+", required=True, help="the calibration runs' .confidences.json")
     parser.add_argument("--out", type=Path, required=True)

@@ -6,7 +6,7 @@ gives every row L. A round's time is its phase timings summed, propose through c
 is kept beside it. Load time, reserved memory and torch.compile's counters are kept too: this is the first run of
 the variable-length graphs. tools/fit_confidence_sts.py turns the output into the frozen verify schedule.
 
-  python tools/profile_verify_cost.py --protocol benchmarks/protocol-v2.2.json --models-root DIR --commit C --out FILE
+  python tools/profile_verify_cost.py --protocol benchmarks/protocol-v2.3.json --models-root DIR --commit C --out FILE
 """
 import argparse
 import hashlib
@@ -78,7 +78,7 @@ def time_cell(llm, batch_size: int, length: int, curve: dict, params, generator:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--protocol", type=Path, default=ROOT / "benchmarks" / "protocol-v2.2.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "benchmarks" / "protocol-v2.3.json")
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
