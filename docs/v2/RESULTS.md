@@ -6,11 +6,11 @@ On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_q
 
 The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, development panel, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
 
-**How it is measured**
-- **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
-- **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§3).
-- **K128**: 128 prompts whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
-- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), frozen before the confirmation runs.
+**Measurement definitions**
+- **Concurrency C**: number of active requests in flight; a new request enters the batch as soon as one finishes.
+- **Speedup R**: steady-state throughput (the window where all `C` requests are active) divided by plain decoding (`k0`) at the same concurrency and seed within the same job. The vLLM comparison uses end-to-end wall-clock throughput (§3).
+- **K128**: a held-out 128-prompt evaluation set run once with 3 seeds per concurrency.
+- **Protocol**: all decision thresholds and invalidation rules are fixed in [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), frozen prior to the confirmation runs.
 
 ## 1. Confirmation panel (K128)
 
@@ -41,11 +41,11 @@ One DFlash run (C = 1, seed 17011) had a round of 193 ms against a median of 15.
 
 Values are the median (min–max) over seeds, to two decimals, or only the range when it spans more than 0.05. **Bold** marks a line that is faster than plain decoding by the protocol's rule.
 
-- **What "faster" means.** Every seed's R must be above 1 + 2 × timing noise. The confirmation panel has no timing repeats by design, so the timing noise is borrowed from the development matrix: 3.75%, from the same machine and the same engine.
-- **C = 64 is close to the line.** The three seeds give 1.057, 1.086 and 1.080. A timing noise of 2.5% would call this faster; the table takes the conservative side.
-- **DFlash against the 0.6B draft.** At every C, the per-seed paired gains all have the same sign and their median exceeds 2 × timing noise, so DFlash is faster than the 0.6B draft at every concurrency.
-- The 0.6B line drops below plain decoding from C = 32; DFlash stays above 1 up to C = 64.
-- Tokens per round, averaged over rounds: DFlash 2.75–2.85, 0.6B 2.49–2.53.
+- **Speedup threshold**: A line is marked faster when every seed's speedup `R` exceeds `1 + 2 × N_t`, where the timing noise `N_t = 3.75%` is measured on the development matrix on the same machine and engine.
+- **Near-threshold result at C = 64**: The three seeds yield `1.057`, `1.086`, and `1.080` (above a 2.5% noise threshold, but below `1 + 2 × 3.75% = 1.075` on the first seed), so `C = 64` is conservatively left unbolded.
+- **DFlash vs 0.6B draft**: At every concurrency, all per-seed paired gains have the same sign and their median exceeds `2 × N_t`.
+- The 0.6B draft drops below plain decoding starting at `C = 32`, whereas DFlash stays above `1.0×` through `C = 64`.
+- **Tokens per round** (round-weighted mean): DFlash `2.75–2.85`, 0.6B `2.49–2.53`.
 
 ## 2. Development panel (D48) and confirmation panel (K128)
 

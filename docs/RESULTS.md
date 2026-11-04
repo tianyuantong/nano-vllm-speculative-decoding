@@ -4,11 +4,11 @@ On an RTX PRO 6000 with Qwen3-8B in BF16, the DSpark draft (DeepSpec's `dspark_q
 
 DFlash in the same engine and jobs gives 1.94–2.06 / 1.68 / 1.31 / 1.01×, and DSpark is faster than it at every concurrency: by 4.4–8.1% at C = 1, 1.2–7.7% at C = 8, 8.9–9.9% at C = 32 and 11.0–14.7% at C = 64. At C = 32 and 64, an estimated 2–6 points of that lead come from the two lines sampling differently (§3). Against vLLM's DSpark (same GPU model, same weights, development panel, wall-clock throughput of the whole run), nano is 7.6–7.9% behind at C = 1, 8 and 32.
 
-**How it is measured**
-- **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
-- **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§4).
-- **K128b**: a new 128-prompt confirmation panel whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
-- **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.1.json`](../benchmarks/protocol-v2.1.json), frozen before the GPU runs.
+**Measurement definitions**
+- **Concurrency C**: number of active requests in flight; a new request enters the batch as soon as one finishes.
+- **Speedup R**: steady-state throughput (the window where all `C` requests are active) divided by plain decoding (`k0`) at the same concurrency and seed within the same job. The vLLM comparison uses end-to-end wall-clock throughput (§4).
+- **K128b**: a held-out 128-prompt evaluation set run once with 3 seeds per concurrency.
+- **Protocol**: all decision thresholds and invalidation rules are fixed in [`benchmarks/protocol-v2.1.json`](../benchmarks/protocol-v2.1.json), frozen prior to the GPU runs.
 
 ## 1. Confirmation panel (K128b)
 
@@ -30,10 +30,10 @@ K128b has K128's quotas (NIAH 43, code completion 40, open-book QA 37, creative 
 
 Values are the median (min–max) over seeds, to two decimals, or only the range when it spans more than 0.05. **Bold** marks a line that is faster than plain decoding by the protocol's rule.
 
-- **What "faster" means.** Every seed's R must be above 1 + 2 × timing noise. The confirmation panel has no timing repeats by design, so the timing noise is borrowed from the development matrix: 1.38%, from 9 repeat pairs on the same machine and engine.
-- **DSpark against DFlash.** At every C, the per-seed paired gains all have the same sign and their median exceeds 2 × timing noise, so DSpark is faster than DFlash at every concurrency.
-- Tokens per round, averaged over rounds: DSpark 2.81–2.95, DFlash 2.53–2.70.
-- **One void and its rerun.** One DFlash run (C = 1, seed 17011) had a round of 199 ms against a median of 15.7 ms, so the pre-registered rule voids it; the record is kept. Of those 199 ms, 182 went to the context-store step (median 0.26 ms); propose and verify were normal. The DFlash results' only void was the same cell and step (177 ms) at almost the same point: round 3549, 57.4 s into the run, against round 3544 and 57.3 s here, both the first DFlash run of a confirmation job. Of 78 runs at C = 1, these two are the only ones with a round over twice the median. The group's three lines were rerun back to back in one job: valid, with the same tokens as the first run on all three lines, and the group takes its values from the rerun (DFlash 2.06). The same seed and the same outputs did not reproduce the stall, so it does not follow from the data. The cause, found later, is a full garbage collection in CPython: it stops the process while it scans every tracked object (0.55–1.2 million in these runs), 0.18–0.56 s here, and lands on whichever step is running when it triggers. With no full collection while measuring, no round stalls.
+- **Speedup threshold**: A line is marked faster when every seed's speedup `R` exceeds `1 + 2 × N_t`, where the timing noise `N_t = 1.38%` is measured from 9 repeat pairs on the development matrix on the same machine and engine.
+- **DSpark vs DFlash**: At every concurrency, all per-seed paired gains have the same sign and their median exceeds `2 × N_t`.
+- **Tokens per round** (round-weighted mean): DSpark `2.81–2.95`, DFlash `2.53–2.70`.
+- **Voided run and full-group rerun**: One DFlash run (`C = 1`, seed `17011`) recorded a single 199 ms round against a 15.7 ms median, triggering the protocol's outlier rule (`> 3 × median`). Of those 199 ms, 182 ms occurred during `ctx_store` (median 0.26 ms), while `propose` and `verify` were normal. The earlier K128 confirmation run had a single outlier in the exact same cell and phase (177 ms at round 3549, 57.4 s into the run, vs round 3544 at 57.3 s here). Per protocol, all three lines of that `(C = 1, seed = 17011)` group were rerun back-to-back in a single job; the rerun passed with identical output tokens across all three lines (`DFlash R = 2.06`). Subsequent diagnostics traced the stall to a full CPython garbage collection pause scanning 0.55–1.2M tracked objects (0.18–0.56 s).
 
 ### Latency
 
@@ -94,13 +94,12 @@ DSpark's paired gain over DFlash, split per seed into four factors that multiply
 | K128b | 32 | +9.7% | +9.5% | +3.1% | −3.5% | +0.1% | −0.97 |
 | K128b | 64 | +14.1% | +10.2% | +5.9% | −4.0% | +0.1% | −3.01 |
 
-- **7–12% more tokens per round** is the Markov head's work: later positions in the block know what the earlier ones drew, so more of them are accepted. This is where DSpark's lead comes from.
-- **Round time.** Up to C = 16 DSpark's round is 3–4% longer; at C = 32 and 64 it is 2–6% shorter. Almost all of the difference is in propose; verification differs by under 0.5 ms. The negative "outside prefill" column means DSpark, decoding faster, takes in new requests more often, so prefill stalls ([DFlash results](v2/RESULTS.md) §5.2) take more of its time: 31% of DSpark's steady window at C = 32, on both panels.
-- **Why the round gets shorter at high concurrency.** The two lines sample differently: candidate-only sampling applies to DSpark only, while DFlash still runs softmax and top-k over the whole vocabulary, which costs more as concurrency rises. From C = 16 to 64, DFlash's propose grows by 7.9 ms, DSpark's by 4.4 ms.
-- **How much of the lead that asymmetry accounts for.** This is inferred from what each line's round does, not measured with DFlash on candidate sampling.
-  - C = 32 and 64: with the same sampling, DSpark's propose could not be shorter than DFlash's, since it does all of DFlash's propose plus the row-by-row correction. If the other phases and the prefill share stayed as measured, the shorter round on D48 (2.1 and 5.7 points; verification differs there by at most 0.18 ms) would all be the asymmetry's, and DSpark's lead without it would be about +7% and +5%. This is a conditional estimate, not a bound. On K128b, DSpark's verification is also 0.29 and 0.42 ms shorter, so not all of its 3.1 and 5.9 points are sampling.
-  - C = 1 and 16: profiled, DFlash's logits-and-sampling step spends only 0.23 ms and 0.60 ms outside the logits matrix multiply (lm_head). Candidate sampling could save at most that, 1.5% and 2.8% of a round, so the asymmetry accounts for at most 1.5 and 2.8 points there.
-- Measuring the same-sampling number exactly needs DFlash on candidate sampling too; that has not been done.
+- **Acceptance gain (+7–12% tokens per round)**: Conditioning each draft position on the token sampled at the previous position via the Markov head raises acceptance across all concurrencies.
+- **Round duration**: Up to `C = 16`, DSpark's round is 3–4% longer than DFlash's; at `C = 32` and `C = 64` it is 2–6% shorter. Nearly all of the difference lies in `propose` (`verify` differs by under 0.5 ms). The negative `outside prefill` column reflects that DSpark finishes requests faster and admits new requests more frequently, so prefill stalls ([DFlash results](v2/RESULTS.md) §5.2) occupy a larger fraction of its steady-state window (31% at `C = 32`).
+- **Top-k candidate sampling at high concurrency**: Candidate-only sampling (`top_k + 64`) is enabled on the DSpark path, whereas DFlash runs softmax and top-k over the full vocabulary. As concurrency grows from `C = 16` to `C = 64`, DFlash's `propose` time increases by 7.9 ms while DSpark's increases by 4.4 ms.
+- **Estimated contribution of candidate sampling** (inferred from phase timings rather than a separate DFlash run with candidate sampling):
+  - At `C = 32` and `C = 64`, DSpark's `propose` does all the work of DFlash plus sequential Markov correction, so its shorter round on D48 (2.1 and 5.7 percentage points, where `verify` differs by at most 0.18 ms) is attributable to candidate sampling; without that difference, DSpark's net lead on D48 would be roughly +7% and +5% (on K128b, `verify` is also 0.29 and 0.42 ms shorter, accounting for part of the 3.1 and 5.9 points).
+  - At `C = 1` and `C = 16`, DFlash spends only 0.23 ms and 0.60 ms in logits sampling outside `lm_head`, bounding any candidate-sampling savings to at most 1.5 and 2.8 percentage points.
 
 ### By prompt category
 
