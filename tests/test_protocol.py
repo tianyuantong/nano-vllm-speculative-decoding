@@ -13,20 +13,22 @@ DERIVED = {"derived_from", "changes_from_v2"}    # v2.1 records what it changed 
 # v2.2 (M4) adds the two source trees, the frozen verify schedule, the dev lines and the pre-registration; it runs no vLLM
 TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1", "trees", "verify_schedule", "dev",
                                                "hypotheses", "report_only", "stop_if"}
-PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json"}
+TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
+PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
+           "protocol-v2.3.json": "protocol-v2.2.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
-@pytest.fixture(params=["protocol-v2.json", "protocol-v2.1.json", "protocol-v2.2.json"])
+@pytest.fixture(params=["protocol-v2.json", "protocol-v2.1.json", "protocol-v2.2.json", "protocol-v2.3.json"])
 def protocol(request):
     return json.loads((BENCHMARKS / request.param).read_text())
 
 
-@pytest.fixture
-def v22():
-    return json.loads((BENCHMARKS / "protocol-v2.2.json").read_text())
+@pytest.fixture(params=["protocol-v2.2.json", "protocol-v2.3.json"])
+def m4_protocol(request):
+    return json.loads((BENCHMARKS / request.param).read_text())
 
 
 def strictly_increasing(values):
@@ -36,6 +38,8 @@ def strictly_increasing(values):
 def test_top_level_keys(protocol):
     if protocol["version"] == "2.2":
         assert set(protocol) == TOP_LEVEL_V22
+    elif protocol["version"] == "2.3":
+        assert set(protocol) == TOP_LEVEL_V23
     else:
         assert set(protocol) == (TOP_LEVEL | DERIVED if "derived_from" in protocol else TOP_LEVEL)
 
@@ -88,14 +92,14 @@ def test_cost_curve_sampling(protocol):
     assert strictly_increasing(curve["batch"]) and strictly_increasing(curve["query_len"])
 
 
-def test_every_line_divides_by_a_k0_of_its_own_tree(v22):
-    lines = v22["lines"]
+def test_every_line_divides_by_a_k0_of_its_own_tree(m4_protocol):
+    lines = m4_protocol["lines"]
     for line in lines.values():
         k0 = lines[line["k0_line"]]
-        assert line["tree"] in v22["trees"] and k0["k"] == 0 and k0["tree"] == line["tree"]
-    assert set(v22["dev"]["lines"]) | set(v22["confirm"]["versions"]) <= set(lines)
+        assert line["tree"] in m4_protocol["trees"] and k0["k"] == 0 and k0["tree"] == line["tree"]
+    assert set(m4_protocol["dev"]["lines"]) | set(m4_protocol["confirm"]["versions"]) <= set(lines)
 
 
-def test_every_concurrency_has_a_row_of_the_cost_table(v22):
+def test_every_concurrency_has_a_row_of_the_cost_table(m4_protocol):
     # The bench runs with max_num_seqs = C, which the verify schedule needs among its batch sizes.
-    assert set(v22["concurrency"]) <= set(v22["verify_schedule"]["cost_curve"]["batch"])
+    assert set(m4_protocol["concurrency"]) <= set(m4_protocol["verify_schedule"]["cost_curve"]["batch"])
