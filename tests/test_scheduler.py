@@ -115,3 +115,62 @@ def test_postprocess_speculative_ignore_eos_continues():
     scheduler.schedule()
     scheduler.postprocess_speculative([seq], [[EOS, 11]])
     assert seq.completion_token_ids == [9, EOS, 11] and not seq.is_finished
+
+
+def admit(scheduler, num_tokens=2):
+    seq = Sequence(list(range(1, num_tokens + 1)), SamplingParams(max_tokens=8))
+    scheduler.add(seq)
+    return seq
+
+
+def test_admission_stops_at_max_num_seqs_counting_each_request_once():
+    scheduler = make_scheduler(num_speculative_tokens=3, max_num_seqs=4, num_blocks=32)
+    first = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    second = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    arrivals = [admit(scheduler) for _ in range(3)]
+    seqs, is_prefill = scheduler.schedule()              # 2 running, slots for 2 more in one step: not 3 + 1 > 4
+    assert is_prefill and seqs == arrivals[:2]
+    scheduler.postprocess(seqs, [9, 9], True)
+    seqs, is_prefill = scheduler.schedule()              # the third waits; the four running decode
+    assert not is_prefill and seqs == [first, second, *arrivals[:2]]
+    assert list(scheduler.waiting) == arrivals[2:]
+
+
+def test_a_finished_request_frees_its_slot():
+    scheduler = make_scheduler(num_speculative_tokens=3, max_num_seqs=1, num_blocks=32)
+    running = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    arrival = admit(scheduler)
+    seqs, is_prefill = scheduler.schedule()
+    assert not is_prefill and seqs == [running]
+    scheduler.postprocess_speculative(seqs, [[EOS]])
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [arrival]
+
+
+def test_a_chunked_prefill_keeps_its_slot_and_needs_no_new_one():
+    scheduler = make_scheduler(num_speculative_tokens=3, max_num_seqs=2, num_blocks=32)
+    scheduler.max_num_batched_tokens = 4
+    running = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    chunked = admit(scheduler, num_tokens=6)
+    late = admit(scheduler)
+    seqs, is_prefill = scheduler.schedule()              # the first chunk: 4 of 6 tokens, so it stays in waiting
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 4
+    scheduler.postprocess(seqs, [9], True)
+    assert list(scheduler.waiting) == [chunked, late]
+    seqs, is_prefill = scheduler.schedule()              # running + chunked hold both slots; chunked continues, late waits
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 2
+    scheduler.postprocess(seqs, [9], True)
+    seqs, is_prefill = scheduler.schedule()
+    assert not is_prefill and seqs == [running, chunked]
+    assert list(scheduler.waiting) == [late]
+
+
+def test_a_closed_loop_never_reaches_the_cap():
+    # C requests in flight at most: every waiting request that holds no block leaves a free slot for itself.
+    scheduler = make_scheduler(num_speculative_tokens=3, max_num_seqs=3, num_blocks=32)
+    running = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    arrivals = [admit(scheduler) for _ in range(2)]
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == arrivals
+    scheduler.postprocess(seqs, [9, 9], True)
+    assert list(scheduler.running) == [running, *arrivals]

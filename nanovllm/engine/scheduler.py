@@ -27,6 +27,8 @@ class Scheduler:
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
+        # A request holds a slot from its first block on: the running ones and any part-way through a chunked prefill.
+        num_occupied_slots = len(self.running) + sum(1 for seq in self.waiting if seq.block_table)
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
@@ -35,6 +37,8 @@ class Scheduler:
             if remaining == 0:
                 break
             if not seq.block_table:
+                if num_occupied_slots >= self.max_num_seqs:
+                    break
                 num_cached_blocks = self.block_manager.can_allocate(seq)
                 if num_cached_blocks == -1:
                     break
@@ -45,6 +49,7 @@ class Scheduler:
                 break
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
+                num_occupied_slots += 1
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
