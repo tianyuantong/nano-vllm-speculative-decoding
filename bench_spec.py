@@ -2,6 +2,9 @@
 
   --mode closed-loop  protocol v2: keep C requests in the engine, adding one as each finishes, until the panel is
                       used up (bench-v2 §1.1). Sampling, KV budgets, warm-up and the line's draft come from the protocol.
+  --mode open-loop    protocol v2.4: requests arrive on a Poisson plan fixed before the run, whatever the engine does,
+                      at most C in the engine, the rest queued. Latencies run from the planned arrival to the host's
+                      delivery. tools/slo_report.py turns results into SLO capacity.
 
 The v1 offline mode, one generate() over the 48-prompt panel with the 0.6B draft, is at tag results-batched-v1.
 
@@ -9,21 +12,25 @@ One invocation = one configuration = one JSON result with a manifest, per-step t
 records and acceptance statistics. tools/summarize_bench.py turns results into metrics.
 """
 import argparse
+import gc
 import hashlib
 import importlib.metadata
 import json
 import math
 import platform
+import random
 import subprocess
 import time
 from pathlib import Path
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 import torch
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "bench-v2"
+OPEN_LOOP_SCHEMA = "open-loop-v1"
 CONFIDENCE_SCHEMA = "confidence-log-v1"
+GC_FULL_OUT_OF_REACH = 10**9    # a third-generation threshold no run reaches (ctx_store diagnosis §5)
 RESULT_KEYS = ("schema", "protocol_sha256", "manifest", "gpu_state_start", "gpu_state_end", "config",
                "wall_seconds", "steps", "phases", "requests", "speculative_stats", "preemptions")
 QUERY_FIELDS = ("name", "power.limit", "clocks.max.sm", "clocks.max.memory",
@@ -46,8 +53,17 @@ class RequestRecord(TypedDict):
     token_ids: list[int]
 
 
+class OpenLoopRequestRecord(RequestRecord):
+    arrival_seconds: float            # the plan's arrival; deliveries gain a third field, the host's seconds on that clock
+    submit_seconds: float             # when add_request ran, between two steps
+
+
 class ClosedLoopRecord(TypedDict):
     requests: list[RequestRecord]     # in panel order
+
+
+class OpenLoopRecord(TypedDict):
+    requests: list[OpenLoopRequestRecord]    # in arrival order
 
 
 def load_panel(path: Path, concurrency: int, take: str) -> list[PanelEntry]:
@@ -93,6 +109,20 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
     return target, draft, kwargs
 
 
+def record_deliveries(in_flight: list[list], step: int, *stamp: float) -> list[list]:
+    """Each in-flight request's new tokens as one delivery [step, n, *stamp]; returns the requests still unfinished."""
+    for item in in_flight:
+        record, seq, delivered = item
+        count = seq.num_completion_tokens    # an int; completion_token_ids would copy a list per request per step
+        if count > delivered:
+            record["deliveries"].append([step, count - delivered, *stamp])
+            item[2] = count
+        if seq.is_finished:
+            record["finish_step"] = step
+            record["token_ids"] = seq.completion_token_ids
+    return [item for item in in_flight if not item[1].is_finished]
+
+
 def run_closed_loop(llm, panel: list[PanelEntry], params, concurrency: int) -> ClosedLoopRecord:
     """Before every step() top the engine up to C requests; after it, record each in-flight request's new tokens
     as one delivery. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
@@ -108,17 +138,49 @@ def run_closed_loop(llm, panel: list[PanelEntry], params, concurrency: int) -> C
             next_entry += 1
         step = llm.num_steps
         llm.step()
-        for item in in_flight:
-            record, seq, delivered = item
-            count = seq.num_completion_tokens    # an int; completion_token_ids would copy a list per request per step
-            if count > delivered:
-                record["deliveries"].append([step, count - delivered])
-                item[2] = count
-            if seq.is_finished:
-                record["finish_step"] = step
-                record["token_ids"] = seq.completion_token_ids
-        in_flight = [item for item in in_flight if not item[1].is_finished]
+        in_flight = record_deliveries(in_flight, step)
     return ClosedLoopRecord(requests=records)
+
+
+def poisson_arrivals(count: int, rate: float, seed: int) -> list[float]:
+    """`count` arrival times in seconds at `rate` per second, from a generator of their own: every line of a (rate,
+    seed) gets the same plan, and the engine's sampling never touches it."""
+    generator, now, arrivals = random.Random(seed), 0.0, []
+    for _ in range(count):
+        now += generator.expovariate(rate)
+        arrivals.append(now)
+    return arrivals
+
+
+def run_open_loop(llm, panel: list[PanelEntry], params, arrivals: list[float], drain_seconds: float,
+                  clock: Callable[[], float] = time.perf_counter, sleep: Callable[[float], None] = time.sleep) -> OpenLoopRecord:
+    """Before every step add every request that is due, however full the engine is: a busy engine makes requests wait
+    and never moves the plan. After it, stamp each in-flight request's new tokens with the host's clock, which is when
+    the API would hand them over. A request unfinished drain_seconds after the last arrival keeps finish_step -1 and
+    the tokens it has. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
+    records, in_flight = [], []
+    next_entry = 0
+    origin = clock()
+    deadline = arrivals[-1] + drain_seconds
+    while (in_flight or next_entry < len(panel)) and clock() - origin < deadline:
+        now = clock() - origin
+        while next_entry < len(panel) and arrivals[next_entry] <= now:
+            entry = panel[next_entry]
+            record = OpenLoopRequestRecord(id=entry["id"], category=entry["category"], prompt_len=len(entry["prompt_token_ids"]),
+                                           submit_step=llm.num_steps, deliveries=[], finish_step=-1, token_ids=[],
+                                           arrival_seconds=arrivals[next_entry], submit_seconds=now)
+            in_flight.append([record, llm.add_request(entry["prompt_token_ids"], params), 0])
+            records.append(record)
+            next_entry += 1
+        if not in_flight:
+            sleep(arrivals[next_entry] - now)
+            continue
+        step = llm.num_steps
+        llm.step()
+        in_flight = record_deliveries(in_flight, step, clock() - origin)
+    for record, seq, _ in in_flight:
+        record["token_ids"] = seq.completion_token_ids
+    return OpenLoopRecord(requests=records)
 
 
 def gpu_state(run=subprocess.run) -> dict:
@@ -141,8 +203,8 @@ def installed_packages(distributions=importlib.metadata.distributions) -> tuple[
     return text, hashlib.sha256(text.encode()).hexdigest()
 
 
-def build_result(**parts) -> dict:
-    return {"schema": SCHEMA, **{key: parts[key] for key in RESULT_KEYS[1:]}}
+def build_result(schema: str = SCHEMA, **parts) -> dict:
+    return {"schema": schema, **{key: parts[key] for key in RESULT_KEYS[1:]}}
 
 
 def manifest(commit: str) -> dict:
@@ -155,25 +217,82 @@ def manifest(commit: str) -> dict:
             "commit": commit}
 
 
-def parse_closed_loop_args(argv: list[str]) -> argparse.Namespace:
+def parse_args(argv: list[str], mode: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--protocol", type=Path, default=ROOT / "benchmarks" / "protocol-v2.json")
     parser.add_argument("--panel", required=True, help="a key of the protocol's panels (D48, K128)")
     parser.add_argument("--line", required=True, help="a key of the protocol's lines (k0, model_k3, ...)")
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--repeat", type=int, default=1, help="2 for the timing-noise repeat")
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True, help="git commit of the synced tree (the sync step refuses a dirty tree)")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--record-confidences", action="store_true",
-                        help="keep every round's DSpark confidence logits and accepted counts in <output>.confidences.json "
-                             "(job A's calibration; the extra copy each round makes it no timing run)")
+    if mode == "closed-loop":
+        parser.add_argument("--repeat", type=int, default=1, help="2 for the timing-noise repeat")
+        parser.add_argument("--record-confidences", action="store_true",
+                            help="keep every round's DSpark confidence logits and accepted counts in "
+                                 "<output>.confidences.json (job A's calibration; the extra copy each round makes it "
+                                 "no timing run)")
+    else:
+        parser.add_argument("--rate", type=float, required=True, help="planned arrivals per second")
+        parser.add_argument("--requests", type=int, required=True, help="planned arrivals, the panel cycled")
     return parser.parse_args(argv)
 
 
-def closed_loop(args: argparse.Namespace) -> None:
+def sampling_kwargs(protocol: dict) -> dict:
+    sampling = protocol["sampling"]
+    return dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
+                ignore_eos=sampling["ignore_eos"])
+
+
+def warmed_up_engine(protocol: dict, line: dict, panel: list[PanelEntry], args: argparse.Namespace, **overrides):
+    """The line's engine after the protocol's warm-up, with its target and draft directories and LLM keyword arguments."""
     from nanovllm import LLM, SamplingParams
+
+    target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
+    kwargs.update(overrides)
+    llm = LLM(target, **kwargs)
+    warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
+    run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **sampling_kwargs(protocol)),
+                    args.concurrency)
+    return llm, target, draft, kwargs
+
+
+def base_config(args: argparse.Namespace, mode: str, protocol: dict, line: dict, num_requests: int, target: str,
+                draft: str | None, kwargs: dict) -> dict:
+    return {"mode": mode, "panel": args.panel, "line": args.line, "drafter": line["drafter"],
+            "num_speculative_tokens": line["k"], "concurrency": args.concurrency, "seed": args.seed,
+            "num_requests": num_requests,
+            "sampling": {**sampling_kwargs(protocol), "max_tokens": protocol["sampling"]["max_tokens"]},
+            "target": target, "draft": draft,
+            **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
+                                                "draft_type", "variable_length", "record_confidences")}}
+
+
+def write_result(args: argparse.Namespace, llm, schema: str, protocol_text: str, panel_path: Path, kwargs: dict, config: dict,
+                 state_start: dict, wall_seconds: float, record: ClosedLoopRecord | OpenLoopRecord, **extra) -> None:
+    steps, phases = llm.step_timings(), llm.phase_timings()
+    speculative_stats = dict(llm.speculative.stats) if llm.speculative is not None else None
+    state_end = gpu_state()
+    packages, packages_sha256 = installed_packages()
+    schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
+                       if "verify_schedule" in kwargs else None)
+    result = build_result(
+        schema=schema,
+        protocol_sha256=hashlib.sha256(protocol_text.encode()).hexdigest(),
+        manifest={**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
+                  "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
+                  "verify_schedule_sha256": schedule_sha256},
+        gpu_state_start=state_start, gpu_state_end=state_end, config=config, wall_seconds=wall_seconds,
+        steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats,
+        preemptions=llm.scheduler.num_preemptions)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps({**result, **extra}))
+    args.output.with_name("packages.txt").write_text(packages)
+
+
+def closed_loop(args: argparse.Namespace) -> None:
+    from nanovllm import SamplingParams
 
     protocol_text = args.protocol.read_text()
     protocol = json.loads(protocol_text)
@@ -183,43 +302,16 @@ def closed_loop(args: argparse.Namespace) -> None:
     panel_path = ROOT / panel_spec["file"]
     panel = load_panel(panel_path, args.concurrency, panel_spec["take"])
     line = protocol["lines"][args.line]
-    sampling = protocol["sampling"]
-    target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
-    if args.record_confidences:
-        kwargs["record_confidences"] = True
-    llm = LLM(target, **kwargs)
-    rec = dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
-               ignore_eos=sampling["ignore_eos"])
-    warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
-    run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **rec), args.concurrency)
+    overrides = {"record_confidences": True} if args.record_confidences else {}
+    llm, target, draft, kwargs = warmed_up_engine(protocol, line, panel, args, **overrides)
+    params = SamplingParams(max_tokens=protocol["sampling"]["max_tokens"], **sampling_kwargs(protocol))
     llm.start_measurement()
     wall_start = time.perf_counter()
-    record = run_closed_loop(llm, panel, SamplingParams(max_tokens=sampling["max_tokens"], **rec), args.concurrency)
+    record = run_closed_loop(llm, panel, params, args.concurrency)
     torch.cuda.synchronize()
     wall_seconds = time.perf_counter() - wall_start
-    steps, phases = llm.step_timings(), llm.phase_timings()
-    speculative_stats = dict(llm.speculative.stats) if llm.speculative is not None else None
-    state_end = gpu_state()
-    packages, packages_sha256 = installed_packages()
-    config = {"mode": "closed-loop", "panel": args.panel, "line": args.line, "drafter": line["drafter"],
-              "num_speculative_tokens": line["k"], "concurrency": args.concurrency, "seed": args.seed,
-              "repeat": args.repeat, "num_requests": len(panel), "sampling": {**rec, "max_tokens": sampling["max_tokens"]},
-              "target": target, "draft": draft,
-              **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                  "draft_type", "variable_length", "record_confidences")}}
-    schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
-                       if "verify_schedule" in kwargs else None)
-    result = build_result(
-        protocol_sha256=hashlib.sha256(protocol_text.encode()).hexdigest(),
-        manifest={**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
-                  "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
-                  "verify_schedule_sha256": schedule_sha256},
-        gpu_state_start=state_start, gpu_state_end=state_end, config=config, wall_seconds=wall_seconds,
-        steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats,
-        preemptions=llm.scheduler.num_preemptions)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result))
-    args.output.with_name("packages.txt").write_text(packages)
+    config = {**base_config(args, "closed-loop", protocol, line, len(panel), target, draft, kwargs), "repeat": args.repeat}
+    write_result(args, llm, SCHEMA, protocol_text, panel_path, kwargs, config, state_start, wall_seconds, record)
     if args.record_confidences:
         log = {"schema": CONFIDENCE_SCHEMA, "line": args.line, "panel": args.panel, "concurrency": args.concurrency,
                "seed": args.seed, "commit": args.commit, "rounds": llm.speculative.confidence_log}
@@ -229,11 +321,47 @@ def closed_loop(args: argparse.Namespace) -> None:
     llm.exit()
 
 
+def open_loop(args: argparse.Namespace) -> None:
+    """Long runs keep per-step events but no per-phase ones, and run without a full garbage collection: the run's
+    bookkeeping would otherwise stop the process for 177-559 ms, which is the tail this mode measures. Only this mode
+    does (ctx_store diagnosis §5; gc.freeze() leaves the bookkeeping growing)."""
+    from nanovllm import SamplingParams
+
+    protocol_text = args.protocol.read_text()
+    protocol = json.loads(protocol_text)
+    state_start = gpu_state()
+    assert_gpu(state_start, protocol["gpu"]["name"])
+    panel_path = ROOT / protocol["panels"][args.panel]["file"]
+    entries = json.loads(panel_path.read_text())
+    panel = [entries[index % len(entries)] for index in range(args.requests)]
+    line = protocol["lines"][args.line]
+    llm, target, draft, kwargs = warmed_up_engine(protocol, line, panel, args, record_phase_timings=False)
+    params = SamplingParams(max_tokens=protocol["sampling"]["max_tokens"], **sampling_kwargs(protocol))
+    arrivals = poisson_arrivals(args.requests, args.rate, args.seed)
+    gc.collect()
+    thresholds = gc.get_threshold()
+    gc.set_threshold(thresholds[0], thresholds[1], GC_FULL_OUT_OF_REACH)
+    full_collections = gc.get_stats()[2]["collections"]
+    llm.start_measurement()
+    wall_start = time.perf_counter()
+    record = run_open_loop(llm, panel, params, arrivals, protocol["open_loop"]["drain_seconds"])
+    torch.cuda.synchronize()
+    wall_seconds = time.perf_counter() - wall_start
+    full_collections = gc.get_stats()[2]["collections"] - full_collections
+    gc.set_threshold(*thresholds)
+    config = {**base_config(args, "open-loop", protocol, line, len(panel), target, draft, kwargs), "rate": args.rate}
+    write_result(args, llm, OPEN_LOOP_SCHEMA, protocol_text, panel_path, kwargs, config, state_start, wall_seconds, record,
+                 full_collections=full_collections)
+    finished = sum(request["finish_step"] >= 0 for request in record["requests"])
+    print(f"{args.output}: {finished}/{args.requests} finished in {wall_seconds:.1f}s wall")
+    llm.exit()
+
+
 def main(argv: list[str] | None = None) -> None:
     mode_parser = argparse.ArgumentParser(add_help=False)
-    mode_parser.add_argument("--mode", choices=["closed-loop"], default="closed-loop")
-    _, rest = mode_parser.parse_known_args(argv)
-    closed_loop(parse_closed_loop_args(rest))
+    mode_parser.add_argument("--mode", choices=["closed-loop", "open-loop"], default="closed-loop")
+    known, rest = mode_parser.parse_known_args(argv)
+    (closed_loop if known.mode == "closed-loop" else open_loop)(parse_args(rest, known.mode))
 
 
 if __name__ == "__main__":

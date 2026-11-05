@@ -30,6 +30,7 @@ class Config:
     record_confidences: bool = False          # keep every round's DSpark confidence logits and accepted counts
     seed: int | None = None                 # seed of the engine's sampling generator
     record_step_timings: bool = False         # record a pair of CUDA events per engine step
+    record_phase_timings: bool = True         # with record_step_timings, also an event per phase of every round
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

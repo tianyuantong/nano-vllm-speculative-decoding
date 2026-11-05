@@ -42,7 +42,7 @@ class LLMEngine:
             self.speculative = SpeculativeDecoder(self.model_runner, config)
             if not config.enforce_eager:
                 self.speculative.capture_graphs()
-            if config.record_step_timings:
+            if config.record_step_timings and config.record_phase_timings:
                 self.speculative.enable_phase_timings()
         self.scheduler = Scheduler(config)
         self.step_timer = StepTimer(config.record_step_timings)

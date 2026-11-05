@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from bench_spec import (ROOT, RESULT_KEYS, assert_gpu, build_result, engine_kwargs, gpu_state, installed_packages,
-                        kv_budget_bytes, load_panel, run_closed_loop)
+                        kv_budget_bytes, load_panel, poisson_arrivals, run_closed_loop, run_open_loop)
 
 TARGET_BLOCK, DRAFT_BLOCK = 37_748_736, 29_360_128
 
@@ -115,6 +115,56 @@ def test_closed_loop_never_exceeds_concurrency():
 def test_closed_loop_refills_two_finished_in_one_step():
     trace_by_id = trace(run_closed_loop(FakeEngine(), panel_of([1, 1, 2, 2]), None, concurrency=2))
     assert trace_by_id["r2"] == trace_by_id["r3"] == (1, [[1, 1], [2, 1]], 2)
+
+
+class SlowEngine(FakeEngine):
+    """A FakeEngine on a fake clock: every step takes seconds_per_step."""
+
+    def __init__(self, seconds_per_step):
+        super().__init__()
+        self.now = 0.0
+        self.seconds_per_step = seconds_per_step
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def step(self):
+        self.now += self.seconds_per_step
+        super().step()
+
+
+def test_poisson_arrivals_are_fixed_by_the_seed_and_scale_with_the_rate():
+    assert poisson_arrivals(5, 2.0, 7) == poisson_arrivals(5, 2.0, 7)
+    assert poisson_arrivals(5, 2.0, 7) == pytest.approx([time / 2 for time in poisson_arrivals(5, 1.0, 7)])
+    assert poisson_arrivals(5, 1.0, 7) != poisson_arrivals(5, 1.0, 8)
+    arrivals = poisson_arrivals(20000, 5.0, 1)
+    assert arrivals == sorted(arrivals) and arrivals[-1] / 20000 == pytest.approx(0.2, rel=0.02)
+
+
+def test_a_busy_engine_does_not_move_the_plan():
+    engine = SlowEngine(seconds_per_step=1.0)
+    record = run_open_loop(engine, panel_of([2, 2, 2]), None, [0.0, 0.5, 0.6], 100.0, engine.clock, engine.sleep)
+    arrivals = [(request["arrival_seconds"], request["submit_seconds"]) for request in record["requests"]]
+    assert arrivals == [(0.0, 0.0), (0.5, 1.0), (0.6, 1.0)]       # both wait out the step that was running
+    assert record["requests"][1]["deliveries"][0] == [1, 1, 2.0]
+    assert record["requests"][1]["finish_step"] == 2
+
+
+def test_an_idle_engine_sleeps_until_the_next_arrival():
+    engine = SlowEngine(seconds_per_step=1.0)
+    record = run_open_loop(engine, panel_of([1, 1]), None, [2.5, 9.0], 100.0, engine.clock, engine.sleep)
+    assert [request["submit_seconds"] for request in record["requests"]] == [2.5, 9.0]
+    assert [request["deliveries"] for request in record["requests"]] == [[[0, 1, 3.5]], [[1, 1, 10.0]]]
+
+
+def test_a_request_past_the_drain_stays_unfinished_with_its_tokens():
+    engine = SlowEngine(seconds_per_step=1.0)
+    record = run_open_loop(engine, panel_of([100]), None, [0.0], 3.0, engine.clock, engine.sleep)
+    request = record["requests"][0]
+    assert request["finish_step"] == -1 and request["token_ids"] == [0, 1, 2]
 
 
 def test_gpu_state():
