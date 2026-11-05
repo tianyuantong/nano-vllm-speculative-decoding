@@ -16,7 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from summarize_bench import _end_ms, percentile, steady_window  # noqa: E402
+from summarize_bench import _end_ms, percentile, prefill_tokens, steady_window  # noqa: E402
 
 NAME = re.compile(r"(\w+)-C(\d+)-s(\d+)-r(\d+)\.json")
 
@@ -25,7 +25,7 @@ def itl(result: dict, concurrency: int) -> dict:
     steps = result["steps"]
     first, last = steady_window(steps, concurrency)
     end = {step["step"]: _end_ms(step) for step in steps}
-    prefill_steps = [step["step"] for step in steps if step["kind"] == "prefill"]
+    prefill_steps = [step["step"] for step in steps if prefill_tokens(step)]
     clean, stalled = [], []
     for request in result["requests"]:
         delivered = [step for step, _ in request["deliveries"]]

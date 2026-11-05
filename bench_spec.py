@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA = "bench-v2"
 CONFIDENCE_SCHEMA = "confidence-log-v1"
 RESULT_KEYS = ("schema", "protocol_sha256", "manifest", "gpu_state_start", "gpu_state_end", "config",
-               "wall_seconds", "steps", "phases", "requests", "speculative_stats")
+               "wall_seconds", "steps", "phases", "requests", "speculative_stats", "preemptions")
 QUERY_FIELDS = ("name", "power.limit", "clocks.max.sm", "clocks.max.memory",
                 "ecc.mode.current", "temperature.gpu", "clocks_event_reasons.active")
 
@@ -215,7 +215,8 @@ def closed_loop(args: argparse.Namespace) -> None:
                   "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
                   "verify_schedule_sha256": schedule_sha256},
         gpu_state_start=state_start, gpu_state_end=state_end, config=config, wall_seconds=wall_seconds,
-        steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats)
+        steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats,
+        preemptions=llm.scheduler.num_preemptions)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result))
     args.output.with_name("packages.txt").write_text(packages)

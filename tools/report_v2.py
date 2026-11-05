@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from summarize_bench import round_weighted_tokens, summarize_v2, tokens_per_round, verified_per_row  # noqa: E402
 
 BASELINE = "k0"
+Q_STEADY, Q_FULL = 0, 4    # indices into count_runs' per-line values
 
 
 def timing_noise(pairs: list[tuple[float, float]]) -> float:
@@ -60,12 +61,15 @@ def invalid_reasons(result: dict, summary: dict, protocol: dict) -> list[str]:
     reasons = []
     if result["gpu_state_start"]["name"] != protocol["gpu"]["name"]:
         reasons.append("gpu name mismatch")
-    if summary["excess_prefill_tokens"] > 0:
+    if summary["preemptions"] > 0:
         reasons.append("preemption > 0")
     if not all(math.isfinite(summary[key]) for key in ("q_steady", "q_full")):
         reasons.append("non-finite value or assertion failure")
-    durations = [step["duration_ms"] for step in result["steps"] if step["kind"] != "prefill"]
-    if max(durations) > 3 * statistics.median(durations):
+    durations = defaultdict(list)    # by kind: a step is slow against steps of its own kind
+    for step in result["steps"]:
+        if step["kind"] != "prefill":
+            durations[step["kind"]].append(step["duration_ms"])
+    if any(max(values) > 3 * statistics.median(values) for values in durations.values()):
         reasons.append("decode step or round > 3 x median")
     return reasons
 
@@ -80,9 +84,9 @@ def k0_line_of(protocol: dict, line: str) -> str:
     return protocol["lines"][line].get("k0_line", BASELINE)
 
 
-def paired_gains(q: dict, panel: str, concurrency: int, line_a: str, line_b: str) -> list[float]:
-    """Q_A / Q_B − 1 for every seed with both lines."""
-    return [by_line[line_a][0] / by_line[line_b][0] - 1 for (p, c, _), by_line in q.items()
+def paired_gains(q: dict, panel: str, concurrency: int, line_a: str, line_b: str, measure: int = 0) -> list[float]:
+    """Q_A / Q_B − 1 for every seed with both lines; measure indexes q's values: Q_STEADY or Q_FULL."""
+    return [by_line[line_a][measure] / by_line[line_b][measure] - 1 for (p, c, _), by_line in q.items()
             if p == panel and c == concurrency and line_a in by_line and line_b in by_line]
 
 
@@ -98,8 +102,8 @@ def _median_or_dash(values: list[float | None]) -> str:
 
 def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict, list, dict]:
     """The runs that count: each run's invalid reasons by name, the timing-noise pairs, and per (panel, C, seed) each
-    valid repeat-1 line's (Q_steady, tokens per round, its per-request median, positions verified per row). A later
-    run with the same
+    valid repeat-1 line's (Q_steady, tokens per round, its per-request median, positions verified per row, Q_full).
+    A later run with the same
     (panel, C, line, seed, repeat) replaces an earlier one, so a rerun directory listed last replaces the runs it repeats.
     Every run of a (panel, C, seed), each line and repeat, must come from one directory with one protocol and panel,
     and the lines of each source tree from one commit; otherwise none of them counts, so a rerun has to repeat the
@@ -132,14 +136,14 @@ def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict
                 for run_name in (name, twin[0]):
                     invalid[run_name].append("timing-noise repeats differ in tokens")
 
-    q = defaultdict(dict)    # (panel, C, seed) -> line -> (Q_steady, tokens per round, per-request median, verified)
+    q = defaultdict(dict)    # (panel, C, seed) -> line -> (Q_steady, tokens per round, per-request median, verified, Q_full)
     for (panel, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
         if repeat == 1 and not invalid[name]:
             per_request = [value for value in tokens_per_round(result["requests"]) if value is not None]
             stats = result["speculative_stats"]
             q[(panel, concurrency, seed)][line] = (summary["q_steady"], round_weighted_tokens(stats) if stats else None,
                                                    statistics.median(per_request) if per_request else None,
-                                                   verified_per_row(stats) if stats else None)
+                                                   verified_per_row(stats) if stats else None, summary["q_full"])
     return invalid, pairs, q
 
 
@@ -157,9 +161,10 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
            "", "## R = Q_steady(line) / Q_steady(its k0 line)", "",
            "tokens/round: sum of (accepted + 1) over all rounds ÷ rounds, as vLLM and DeepSpec count it. per-request: "
            "the median over requests of each request's mean, the column earlier reports showed. verified/row: positions "
-           "verified per row and round, variable-length lines only. All three are medians over seeds.",
-           "", "| panel | C | line | k0 | seeds | R | faster | tokens/round | per-request | verified/row |",
-           "|---|---:|---|---|---:|---|---|---:|---:|---:|"]
+           "verified per row and round, variable-length lines only. All three are medians over seeds. R(Q_full): "
+           "the same ratio on the secondary metric, reported only.",
+           "", "| panel | C | line | k0 | seeds | R | faster | R(Q_full) | tokens/round | per-request | verified/row |",
+           "|---|---:|---|---|---:|---|---|---|---:|---:|---:|"]
     medians = defaultdict(dict)
     for panel in panels:
         for concurrency in concurrencies:
@@ -169,13 +174,14 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
                                 if p == panel and c == concurrency and line in by_line and k0 in by_line}
                 if not runs_by_seed:
                     continue
-                ratios = [by_line[line][0] / by_line[k0][0] for by_line in runs_by_seed.values()]
+                ratios = [by_line[line][Q_STEADY] / by_line[k0][Q_STEADY] for by_line in runs_by_seed.values()]
+                full_ratios = [by_line[line][Q_FULL] / by_line[k0][Q_FULL] for by_line in runs_by_seed.values()]
                 medians[(panel, line)][concurrency] = statistics.median(ratios)
                 faster = ("yes" if verdict_faster(ratios, noise) else "no") if noise is not None else "-"
                 tokens = [_median_or_dash([by_line[line][index] for by_line in runs_by_seed.values()])
                           for index in (1, 2, 3)]
                 out.append(f"| {panel} | {concurrency} | {line} | {k0} | {len(ratios)} | {format_range(ratios)} | {faster} | "
-                           f"{tokens[0]} | {tokens[1]} | {tokens[2]} |")
+                           f"{format_range(full_ratios)} | {tokens[0]} | {tokens[1]} | {tokens[2]} |")
 
     out += ["", "## Crossover (smallest C with median R < 1)", ""]
     for (panel, line), by_concurrency in sorted(medians.items()):
@@ -198,7 +204,8 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
                         out.append(f"| {panel} | {concurrency} | {line_a} | {line_b} | {len(gains)} | {span} | {together} |")
 
     out += ["", "## Line against line: Q_A / Q_B − 1 paired by seed, within a tree", "",
-            "| panel | C | A | B | seeds | gain | verdict |", "|---|---:|---|---|---:|---|---:|"]
+            "Q_steady decides the verdict; the gain on Q_full is reported only.", "",
+            "| panel | C | A | B | seeds | gain | verdict | Q_full gain |", "|---|---:|---|---|---:|---|---:|---|"]
     for panel in panels:
         for concurrency in concurrencies:
             for line_a, line_b in combinations(lines, 2):
@@ -207,8 +214,10 @@ def report(runs: list[tuple[str, dict, dict]], protocol: dict) -> str:
                 gains = paired_gains(q, panel, concurrency, line_a, line_b)
                 if gains:
                     verdict = verdict_a_beats_b(gains, noise) if noise is not None else "-"
-                    span = f"{min(gains):+.3f}..{max(gains):+.3f}"
-                    out.append(f"| {panel} | {concurrency} | {line_a} | {line_b} | {len(gains)} | {span} | {verdict} |")
+                    full = paired_gains(q, panel, concurrency, line_a, line_b, Q_FULL)
+                    out.append(f"| {panel} | {concurrency} | {line_a} | {line_b} | {len(gains)} "
+                               f"| {min(gains):+.3f}..{max(gains):+.3f} | {verdict} "
+                               f"| {min(full):+.3f}..{max(full):+.3f} |")
 
     out += ["", "## Invalid runs", ""]
     out += [f"- {name}: {', '.join(reasons)}" for name, reasons in sorted(invalid.items()) if reasons] or ["- none"]

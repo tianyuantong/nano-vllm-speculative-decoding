@@ -22,21 +22,25 @@ class StepTimer:
         event.record()
         return event
 
-    def end(self, start_event, kind: str, batch_size: int, tokens_out: int) -> None:
+    def end(self, start_event, kind: str, batch_size: int, tokens_out: int, *, decode_rows: int, prefill_tokens: int,
+            delivered_tokens: int) -> None:
         if not self.enabled:
             return
         end_event = self._new_event()
         end_event.record()
-        self._records.append((kind, batch_size, tokens_out, start_event, end_event))
+        self._records.append((kind, batch_size, tokens_out, decode_rows, prefill_tokens, delivered_tokens, start_event,
+                              end_event))
 
     def timings(self) -> list[dict]:
         """One dict per step; `start_ms` is relative to the first recorded step."""
         if not self._records:
             return []
         self._synchronize()
-        origin = self._records[0][3]
+        origin = self._records[0][-2]
         return [
-            {"step": index, "kind": kind, "batch_size": batch_size, "tokens_out": tokens_out,
+            {"step": index, "kind": kind, "batch_size": batch_size, "tokens_out": tokens_out, "decode_rows": decode_rows,
+             "prefill_tokens": prefill_tokens, "delivered_tokens": delivered_tokens,
              "start_ms": origin.elapsed_time(start), "duration_ms": start.elapsed_time(end)}
-            for index, (kind, batch_size, tokens_out, start, end) in enumerate(self._records)
+            for index, (kind, batch_size, tokens_out, decode_rows, prefill_tokens, delivered_tokens, start, end)
+            in enumerate(self._records)
         ]

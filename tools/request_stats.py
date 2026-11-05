@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from itl_stats import itl  # noqa: E402
 from plot_speedup import BAR_PITCH, BAR_WIDTH, LINES, THEMES, column, text  # noqa: E402
-from report_v2 import BASELINE, count_runs, load_runs  # noqa: E402
+from report_v2 import count_runs, k0_line_of, load_runs  # noqa: E402
 from summarize_bench import percentile, steady_window, tokens_per_round  # noqa: E402
 
 CATEGORIES = {"code_completion": "code completion", "NIAH": "NIAH", "creative_writing": "creative writing",
@@ -26,6 +26,7 @@ WIDTH, LEFT, RIGHT, BOTTOM, PANEL_GAP = 760, 56, 24, 60, 64
 GAPS_HEIGHT, GAPS_TOP = 480, 156    # room for two legend rows and the panel headings above the plots
 CATEGORIES_HEIGHT, CATEGORIES_TOP = 430, 112
 NOTCH_MIN_PX = 4    # a notch closer than this to the column's top is left out
+PLAIN_SERIES = "k0"    # the themes' color for plain decoding, whichever tree's k0 line it is
 
 
 def valid_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> dict[tuple[str, int, str, int], tuple[dict, dict]]:
@@ -74,7 +75,7 @@ def category_tokens(valid: dict) -> tuple[dict[tuple, list[int]], dict[tuple, se
     (panel, C, category) -> the prompt ids. The first delivery is the prefill's token. Speculative lines only."""
     totals, prompts = defaultdict(lambda: [0, 0]), defaultdict(set)
     for (panel, concurrency, line, _), (result, _) in valid.items():
-        if line == BASELINE:
+        if result["config"]["num_speculative_tokens"] == 0:
             continue
         for request in result["requests"]:
             later = request["deliveries"][1:]
@@ -104,7 +105,7 @@ def per_request_tokens(valid: dict) -> dict[tuple[str, int, str], list[float]]:
     """(panel, C, line) -> each request's mean tokens per delivery after the prefill's, over every seed."""
     spread = defaultdict(list)
     for (panel, concurrency, line, _), (result, _) in valid.items():
-        if line != BASELINE:
+        if result["config"]["num_speculative_tokens"] > 0:
             spread[(panel, concurrency, line)] += [value for value in tokens_per_round(result["requests"])
                                                    if value is not None]
     return spread
@@ -176,12 +177,12 @@ def nice_step(top: float) -> float:
     return next(step for step in (1, 2, 5, 10, 20, 25, 50, 100, 200) if top / step <= 8)
 
 
-def gaps_panel(table: dict, panel: str, line: str, measure: str, x0: float, width: float, heading: str,
+def gaps_panel(table: dict, panel: str, plain: str, line: str, measure: str, x0: float, width: float, heading: str,
                theme: dict) -> list[str]:
-    """Plain decoding and one line, a pair of columns per C, of one gap measure; the p99 panel notches each column at
-    the p99 without the gaps that hold a prefill step."""
+    """Plain decoding (line `plain`) and one line, a pair of columns per C, of one gap measure; the p99 panel notches
+    each column at the p99 without the gaps that hold a prefill step."""
     concurrencies = sorted({c for (p, c, name) in table if p == panel and name == line})
-    top = max(table[(panel, c, name)][measure] for c in concurrencies for name in (BASELINE, line))
+    top = max(table[(panel, c, name)][measure] for c in concurrencies for name in (plain, line))
     step = nice_step(top)
     y_max = math.ceil(top / step) * step
     plot_h = GAPS_HEIGHT - GAPS_TOP - BOTTOM
@@ -194,10 +195,10 @@ def gaps_panel(table: dict, panel: str, line: str, measure: str, x0: float, widt
     slot = width / len(concurrencies)
     for index, concurrency in enumerate(concurrencies):
         center = x0 + slot * (index + 0.5)
-        for position, name in enumerate((BASELINE, line)):
+        for position, (name, series) in enumerate(((plain, PLAIN_SERIES), (line, line))):
             row = table[(panel, concurrency, name)]
             middle = center + (position - 0.5) * BAR_PITCH
-            parts.append(column(middle - BAR_WIDTH / 2, y_of(row[measure]), y_of(0), theme["series"][name]))
+            parts.append(column(middle - BAR_WIDTH / 2, y_of(row[measure]), y_of(0), theme["series"][series]))
             notch = y_of(row["itl_p99_clean"])
             if measure == "itl_p99" and notch - y_of(row[measure]) >= NOTCH_MIN_PX:
                 parts.append(f"<line x1='{middle - BAR_WIDTH / 2:.1f}' y1='{notch:.1f}' x2='{middle + BAR_WIDTH / 2:.1f}' "
@@ -209,23 +210,24 @@ def gaps_panel(table: dict, panel: str, line: str, measure: str, x0: float, widt
     return parts
 
 
-def gaps_svg(table: dict, panel: str, line: str, theme: dict, subtitle: str) -> str:
+def gaps_svg(table: dict, panel: str, plain: str, line: str, theme: dict, subtitle: str) -> str:
     rows = {c: table[(p, c, name)] for (p, c, name) in table if p == panel and name == line}
     tokens = [row["tokens_per_delivery"] for row in rows.values()]
     title = f"Gaps between a request's deliveries: plain decoding and the {LINES[line].split(',')[0]}"
-    summary = "; ".join(f"C = {c}: ITL p50 {table[(panel, c, BASELINE)]['itl_p50']:.1f} and {row['itl_p50']:.1f} ms, "
-                        f"p99 {table[(panel, c, BASELINE)]['itl_p99']:.1f} and {row['itl_p99']:.1f} ms"
+    summary = "; ".join(f"C = {c}: ITL p50 {table[(panel, c, plain)]['itl_p50']:.1f} and {row['itl_p50']:.1f} ms, "
+                        f"p99 {table[(panel, c, plain)]['itl_p99']:.1f} and {row['itl_p99']:.1f} ms"
                         for c, row in sorted(rows.items()))
     parts = svg_open(title, summary, subtitle, theme, GAPS_HEIGHT)
-    parts += legend([(theme["series"][BASELINE], "plain decoding: 1 token a delivery"),
+    parts += legend([(theme["series"][PLAIN_SERIES], "plain decoding: 1 token a delivery"),
                      (theme["series"][line], f"{LINES[line]}: {min(tokens):.2f}–{max(tokens):.2f} tokens a delivery")],
                     LEFT, 78, theme)
-    parts.append(f"<rect x='{LEFT}' y='90' width='12' height='12' rx='3' fill='{theme['series'][BASELINE]}'/>"
+    parts.append(f"<rect x='{LEFT}' y='90' width='12' height='12' rx='3' fill='{theme['series'][PLAIN_SERIES]}'/>"
                  f"<line x1='{LEFT}' y1='96' x2='{LEFT + 12}' y2='96' stroke='{theme['surface']}' stroke-width='2'/>")
     parts.append(text(LEFT + 18, 100.5, "notch: p99 without the gaps that hold a prefill step", 12, theme["text"]))
     width = (WIDTH - LEFT - RIGHT - PANEL_GAP) / 2
-    parts += gaps_panel(table, panel, line, "itl_p50", LEFT, width, "Typical gap, ITL p50 (ms)", theme)
-    parts += gaps_panel(table, panel, line, "itl_p99", LEFT + width + PANEL_GAP, width, "Longest gaps, ITL p99 (ms)", theme)
+    parts += gaps_panel(table, panel, plain, line, "itl_p50", LEFT, width, "Typical gap, ITL p50 (ms)", theme)
+    parts += gaps_panel(table, panel, plain, line, "itl_p99", LEFT + width + PANEL_GAP, width,
+                        "Longest gaps, ITL p99 (ms)", theme)
     return "\n".join(parts) + "\n</svg>\n"
 
 
@@ -273,7 +275,8 @@ def write_figures(valid: dict, protocol: dict, panel: str, line: str, prefix: Pa
     base = f"{protocol['models']['target']} · {protocol['models']['dtype']} · {gpu} · {panel} panel"
     totals, prompts = category_tokens(valid)
     for mode, theme in THEMES.items():
-        figures = {"gaps": gaps_svg(latency_table(valid), panel, line, theme, f"{base} · medians over {seeds} seeds"),
+        figures = {"gaps": gaps_svg(latency_table(valid), panel, k0_line_of(protocol, line), line, theme,
+                                    f"{base} · medians over {seeds} seeds"),
                    "categories": categories_svg(totals, prompts, panel, theme,
                                                 f"{base} · every concurrency and seed, weighted by rounds")}
         for name, svg in figures.items():

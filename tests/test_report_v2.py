@@ -40,15 +40,23 @@ def run(name=PROTOCOL["gpu"]["name"], spike=1.0):
     return {"gpu_state_start": {"name": name}, "steps": steps}
 
 
-SUMMARY = {"excess_prefill_tokens": 0, "q_steady": 100.0, "q_full": 90.0}
+SUMMARY = {"preemptions": 0, "q_steady": 100.0, "q_full": 90.0}
 
 
 def test_invalid_reasons():
     assert invalid_reasons(run(), SUMMARY, PROTOCOL) == []
     assert invalid_reasons(run(name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"), SUMMARY, PROTOCOL) == \
         ["gpu name mismatch"]
-    assert invalid_reasons(run(), {**SUMMARY, "excess_prefill_tokens": 5}, PROTOCOL) == ["preemption > 0"]
+    assert invalid_reasons(run(), {**SUMMARY, "preemptions": 1}, PROTOCOL) == ["preemption > 0"]
     assert invalid_reasons(run(spike=4.0), SUMMARY, PROTOCOL) == ["decode step or round > 3 x median"]
+
+
+def test_a_slow_step_is_judged_against_its_own_kind():
+    # 12 ms rounds and 40 ms mixed steps: each kind is even, though 40 > 3 x the median of all the steps together.
+    steps = [{"kind": "round", "duration_ms": 12.0}] * 9 + [{"kind": "mixed", "duration_ms": 40.0}] * 3
+    assert invalid_reasons({**run(), "steps": steps}, SUMMARY, PROTOCOL) == []
+    steps[-1] = {"kind": "mixed", "duration_ms": 130.0}
+    assert invalid_reasons({**run(), "steps": steps}, SUMMARY, PROTOCOL) == ["decode step or round > 3 x median"]
 
 
 def test_tokens_equal():
@@ -83,9 +91,22 @@ def test_each_line_divides_by_its_own_trees_k0():
             bench_run("k0_base", 90.0), bench_run("model_k3", 99.0)]
     text = report(runs, TWO_TREES)
     assert "| K128b | 64 | model_k3 | k0_base | 1 | 1.10 (1.10–1.10) |" in text
-    assert "| K128b | 64 | dspark_var | k0 | 1 | 1.20 (1.20–1.20) |" in text
+    assert "| K128b | 64 | dspark_var | k0 | 1 | 1.20 (1.20–1.20) | yes | 1.00 (1.00–1.00) |" in text
     assert "| K128b | 64 | k0 | k0_base | 1 | +0.111..+0.111 | no |" in text
     assert "| dspark_var | model_k3 |" not in text                    # no line against line across trees
+
+
+def test_line_against_line_reports_the_gain_on_q_full():
+    plain, faster = bench_run("k0", 100.0), bench_run("dspark_var", 120.0)
+    faster[2]["q_full"] = 99.0                                         # Q_full 90 for k0: +10% against +20% on Q_steady
+    twin = bench_run("k0", 100.0, repeat=2)
+    protocol = {**PROTOCOL, "lines": {"k0": TWO_TREES["lines"]["k0"], "dspark_var": TWO_TREES["lines"]["dspark_var"],
+                                      "model_k3": {"tree": "main", "k": 3, "k0_line": "k0"}}}
+    third = bench_run("dspark_var", 110.0)
+    third = ("job/model_k3-C64-s17011-r1.json", {**third[1], "config": {**third[1]["config"], "line": "model_k3"}},
+             {**third[2], "q_full": 90.0})
+    assert "| K128b | 64 | dspark_var | model_k3 | 1 | +0.091..+0.091 | 1 | +0.100..+0.100 |" in \
+        report([plain, twin, faster, third], protocol)
 
 
 def test_a_job_holds_one_commit_per_tree():

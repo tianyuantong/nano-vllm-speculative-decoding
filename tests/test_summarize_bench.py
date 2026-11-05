@@ -4,9 +4,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import pytest  # noqa: E402
 
-from summarize_bench import (excess_prefill_tokens, full_batch_share, itl_ms, mbu, percentile,  # noqa: E402
-                             prefill_share, q_full, q_steady, request_latencies, round_ms, steady_window,
-                             throughput, tokens_per_round, ttft_ms, verified_per_row)
+from summarize_bench import (decode_rows, excess_prefill_tokens, full_batch_share, itl_ms, mbu,  # noqa: E402
+                             percentile, preemptions, prefill_share, prefill_tokens, q_full, q_steady,
+                             request_latencies, round_ms, steady_window, throughput, tokens_per_round, ttft_ms,
+                             verified_per_row)
 
 TIMINGS = [
     {"step": 0, "kind": "prefill", "batch_size": 2, "tokens_out": 20, "start_ms": 0.0, "duration_ms": 10.0},
@@ -68,9 +69,28 @@ def test_v2_tokens_per_round_skips_the_prefill_delivery():
     assert tokens_per_round(V2_REQUESTS + [request_d]) == [1.0, 1.0, 1.0, 2.5]
 
 
+def test_the_step_fields_decide_over_the_kind():
+    # A step that decodes 2 rows and prefills 30 tokens, which M6's mixed step would be: the kind no longer tells.
+    mixed = {"step": 0, "kind": "mixed", "batch_size": 3, "tokens_out": 33, "decode_rows": 2, "prefill_tokens": 30,
+             "delivered_tokens": 3, "start_ms": 0.0, "duration_ms": 10.0}
+    assert decode_rows(mixed) == 2 and prefill_tokens(mixed) == 30
+    assert steady_window([mixed], 2) == (0, 0)
+    assert round_ms([mixed], (0, 0)) == [10.0]
+
+
+def test_results_before_v2_4_read_as_the_kind_says():
+    prefill, decode = v2_steps()[0], v2_steps()[1]
+    assert "decode_rows" not in prefill
+    assert (decode_rows(prefill), prefill_tokens(prefill)) == (0, prefill["tokens_out"])
+    assert (decode_rows(decode), prefill_tokens(decode)) == (decode["batch_size"], 0)
+
+
 def test_v2_preemption_and_shares():
     assert excess_prefill_tokens(v2_steps(), V2_REQUESTS) == 0
     assert excess_prefill_tokens(v2_steps(prefill_2_tokens=95), V2_REQUESTS) == 5
+    assert preemptions({"steps": v2_steps(prefill_2_tokens=95), "requests": V2_REQUESTS}) == 5
+    # A prefix cache hit makes the excess negative, so the direct count stands on its own.
+    assert preemptions({"steps": v2_steps(), "requests": V2_REQUESTS, "preemptions": 2}) == 2
     assert full_batch_share(v2_steps(), 2) == pytest.approx(2 / 3)
     assert prefill_share(v2_steps()) == pytest.approx(0.5625)
 

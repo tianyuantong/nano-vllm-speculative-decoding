@@ -64,7 +64,9 @@ def test_decode_preempts_the_last_running_sequence_when_the_pool_is_short():
     seqs, is_prefill = scheduler.schedule()                  # len 6: a round needs 9 tokens = 3 blocks, all 6 used
     assert not is_prefill and seqs == [first, second]
     scheduler.postprocess_speculative(seqs, [[10, 11, 12, 13], [10, 11, 12, 13]])   # len 10: 13 tokens = 4 blocks
+    assert scheduler.num_preemptions == 0
     seqs, is_prefill = scheduler.schedule()                  # no free block: the last running seq is preempted
+    assert scheduler.num_preemptions == 1
     assert not is_prefill and seqs == [first]
     assert second.status == SequenceStatus.WAITING and second.target_kv.block_table == []
     assert len(first.target_kv.block_table) == 4

@@ -87,9 +87,23 @@ def _end_ms(step: dict) -> float:
     return step["start_ms"] + step["duration_ms"]
 
 
+def decode_rows(step: dict) -> int:
+    """Rows a step decodes. Results before protocol v2.4 record only the step's kind and batch size."""
+    if "decode_rows" in step:
+        return step["decode_rows"]
+    return 0 if step["kind"] == "prefill" else step["batch_size"]
+
+
+def prefill_tokens(step: dict) -> int:
+    """Tokens a step prefills. Results before protocol v2.4 record them as a prefill step's tokens_out."""
+    if "prefill_tokens" in step:
+        return step["prefill_tokens"]
+    return step["tokens_out"] if step["kind"] == "prefill" else 0
+
+
 def steady_window(steps: list[dict], concurrency: int) -> tuple[int, int]:
-    """First and last step that is not a prefill and runs a full batch of C requests."""
-    full = [step["step"] for step in steps if step["kind"] != "prefill" and step["batch_size"] == concurrency]
+    """First and last step that decodes a full batch of C requests."""
+    full = [step["step"] for step in steps if decode_rows(step) == concurrency]
     return full[0], full[-1]
 
 
@@ -120,7 +134,7 @@ def itl_ms(steps: list[dict], requests: list[dict], window: tuple[int, int]) -> 
 
 
 def round_ms(steps: list[dict], window: tuple[int, int]) -> list[float]:
-    return [step["duration_ms"] for step in steps[window[0]:window[1] + 1] if step["kind"] != "prefill"]
+    return [step["duration_ms"] for step in steps[window[0]:window[1] + 1] if decode_rows(step)]
 
 
 def tokens_per_round(requests: list[dict]) -> list[float | None]:
@@ -144,18 +158,25 @@ def verified_per_row(speculative_stats: dict) -> float | None:
 
 
 def excess_prefill_tokens(steps: list[dict], requests: list[dict]) -> int:
-    """Prefilled tokens beyond the prompts submitted; above 0 means a request was preempted and recomputed."""
-    return (sum(step["tokens_out"] for step in steps if step["kind"] == "prefill")
-            - sum(request["prompt_len"] for request in requests))
+    """Prefilled tokens beyond the prompts submitted; above 0 means a request was preempted and recomputed. A prefix
+    cache hit makes the difference negative, so results from protocol v2.4 count preemptions directly."""
+    return sum(prefill_tokens(step) for step in steps) - sum(request["prompt_len"] for request in requests)
+
+
+def preemptions(result: dict) -> int:
+    """Requests preempted during the measurement, or for results before protocol v2.4 the excess prefill tokens."""
+    if "preemptions" in result:
+        return result["preemptions"]
+    return excess_prefill_tokens(result["steps"], result["requests"])
 
 
 def full_batch_share(steps: list[dict], concurrency: int) -> float:
-    batches = [step["batch_size"] for step in steps if step["kind"] != "prefill"]
+    batches = [decode_rows(step) for step in steps if decode_rows(step)]
     return sum(batch == concurrency for batch in batches) / len(batches)
 
 
 def prefill_share(steps: list[dict]) -> float:
-    return (sum(step["duration_ms"] for step in steps if step["kind"] == "prefill")
+    return (sum(step["duration_ms"] for step in steps if prefill_tokens(step))
             / sum(step["duration_ms"] for step in steps))
 
 
@@ -196,7 +217,7 @@ def summarize_v2(result: dict) -> dict:
         "itl_ms": {"p50": percentile(itl, 50), "p99": percentile(itl, 99)} if itl else None,
         "round_ms": {"p50": percentile(rounds, 50), "p99": percentile(rounds, 99)},
         "tokens_per_round": {category: statistics.median(values) for category, values in sorted(by_category.items())},
-        "excess_prefill_tokens": excess_prefill_tokens(steps, requests),
+        "preemptions": preemptions(result),
         "full_batch_share": full_batch_share(steps, concurrency),
         "prefill_share": prefill_share(steps),
         "mbu_p50": statistics.median(window_mbu) if window_mbu else None,

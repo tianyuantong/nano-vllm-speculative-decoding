@@ -16,6 +16,7 @@ class Scheduler:
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.enable_prefix_cache)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self.num_preemptions = 0
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -75,6 +76,7 @@ class Scheduler:
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):
+        self.num_preemptions += 1
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)

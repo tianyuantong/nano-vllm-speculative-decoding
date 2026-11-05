@@ -72,9 +72,10 @@ class LLMEngine:
         return seq
 
     def start_measurement(self) -> None:
-        """Forget earlier step timings, round phases, acceptance counts and recorded confidences, and restart the step
-        count."""
+        """Forget earlier step timings, round phases, acceptance counts, preemptions and recorded confidences, and
+        restart the step count."""
         self.step_timer.reset()
+        self.scheduler.num_preemptions = 0
         if self.speculative is not None:
             self.speculative.reset_phase_timings()
             self.speculative.stats.clear()
@@ -84,6 +85,8 @@ class LLMEngine:
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
+        decode_rows, prefill_tokens = (0, num_tokens) if is_prefill else (len(seqs), 0)
+        completion_tokens = sum(seq.num_completion_tokens for seq in seqs)
         start_event = self.step_timer.begin()
         if is_prefill:
             if self.speculative is None:
@@ -103,7 +106,9 @@ class LLMEngine:
             token_ids = self.model_runner.call("run", seqs, False)
             self.scheduler.postprocess(seqs, token_ids, False)
             kind = "decode"
-        self.step_timer.end(start_event, kind, len(seqs), abs(num_tokens))
+        self.step_timer.end(start_event, kind, len(seqs), abs(num_tokens), decode_rows=decode_rows,
+                            prefill_tokens=prefill_tokens,
+                            delivered_tokens=sum(seq.num_completion_tokens for seq in seqs) - completion_tokens)
         for seq in seqs:
             if seq.first_token_step < 0 and seq.num_completion_tokens > 0:
                 seq.first_token_step = self.num_steps

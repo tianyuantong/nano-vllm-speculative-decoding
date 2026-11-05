@@ -19,24 +19,26 @@ def make_timer(enabled=True):
 
 def test_disabled_timer_records_nothing():
     timer = make_timer(enabled=False)
-    timer.end(timer.begin(), "decode", 2, 2)
+    timer.end(timer.begin(), "decode", 2, 2, decode_rows=2, prefill_tokens=0, delivered_tokens=2)
     assert timer.timings() == []
 
 
 def test_timings_are_relative_to_the_first_step():
     timer = make_timer()
     start = timer.begin()                      # t=0
-    timer.end(start, "prefill", 3, 300)        # t=1
+    timer.end(start, "prefill", 3, 300, decode_rows=0, prefill_tokens=300, delivered_tokens=3)        # t=1
     start = timer.begin()                      # t=2
-    timer.end(start, "round", 3, 7)            # t=3
+    timer.end(start, "round", 3, 7, decode_rows=3, prefill_tokens=0, delivered_tokens=6)              # t=3
     assert timer.timings() == [
-        {"step": 0, "kind": "prefill", "batch_size": 3, "tokens_out": 300, "start_ms": 0.0, "duration_ms": 1.0},
-        {"step": 1, "kind": "round", "batch_size": 3, "tokens_out": 7, "start_ms": 2.0, "duration_ms": 1.0},
+        {"step": 0, "kind": "prefill", "batch_size": 3, "tokens_out": 300, "decode_rows": 0, "prefill_tokens": 300,
+         "delivered_tokens": 3, "start_ms": 0.0, "duration_ms": 1.0},
+        {"step": 1, "kind": "round", "batch_size": 3, "tokens_out": 7, "decode_rows": 3, "prefill_tokens": 0,
+         "delivered_tokens": 6, "start_ms": 2.0, "duration_ms": 1.0},
     ]
 
 
 def test_reset_clears_records():
     timer = make_timer()
-    timer.end(timer.begin(), "decode", 1, 1)
+    timer.end(timer.begin(), "decode", 1, 1, decode_rows=1, prefill_tokens=0, delivered_tokens=1)
     timer.reset()
     assert timer.timings() == []
