@@ -245,3 +245,13 @@ class FakeEvent:
 
     def elapsed_time(self, other):
         return other.at - self.at
+
+
+def test_a_full_batch_that_leaves_no_row_for_the_padding_runs_eagerly():
+    # 4 rows of a 4-row table, lengths 2, 1, 1, 1: 5 tokens need the graph of 8, and no row is left for its other 3.
+    decoder, target, drafter = make_decoder()
+    decoder.graphs = {8: None}
+    decoder.graph_shapes = [(4, 4), (4, 8), (4, 12), (4, 16)]
+    seqs = [make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=0) for _ in range(4)]
+    logits = decoder.verify_logits(seqs, torch.zeros(4, K, dtype=torch.int64), verified_lens=[2, 1, 1, 1])
+    assert logits.shape[0] == 5 and len(target.calls) == 1

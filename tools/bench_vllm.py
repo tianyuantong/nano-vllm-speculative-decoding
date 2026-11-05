@@ -4,7 +4,9 @@
   formal  every line at each concurrency, the panel run `repeats` times in one engine, one JSON per (line, concurrency)
   supplement  formal for the protocol's supplement: its lines and concurrencies, sampled with its settings
   run     one (line, concurrency) in this process; probe and formal call it in a child process,
-          because vLLM reads VLLM_USE_V2_MODEL_RUNNER when it is imported
+          because vLLM reads VLLM_USE_V2_MODEL_RUNNER when it is imported. With --seed the engine samples from that seed:
+          a same-machine comparison runs each seed in a new process, since repeats in one engine only advance one
+          generator (protocol v2.4 samehost)
 
 vLLM imports only inside run_line, so the CPU tests can import this module.
 """
@@ -60,7 +62,7 @@ def speculative_config(line: str, protocol: dict, models_root: str) -> dict | No
     return config
 
 
-def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str) -> dict:
+def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str, seed: int | None = None) -> dict:
     vllm_settings = protocol["external"]["vllm"]
     target = f"{models_root}/{protocol['models']['target']}"
     kwargs = dict(model=target, tokenizer=target, dtype=protocol["models"]["dtype"], tensor_parallel_size=1,
@@ -68,7 +70,7 @@ def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str)
                   max_num_batched_tokens=protocol["max_num_batched_tokens"], enable_prefix_caching=False,
                   enable_chunked_prefill=True, async_scheduling=False, enforce_eager=False,
                   kv_cache_memory_bytes=vllm_settings["kv_cache_bytes"], generation_config="vllm",
-                  seed=protocol["seeds"]["external"][0], disable_log_stats=False,
+                  seed=protocol["seeds"]["external"][0] if seed is None else seed, disable_log_stats=False,
                   per_request_spec_decode_metrics="none")
     spec = speculative_config(line, protocol, models_root)
     if spec is not None:
@@ -104,7 +106,7 @@ def counter_totals(metrics) -> dict:
 
 
 def run_line(line: str, concurrency: int, repeats: int, prompts: list[list[int]], protocol: dict,
-             models_root: str, max_tokens: int, warmup: bool, supplement: bool = False) -> dict:
+             models_root: str, max_tokens: int, warmup: bool, supplement: bool = False, seed: int | None = None) -> dict:
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1" if LINES[line].runner == "v2" else "0"
     os.environ["VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN"] = str(
         protocol["external"]["vllm"]["adaptive_profile_context_len"])
@@ -113,7 +115,7 @@ def run_line(line: str, concurrency: int, repeats: int, prompts: list[list[int]]
     import vllm
     from vllm import LLM, SamplingParams
 
-    kwargs = engine_kwargs(line, concurrency, protocol, models_root)
+    kwargs = engine_kwargs(line, concurrency, protocol, models_root, seed)
     llm = LLM(**kwargs)
     requests = [dict(prompt_token_ids=prompt) for prompt in prompts]
     if warmup:
@@ -192,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompts", type=int, help="use only the first N prompts (probe)")
     parser.add_argument("--warmup", action="store_true")
     parser.add_argument("--supplement", action="store_true", help="sample with the protocol's supplement settings")
+    parser.add_argument("--seed", type=int, help="the engine's seed (run); default the protocol's external seed")
     args = parser.parse_args(argv)
     protocol = json.loads(args.protocol.read_text())
     common = ["--protocol", str(args.protocol), "--panel", str(args.panel), "--models-root", args.models_root]
@@ -199,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         prompts = panel_prompts(json.loads(args.panel.read_text()), args.concurrency)[:args.prompts]
         result = run_line(args.line, args.concurrency, args.repeats, prompts, protocol, args.models_root,
-                          args.max_tokens, args.warmup, args.supplement)
+                          args.max_tokens, args.warmup, args.supplement, args.seed)
         args.out.write_text(json.dumps(result, indent=2) + "\n")
         return 0
     args.out.mkdir(parents=True, exist_ok=True)

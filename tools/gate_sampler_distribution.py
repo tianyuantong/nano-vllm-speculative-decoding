@@ -9,6 +9,10 @@ token can be drawn), k=1 rounds through sample() and accept_random(): (a) 16384 
 accept mass; (b) 100000 first emitted tokens, every frequency within the Hoeffding bound sqrt(ln(2M/delta) / 2N) of
 p, M the support size, delta 0.001.
 
+With G2_real.concurrency (v2.4), a variable-length line: the requests run C at a time, so the schedule cuts rows short,
+and only the first position of a row that verifies fewer than k+1 tokens qualifies. The two checks then also run on the
+production layout: k drafts a row, one verified, the row's other k-1 drafts unverified.
+
   python tools/gate_sampler_distribution.py --line LINE [--protocol FILE] --models-root DIR --commit C --out FILE
 """
 import argparse
@@ -16,6 +20,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from dataclasses import replace
 from typing import TypedDict
 
 import torch
@@ -27,7 +32,7 @@ from random_sampling_cases import CASES  # noqa: E402
 
 from bench_spec import engine_kwargs  # noqa: E402
 from nanovllm import LLM, SamplingParams  # noqa: E402
-from nanovllm.layers.spec_sampler import accept_random, probs_from_logits, sample  # noqa: E402
+from nanovllm.layers.spec_sampler import accept_random, accept_random_varlen, probs_from_logits, sample  # noqa: E402
 
 PROTOCOL = ROOT / "benchmarks" / "protocol-v2.json"
 NUM_DRAWS = 200_000
@@ -58,44 +63,61 @@ def reference_cases(device) -> list[dict]:
     return results
 
 
+def row_first_positions(num_rows: int, verified_lens: list[int] | None, num_drafts: int) -> list[int]:
+    """The rows whose first position a check may use: row 0 alone, or with verified_lens the rows that verify a draft
+    and stop short of k+1 tokens."""
+    if verified_lens is None:
+        return [0]
+    return [row for row in range(num_rows) if 2 <= verified_lens[row] <= num_drafts]
+
+
 def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, low: float, high: float,
-                       max_rounds: int, min_draft_support: int, min_target_support: int) -> RealPosition:
-    """Prompt by prompt, round by round, look at each round's first verified position; return the first whose
-    sum(min(p, q)) lies in [low, high], whose q is positive on at least min_draft_support tokens and whose p on at
-    least min_target_support. Only this rule picks the position; the checks never feed back into it."""
+                       max_rounds: int, min_draft_support: int, min_target_support: int,
+                       concurrency: int = 1) -> RealPosition:
+    """Prompt by prompt, or concurrency prompts at a time, round by round, look at each round's first verified
+    position, of row 0 or with concurrency of every row cut short; return the first whose sum(min(p, q)) lies in [low,
+    high], whose q is positive on at least min_draft_support tokens and whose p on at least min_target_support. Only
+    this rule picks the position; the checks never feed back into it."""
     decoder = llm.speculative
     propose, verify = decoder.drafter.propose, decoder.verify_logits
     seen = {}
 
     def propose_and_keep(seqs, sampling_tensors, with_confidence=False):
         drafts, draft_probs, confidence = propose(seqs, sampling_tensors, with_confidence)
-        seen["q"], seen["sampling"] = draft_probs[0, 0], sampling_tensors
+        seen["q"], seen["sampling"] = draft_probs[:, 0], sampling_tensors
         return drafts, draft_probs, confidence
 
     def verify_and_keep(seqs, drafts, aux_out=None, verified_lens=None):
         logits = verify(seqs, drafts, aux_out, verified_lens)
-        first = logits[0, 0] if verified_lens is None else logits[0]       # row 0's first position, [B, k+1, V] or [T, V]
-        seen["p"] = probs_from_logits(first.unsqueeze(0), seen["sampling"])[0]
+        if concurrency == 1:
+            rows, firsts = [0], logits[:, 0][:1] if verified_lens is None else logits[:1]
+        else:
+            starts = [sum(verified_lens[:row]) for row in range(len(seqs))]
+            rows = row_first_positions(len(seqs), verified_lens, decoder.num_drafts)
+            firsts = logits[[starts[row] for row in rows]]
+        seen["rows"], seen["p"] = rows, probs_from_logits(firsts, per_row_sampling(seen["sampling"], rows)) if rows else []
         return logits
 
     decoder.drafter.propose, decoder.verify_logits = propose_and_keep, verify_and_keep
     rounds = 0
     try:
-        for prompt_index, prompt in enumerate(prompts):
-            llm.add_request(prompt, sampling)
+        for prompt_index in range(0, len(prompts), concurrency):
+            for prompt in prompts[prompt_index:prompt_index + concurrency]:
+                llm.add_request(prompt, sampling)
             round_index = 0
             while not llm.is_finished() and rounds < max_rounds:
                 seen.clear()
                 llm.step()
                 if "p" not in seen:                    # a prefill step
                     continue
-                p, q = seen["p"], seen["q"]
-                mass = torch.minimum(p, q).sum().item()
-                if (low <= mass <= high and int((q > 0).sum()) >= min_draft_support
-                        and int((p > 0).sum()) >= min_target_support):
-                    support = ((p > 0) | (q > 0)).nonzero().squeeze(1)
-                    return RealPosition(prompt_index=prompt_index, round=round_index, accept_mass=mass,
-                                        support=support.tolist(), p=p[support].tolist(), q=q[support].tolist())
+                for row, p in zip(seen["rows"], seen["p"]):
+                    q = seen["q"][row]
+                    mass = torch.minimum(p, q).sum().item()
+                    if (low <= mass <= high and int((q > 0).sum()) >= min_draft_support
+                            and int((p > 0).sum()) >= min_target_support):
+                        support = ((p > 0) | (q > 0)).nonzero().squeeze(1)
+                        return RealPosition(prompt_index=prompt_index, round=round_index, accept_mass=mass,
+                                            support=support.tolist(), p=p[support].tolist(), q=q[support].tolist())
                 rounds += 1
                 round_index += 1
     finally:
@@ -104,10 +126,18 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
                        f"{min_draft_support} and a target support of at least {min_target_support} within {max_rounds} rounds")
 
 
-def check_real_position(position: RealPosition, accept_trials: int, emit_trials: int, delta: float,
-                        device: torch.device) -> dict:
-    """k=1 rounds on the support. The bonus row repeats p: it is drawn from only after an acceptance, so it never
-    becomes the first emitted token."""
+def per_row_sampling(sampling, rows: list[int]):
+    """The round's sampling tensors of the given rows, to read their p."""
+    if sampling.temperatures is None:
+        return sampling
+    return replace(sampling, temperatures=sampling.temperatures[rows], top_k=sampling.top_k[rows], top_p=sampling.top_p[rows])
+
+
+def check_real_position(position: RealPosition, accept_trials: int, emit_trials: int, delta: float, device: torch.device,
+                        num_drafts: int = 1) -> dict:
+    """Rounds on the support of one verified draft and its bonus position. The bonus row repeats p: it is drawn from
+    only after an acceptance, so it never becomes the first emitted token. With num_drafts > 1 the rows hold that many
+    drafts and verify the first alone, through the variable-length layout; the others must never be read."""
     p = torch.tensor(position["p"], dtype=torch.float32, device=device)
     q = torch.tensor(position["q"], dtype=torch.float32, device=device)
     size = p.numel()
@@ -115,8 +145,14 @@ def check_real_position(position: RealPosition, accept_trials: int, emit_trials:
 
     def first_tokens(trials: int) -> tuple[torch.Tensor, torch.Tensor]:
         drafts = sample(q.expand(trials, size), generator).unsqueeze(1)
-        n_accept, tail = accept_random(torch.stack([p, p]).expand(trials, 2, size), q.expand(trials, 1, size), drafts,
-                                       generator)
+        if num_drafts == 1:
+            n_accept, tail = accept_random(torch.stack([p, p]).expand(trials, 2, size), q.expand(trials, 1, size), drafts,
+                                           generator)
+        else:
+            unverified = torch.zeros(trials, num_drafts - 1, dtype=drafts.dtype, device=device)
+            lens = torch.full((trials,), 2, dtype=torch.int64, device=device)
+            n_accept, tail = accept_random_varlen(torch.stack([p, p]).repeat(trials, 1), q.expand(trials, num_drafts, size),
+                                                  torch.cat([drafts, unverified], dim=1), lens, generator)
         return n_accept, torch.where(n_accept == 1, drafts[:, 0], tail)
 
     n_accept, _ = first_tokens(accept_trials)
@@ -140,27 +176,35 @@ def main(argv: list[str] | None = None) -> int:
     protocol = json.loads(args.protocol.read_text())
     gate, rec = protocol["gates"]["G2_real"], protocol["sampling"]
     panel = json.loads((ROOT / protocol["panels"]["D48"]["file"]).read_text())
-    target, _, kwargs = engine_kwargs(protocol, protocol["lines"][args.line], panel, 1, protocol["seeds"]["dev"][0],
-                                      args.models_root)
+    concurrency = gate.get("concurrency", 1)
+    target, _, kwargs = engine_kwargs(protocol, protocol["lines"][args.line], panel, concurrency,
+                                      protocol["seeds"]["dev"][0], args.models_root)
     llm = LLM(target, **kwargs)
     sampling = SamplingParams(temperature=rec["temperature"], top_k=rec["top_k"], top_p=rec["top_p"],
                               max_tokens=rec["max_tokens"], ignore_eos=rec["ignore_eos"])
     low, high = gate["accept_mass"]
     position = pick_real_position(llm, [entry["prompt_token_ids"] for entry in panel], sampling, low, high,
-                                  gate["scan_rounds"], gate["min_draft_support"], gate["min_target_support"])
+                                  gate["scan_rounds"], gate["min_draft_support"], gate["min_target_support"], concurrency)
     llm.exit()
     device = torch.device("cuda")
     real = check_real_position(position, gate["accept_trials"], gate["emit_trials"], gate["delta"], device)
+    checks = [real]
+    if concurrency > 1:
+        checks.append(check_real_position(position, gate["accept_trials"], gate["emit_trials"], gate["delta"], device,
+                                          protocol["lines"][args.line]["k"]))
     references = reference_cases(device)
-    passed = (real["accept_error"] < gate["accept_tolerance"] and real["worst_frequency_gap"] <= real["frequency_bound"]
+    passed = (all(check["accept_error"] < gate["accept_tolerance"]
+                  and check["worst_frequency_gap"] <= check["frequency_bound"] for check in checks)
               and all(case["total_variation"] < TOLERANCE for case in references))
     report = {"gate": "G2-real", "engine_commit": args.commit, "passed": passed,
-              "statistic": {"accept_error": real["accept_error"], "worst_frequency_gap": real["worst_frequency_gap"]},
+              "statistic": {"accept_error": max(check["accept_error"] for check in checks),
+                            "worst_frequency_gap": max(check["worst_frequency_gap"] for check in checks)},
               "threshold": {"accept_error": gate["accept_tolerance"], "worst_frequency_gap": real["frequency_bound"]},
               "threshold_source": f"Hoeffding delta={gate['delta']}, M={real['support_size']}, N={gate['emit_trials']}; "
                                   f"acceptance over {gate['accept_trials']} draws (std <= 0.004)",
               "n": {"accept_trials": gate["accept_trials"], "emit_trials": gate["emit_trials"]},
-              "details": {"line": args.line, "position": position, "real": real, "reference_cases": references}}
+              "details": {"line": args.line, "position": position, "real": real, "varlen_layout": checks[1:],
+                          "reference_cases": references}}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({key: report[key] for key in ("gate", "passed", "statistic", "threshold")}))

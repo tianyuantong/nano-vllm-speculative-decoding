@@ -477,7 +477,8 @@ class SpeculativeDecoder:
         With graphs the verification writes them into its own buffer, so aux_out must be the slice of it that
         _aux_buffer returns."""
         lens = [self.num_drafts + 1] * len(seqs) if verified_lens is None else verified_lens
-        hidden = self._verify_graph(seqs, drafts, lens) if self.graphs else self._verify_eager(seqs, drafts, lens, aux_out)
+        hidden = (self._verify_graph(seqs, drafts, lens, aux_out) if self.graphs
+                  else self._verify_eager(seqs, drafts, lens, aux_out))
         logits = self.target.model.compute_logits(hidden, all_logits=True)
         return logits if verified_lens is not None else logits.view(len(seqs), self.num_drafts + 1, -1)
 
@@ -499,11 +500,15 @@ class SpeculativeDecoder:
         reset_context()
         return hidden
 
-    def _verify_graph(self, seqs: list[Sequence], drafts: torch.Tensor, verified_lens: list[int]) -> torch.Tensor:
-        """The smallest graph with as many tokens as the rows verify; its other tokens fill padding rows."""
+    def _verify_graph(self, seqs: list[Sequence], drafts: torch.Tensor, verified_lens: list[int],
+                      aux_out: torch.Tensor | None = None) -> torch.Tensor:
+        """The smallest graph with as many tokens as the rows verify; its other tokens fill padding rows. Lengths given
+        by hand can leave a full batch no row for them, and that round runs eagerly; the verify schedule fills a graph."""
         num_verified = sum(verified_lens)
         num_rows, num_tokens = next(shape for shape in self.graph_shapes if shape[1] >= num_verified)
         assert num_rows >= len(seqs)
+        if (num_rows - len(seqs)) * (self.num_drafts + 1) < num_tokens - num_verified:
+            return self._verify_eager(seqs, drafts, verified_lens, aux_out)
         metadata = verify_varlen_metadata(seqs, verified_lens, self.num_drafts, self.block_size, num_rows, num_tokens,
                                           self.target.pad_block_id, self.max_num_blocks)
         self._load_graph_inputs(metadata, num_rows, num_tokens)

@@ -46,3 +46,8 @@ def test_panel_prompts_use_whole_cycles():
     panel = [{"prompt_token_ids": [index]} for index in range(48)]
     assert [len(panel_prompts(panel, concurrency)) for concurrency in (1, 8, 32)] == [48, 48, 144]
     assert panel_prompts(panel, 32)[48] == [0]
+
+
+def test_a_seed_replaces_the_protocols_external_seed():
+    assert engine_kwargs("k0_v2", 8, PROTOCOL, MODELS)["seed"] == PROTOCOL["seeds"]["external"][0]
+    assert engine_kwargs("k0_v2", 8, PROTOCOL, MODELS, seed=110017)["seed"] == 110017

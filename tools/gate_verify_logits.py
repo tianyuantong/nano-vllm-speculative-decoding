@@ -11,7 +11,8 @@ wherever the reference's top-2 margin exceeds 0.5.
 A variable-length line (v2.2's dspark_var) also verifies the eight prompts together, once per rotation of the lengths
 1..k+1, so each prompt verifies each length once, with the graph's empty row slots and padding tokens: each row's
 first L positions against its own reference, under the same bound and argmax rule; and each of those batches through
-the graph and eagerly, which must agree bit for bit (protocol v2.2 graph_eager_varlen).
+the graph and eagerly, whose logits and aux features must agree bit for bit (protocol v2.2 graph_eager_varlen; the aux
+from v2.4: the drafter's context K/V is written from them, and a wrong row would only show in the next round).
 
   python tools/gate_verify_logits.py --line LINE [--protocol FILE] --models-root DIR --commit C --out FILE
 """
@@ -109,7 +110,8 @@ def verify_vs_decode(llm, prompt_ids: list[int], k: int, batch_sizes: tuple[int,
 def verify_varlen_vs_decode(llm, prompts: list[list[int]], k: int) -> tuple[list[dict], list[bool]]:
     """The prompts verified together, row r at length (r + rotation) mod (k+1) + 1 for each rotation, against each
     prompt's single-copy decode reference. Returns per (rotation, row, position) {max_abs_delta, argmax_agrees,
-    top2_margin_reference} through the production path, and per rotation whether graph and eager logits are equal."""
+    top2_margin_reference} through the production path, and per rotation whether graph and eager logits and aux are
+    equal."""
     params = SamplingParams(temperature=0, max_tokens=k + 2)
     pairs = [(llm.add_request(prompt, params), llm.add_request(prompt, params)) for prompt in prompts]
     while llm.scheduler.waiting:
@@ -123,9 +125,12 @@ def verify_varlen_vs_decode(llm, prompts: list[list[int]], k: int) -> tuple[list
     rows, graph_equals_eager = [], []
     for rotation in range(k + 1):
         lengths = [(row + rotation) % (k + 1) + 1 for row in range(len(prompts))]
-        logits = decoder.verify_logits(verified, drafts, verified_lens=lengths)                  # [T, V], the graph
-        eager = decoder.target.model.compute_logits(decoder._verify_eager(verified, drafts, lengths), all_logits=True)
-        graph_equals_eager.append(torch.equal(logits, eager))
+        aux = decoder._aux_buffer(sum(lengths))
+        logits = decoder.verify_logits(verified, drafts, aux, lengths)                           # [T, V], the graph
+        eager_aux = torch.empty_like(aux)
+        eager = decoder.target.model.compute_logits(decoder._verify_eager(verified, drafts, lengths, eager_aux),
+                                                    all_logits=True)
+        graph_equals_eager.append(torch.equal(logits, eager) and torch.equal(aux, eager_aux))
         start = 0
         for row, length in enumerate(lengths):
             for position in range(length):
