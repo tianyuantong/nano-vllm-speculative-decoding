@@ -1,6 +1,7 @@
 """SLO capacity over open-loop results (protocol v2.4 open_loop): per line and arrival rate the latencies a request saw
 from its planned arrival to the host's delivery, whether they meet each SLO tier, and the rate interval each line's
-capacity lies in. An unfinished request counts as an infinite latency, so a run that does not drain fails its tiers.
+capacity lies in. An unfinished request counts as an infinite latency, so a run that does not drain fails its tiers. A
+preempted run stops the report's capacity: the admission cap is wrong and no rate of that protocol stands.
 
   python tools/slo_report.py --protocol benchmarks/protocol-v2.4.json --results DIR [DIR ...]
 
@@ -68,17 +69,18 @@ def summarize_run(result: dict, warmup_fraction: float) -> dict:
     latencies = [request_latencies(request) for request in counted]
     gaps = itl_ms(counted)
     tpot = [row["tpot_ms"] for row in latencies if row["tpot_ms"] is not None]
-    finishes = [request["deliveries"][-1][2] for request in counted if request["finish_step"] >= 0]
+    last_deliveries = [request["deliveries"][-1][2] for request in counted if request["deliveries"]]
     tokens = sum(n for request in counted for _, n, _ in request["deliveries"])
-    span = max(finishes) - counted[0]["arrival_seconds"] if finishes else math.inf
+    span = max(last_deliveries) - counted[0]["arrival_seconds"] if last_deliveries else math.inf
 
     def at(values: list[float], q: float) -> float:
-        return percentile(values, q)
+        """Infinite when nothing was measured: a run with no gap or no TPOT at all has met no limit."""
+        return percentile(values, q) if values else math.inf
 
     return {"ttft_p50": at([row["ttft_ms"] for row in latencies], 50), "ttft_p99": at([row["ttft_ms"] for row in latencies], 99),
             "e2e_p50": at([row["e2e_ms"] for row in latencies], 50), "e2e_p99": at([row["e2e_ms"] for row in latencies], 99),
             "tpot_p99": at(tpot, 99), "itl_p50": at(gaps, 50), "itl_p99": at(gaps, 99), "tokens_per_second": tokens / span,
-            "unfinished": len(counted) - len(finishes), "queue_p50": at(queue_lengths(requests), 50),
+            "unfinished": sum(request["finish_step"] < 0 for request in counted), "queue_p50": at(queue_lengths(requests), 50),
             "queue_max": max(queue_lengths(requests)), "preemptions": result["preemptions"],
             "full_collections": result["full_collections"], "slow_steps": slow_steps(result["steps"])}
 
@@ -117,6 +119,8 @@ def report(results: list[dict], protocol: dict) -> str:
         config = result["config"]
         runs[(config["panel"], config["line"], config["rate"])][config["seed"]] = summarize_run(result, spec["warmup_fraction"])
     tiers = spec["slo"]["tiers"]
+    preempted = [f"{line} at {rate:g}/s" for (_, line, rate), by_seed in sorted(runs.items())
+                 if any(row["preemptions"] for row in by_seed.values())]
     out = ["## Open-loop latency", "", "Medians over the seeds, ms, from the planned arrival to the host's delivery.", "",
            "| panel | line | rate | seeds | tok/s | TTFT p50 / p99 | TPOT p99 | ITL p50 / p99 | e2e p50 / p99 | queue p50 / max "
            "| unfinished | preemptions | full GCs | slow steps | " + " | ".join(tiers) + " |",
@@ -139,6 +143,8 @@ def report(results: list[dict], protocol: dict) -> str:
                    f"| {max(row['unfinished'] for row in rows)} | {max(row['preemptions'] for row in rows)} "
                    f"| {max(row['full_collections'] for row in rows)} | {max(row['slow_steps'] for row in rows)} | "
                    + " | ".join(cells) + " |")
+    if preempted:
+        return "\n".join([*out, "", f"## STOP: preempted runs, protocol stop_if: {', '.join(preempted)}. No capacity."])
     out += ["", "## Capacity in requests per second", "",
             "The last rate that passes on every seed before the first that fails.", "",
             "| panel | line | tier | capacity |", "|---|---|---|---|"]

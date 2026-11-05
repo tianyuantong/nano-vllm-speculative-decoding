@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from round_robin_report import closed_loop_failures, measures, slo_failures, warmup_boundary  # noqa: E402
+from report_v2 import final_runs  # noqa: E402
+from round_robin_report import closed_loop_failures, measures, missing_runs, slo_failures, warmup_boundary  # noqa: E402
 
 PROTOCOL = json.loads((Path(__file__).resolve().parents[1] / "benchmarks" / "protocol-v2.4.json").read_text())
 VERDICT = PROTOCOL["round_robin"]["verdict"]
@@ -68,3 +69,39 @@ def test_a_tier_lost_on_the_same_plan_fails_the_arm():
     assert slo_failures([open_run("dspark_k7", 0.4), open_run("dspark_k7_rr", 0.45)], pairs, lines, spec) == []
     failures = slo_failures([open_run("dspark_k7", 0.4), open_run("dspark_k7_rr", 0.6)], pairs, lines, spec)
     assert failures == ["dspark_k7 at 5/s: Interactive passes without round robin and fails with it"]
+
+
+def chosen_of(lines, concurrency=(8, 32, 64), seeds=PROTOCOL["seeds"]["dev"]):
+    return {("D48", c, line, seed, 1): None for line in lines for c in concurrency for seed in seeds}
+
+
+ALL_LINES = [line for pair in PROTOCOL["round_robin"]["pairs"].items() for line in pair]
+RATES = {"dspark_k7": [5.0], "dspark_var": [5.0]}
+
+
+def open_pairs():
+    return [open_run(line, 0.4) for line in ("dspark_k7", "dspark_k7_rr", "dspark_var", "dspark_var_rr")]
+
+
+def test_a_whole_matrix_misses_nothing():
+    assert missing_runs(chosen_of(ALL_LINES), open_pairs(), RATES, PROTOCOL) == []
+
+
+def test_a_missing_seed_or_arm_is_listed():
+    chosen = chosen_of(ALL_LINES)
+    del chosen[("D48", 8, "dspark_k7_rr", 17011, 1)]
+    assert missing_runs(chosen, open_pairs(), RATES, PROTOCOL) == ["dspark_k7_rr C=8 seed 17011"]
+    assert missing_runs(chosen_of(ALL_LINES), open_pairs()[:3], RATES, PROTOCOL) == ["dspark_var_rr at 5/s"]
+
+
+def test_no_open_loop_rates_are_missing_runs():
+    assert len(missing_runs(chosen_of(ALL_LINES), [], {}, PROTOCOL)) == 2
+
+
+def closed_run(directory, line="dspark_k7"):
+    return f"{directory}/x.json", {"config": {"panel": "D48", "concurrency": 8, "line": line, "seed": 1, "repeat": 1}}, {}
+
+
+def test_a_rerun_replaces_the_run_it_repeats():
+    runs = [closed_run("job"), closed_run("rerun")]
+    assert final_runs(runs)[("D48", 8, "dspark_k7", 1, 1)][0] == "rerun/x.json"

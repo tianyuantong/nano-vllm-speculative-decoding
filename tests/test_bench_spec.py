@@ -170,6 +170,20 @@ def test_a_request_past_the_drain_stays_unfinished_with_its_tokens():
     record = run_open_loop(engine, panel_of([100]), None, [0.0], 3.0, engine.clock, engine.sleep)
     request = record["requests"][0]
     assert request["finish_step"] == -1 and request["token_ids"] == [0, 1, 2]
+    assert [delivery[2] for delivery in request["deliveries"]] == [1.0, 2.0]    # the step that ends at 3.0 does not count
+
+
+def test_a_step_past_the_drain_does_not_finish_a_request():
+    engine = SlowEngine(seconds_per_step=2.0)
+    record = run_open_loop(engine, panel_of([2]), None, [0.0], 3.0, engine.clock, engine.sleep)
+    assert record["requests"][0]["finish_step"] == -1              # its last token came at 4.0
+
+
+def test_a_request_the_step_kept_from_submitting_stays_in_the_record():
+    engine = SlowEngine(seconds_per_step=10.0)
+    record = run_open_loop(engine, panel_of([100, 100]), None, [0.0, 5.0], 1.0, engine.clock, engine.sleep)
+    assert [request["submit_step"] for request in record["requests"]] == [0, -1]
+    assert record["requests"][1]["deliveries"] == [] and record["requests"][1]["finish_step"] == -1
 
 
 def test_gpu_state():

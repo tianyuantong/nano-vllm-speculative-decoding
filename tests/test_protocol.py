@@ -112,7 +112,7 @@ V23 = json.loads((BENCHMARKS / "protocol-v2.3.json").read_text())
 
 def test_v2_4_keeps_what_the_measurements_are_compared_with():
     for key in ("gpu", "models", "sampling", "max_model_len", "max_num_batched_tokens", "concurrency", "warmup", "metrics",
-                "timing_noise", "decision", "verify_schedule", "order"):
+                "decision", "verify_schedule", "order"):
         assert V24[key] == V23[key]
     assert V24["seeds"]["dev"] == V23["seeds"]["dev"]
     assert {name: V24["panels"][name] for name in V23["panels"]} == V23["panels"]

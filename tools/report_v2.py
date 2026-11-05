@@ -100,6 +100,16 @@ def _median_or_dash(values: list[float | None]) -> str:
     return f"{statistics.median(values):.2f}" if values else "-"
 
 
+def final_runs(runs: list[tuple[str, dict, dict]]) -> dict[tuple, tuple[str, dict, dict]]:
+    """(panel, C, line, seed, repeat) -> the run that counts: a later one replaces an earlier one, so a rerun directory
+    listed last replaces the runs it repeats."""
+    chosen = {}
+    for name, result, summary in runs:
+        config = result["config"]
+        chosen[(config["panel"], config["concurrency"], config["line"], config["seed"], config["repeat"])] = (name, result, summary)
+    return chosen
+
+
 def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict, list, dict]:
     """The runs that count: each run's invalid reasons by name, the timing-noise pairs, and per (panel, C, seed) each
     valid repeat-1 line's (Q_steady, tokens per round, its per-request median, positions verified per row, Q_full).
@@ -109,10 +119,7 @@ def count_runs(runs: list[tuple[str, dict, dict]], protocol: dict) -> tuple[dict
     and the lines of each source tree from one commit; otherwise none of them counts, so a rerun has to repeat the
     whole (C, seed)."""
     invalid = {name: invalid_reasons(result, summary, protocol) for name, result, summary in runs}
-    by_key = {}
-    for name, result, summary in runs:
-        config = result["config"]
-        by_key[(config["panel"], config["concurrency"], config["line"], config["seed"], config["repeat"])] = (name, result, summary)
+    by_key = final_runs(runs)
 
     # A result file carries no job id, so its directory stands for the job. A job with two trees has two commits.
     jobs = defaultdict(set)       # (panel, C, seed) -> (directory, protocol, panel) of each of its runs

@@ -6,7 +6,9 @@ pre-registered verdict.
 Throughput is Q_full over the same requests: the steady window would leave out the phase where requests wait for
 prefill, which is where the policy looks worst. ITL is every consecutive pair of a request's deliveries from the
 warm-up boundary on, the step of the last first delivery among the run's first C requests. --open compares the arms on
-the same arrival plans: a tier the base line passes at a rate must still pass.
+the same arrival plans, --rates saying which: a tier the base line passes at a rate must still pass. A rerun directory
+listed after the original replaces its runs. A verdict needs the whole matrix: anything missing or invalid is listed
+and the step stays undecided.
 """
 import argparse
 import json
@@ -16,7 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_v2 import count_runs, load_runs  # noqa: E402
+from report_v2 import count_runs, final_runs, load_runs  # noqa: E402
 from slo_report import load_runs as load_open_runs  # noqa: E402
 from slo_report import meets, summarize_run  # noqa: E402
 from summarize_bench import itl_ms, percentile, q_full, ttft_ms  # noqa: E402
@@ -73,14 +75,30 @@ def slo_failures(results: list[dict], pairs: dict[str, str], lines: list[str], s
     return failures
 
 
-def report(runs: list[tuple[str, dict, dict]], open_results: list[dict], protocol: dict) -> str:
+def missing_runs(chosen: dict, open_results: list[dict], rates: dict[str, list[float]], protocol: dict) -> list[str]:
+    """The runs of the matrix that are not there: closed-loop arms of every (C, seed), both arms of every open-loop plan."""
+    spec = protocol["round_robin"]
+    lines = [line for pair in spec["pairs"].items() for line in pair]
+    missing = [f"{line} C={c} seed {seed}" for line in lines for c in spec["concurrency"] for seed in protocol["seeds"]["dev"]
+               if (spec["panel"], c, line, seed, 1) not in chosen]
+    ran = {(result["config"]["line"], result["config"]["rate"]) for result in open_results}
+    for line in spec["verdict_lines"]:
+        if not rates.get(line):
+            missing.append(f"{line}: no open-loop rates")
+        missing += [f"{name} at {rate:g}/s" for rate in rates.get(line, []) for name in (line, spec["pairs"][line])
+                    if (name, rate) not in ran]
+    return missing
+
+
+def report(runs: list[tuple[str, dict, dict]], open_results: list[dict], rates: dict[str, list[float]], protocol: dict) -> str:
     spec = protocol["round_robin"]
     invalid, _, _ = count_runs(runs, protocol)
-    bad = [f"- {Path(name).name}: {', '.join(reasons)}" for name, reasons in sorted(invalid.items()) if reasons]
+    chosen = final_runs(runs)
+    bad = [f"- {Path(name).name}: {', '.join(invalid[name])}" for name, _, _ in chosen.values() if invalid[name]]
     if bad:
         return "\n".join(["## Invalid runs: rerun their whole (C, seed) before reading a verdict", "", *bad])
-    measured = {(result["config"]["line"], result["config"]["concurrency"], result["config"]["seed"]): measures(result)
-                for _, result, _ in runs}
+    missing = missing_runs(chosen, open_results, rates, protocol)
+    measured = {(key[2], key[1], key[3]): measures(result) for key, (_, result, _) in chosen.items()}
     out = ["## rr / base, per seed", "", "| line | C | seed | Q_full | ITL p99 | TTFT p50 | TTFT p99 |", "|---|---:|---:|---:|---:|---:|---:|"]
     failures = defaultdict(list)
     for base, arm in spec["pairs"].items():
@@ -91,15 +109,14 @@ def report(runs: list[tuple[str, dict, dict]], open_results: list[dict], protoco
                            f"| {row['ttft_p50']:.3f} | {row['ttft_p99']:.3f} |")
             if base in spec["verdict_lines"]:
                 failures[base] += [f"C={concurrency} {reason}" for reason in closed_loop_failures(ratios, concurrency, spec["verdict"])]
-    missing = [] if open_results else ["no open-loop results: the SLO condition is not checked"]
     for line in slo_failures(open_results, spec["pairs"], spec["verdict_lines"], protocol["open_loop"]):
         failures[line.split()[0]].append(line)
     out += ["", "## Verdict", ""]
     for line in spec["verdict_lines"]:
         out.append(f"- {line}: " + ("; ".join(failures[line]) if failures[line] else "every condition holds"))
-    passed = not missing and not any(failures.values())
-    out += [f"- {reason}" for reason in missing]
-    out += ["", f"round robin {'passes' if passed else 'does not pass'} step 4"]
+    if missing:
+        return "\n".join([*out, "", "## Undecided: the matrix is not whole", "", *(f"- {run}" for run in missing)])
+    out += ["", f"round robin {'does not pass' if any(failures.values()) else 'passes'} step 4"]
     return "\n".join(out)
 
 
@@ -108,9 +125,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--results", type=Path, nargs="+", required=True, help="directories of closed-loop results")
     parser.add_argument("--open", type=Path, nargs="*", default=[], help="directories of open-loop results")
+    parser.add_argument("--rates", type=Path, help="rr-rates.txt, one 'LINE RATE RATE RATE' per verdict line")
     args = parser.parse_args(argv)
     protocol = json.loads(args.protocol.read_text())
-    print(report(load_runs(args.results), load_open_runs(args.open), protocol))
+    rates = {}
+    if args.rates:
+        for line in args.rates.read_text().splitlines():
+            name, *values = line.split()
+            rates[name] = [float(value) for value in values]
+    print(report(load_runs(args.results), load_open_runs(args.open), rates, protocol))
 
 
 if __name__ == "__main__":

@@ -88,3 +88,28 @@ def test_a_run_that_does_not_drain_fails_the_rate():
     text = report([run([0.0, 1.0], finished=False)], PROTOCOL)
     assert "| D48 | k0 | Interactive | below 3 |" in text
     assert "inf" in text
+
+
+def test_a_run_with_no_gap_and_no_tpot_reports_and_fails():
+    summary = summarize_run(run([0.0, 1.0], tokens=1), 0.0)
+    assert math.isinf(summary["itl_p99"]) and math.isinf(summary["tpot_p99"])
+
+
+def test_a_run_that_delivered_nothing_reports():
+    result = run([0.0, 1.0], finished=False)
+    for entry in result["requests"]:
+        entry["deliveries"] = []
+    summary = summarize_run(result, 0.0)
+    assert summary["tokens_per_second"] == 0.0 and summary["unfinished"] == 2
+
+
+def test_throughput_of_a_run_that_does_not_drain_ends_at_its_last_delivery():
+    done = request(0.0, [[0, 1, 1.0]])
+    open_request = request(0.0, [[1, 1, 2.0], [2, 9, 10.0]], finished=False)
+    result = {**run([0.0]), "requests": [done, open_request]}
+    assert summarize_run(result, 0.0)["tokens_per_second"] == pytest.approx(11 / 10)
+
+
+def test_a_preempted_run_stops_the_capacity():
+    text = report([run([0.0, 1.0], preemptions=2)], PROTOCOL)
+    assert "STOP" in text and "Capacity" not in text

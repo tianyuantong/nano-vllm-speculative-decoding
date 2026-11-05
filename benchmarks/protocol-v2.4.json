@@ -195,7 +195,8 @@
       32
     ],
     "seed": 17011,
-    "repeats": 2
+    "repeats": 2,
+    "runs_in": "no job of this protocol: no verdict here reads N_t. A gain the diagnosis records is set against job C's 0.10%"
   },
   "decision": {
     "faster": "all seeds R > 1 + 2*N_t",
@@ -209,8 +210,7 @@
     "preemption > 0, the scheduler's direct count",
     "non-finite value or assertion failure",
     "a step other than a prefill > 3 x the median of its kind",
-    "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its tree",
-    "timing-noise repeats differ in tokens"
+    "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its tree"
   ],
   "verify_schedule": {
     "file": "benchmarks/inputs/verify-schedule-g4.json",
@@ -599,7 +599,7 @@
       }
     ],
     "overflow": "M3 §7: on real logits count the rows whose candidates overflow and the difference in q; no larger sample",
-    "merge_rule": "nothing found here is merged: M5 stays off main; a single-factor gain over 2*N_t is recorded as a candidate for later",
+    "merge_rule": "nothing found here is merged: M5 stays off main; a single-factor gain over 2 x job C's N_t is recorded as a candidate for later",
     "report": "the gap and what each experiment moves, reported only"
   },
   "round_robin": {

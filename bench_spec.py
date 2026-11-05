@@ -162,28 +162,35 @@ def run_open_loop(llm, panel: list[PanelEntry], params, arrivals: list[float], d
                   clock: Callable[[], float] = time.perf_counter, sleep: Callable[[float], None] = time.sleep) -> OpenLoopRecord:
     """Before every step add every request that is due, however full the engine is: a busy engine makes requests wait
     and never moves the plan. After it, stamp each in-flight request's new tokens with the host's clock, which is when
-    the API would hand them over. A request unfinished drain_seconds after the last arrival keeps finish_step -1 and
-    the tokens it has. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
-    records, in_flight = [], []
+    the API would hand them over. At drain_seconds after the last arrival the run ends: what a step delivers past that
+    point does not count, and a request unfinished by then keeps finish_step -1 and the tokens it has, one never
+    submitted included. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
+    records = [OpenLoopRequestRecord(id=entry["id"], category=entry["category"], prompt_len=len(entry["prompt_token_ids"]),
+                                     submit_step=-1, deliveries=[], finish_step=-1, token_ids=[], arrival_seconds=arrival,
+                                     submit_seconds=-1.0)
+               for entry, arrival in zip(panel, arrivals)]
+    in_flight = []
     next_entry = 0
     origin = clock()
     deadline = arrivals[-1] + drain_seconds
-    while (in_flight or next_entry < len(panel)) and clock() - origin < deadline:
+    while in_flight or next_entry < len(panel):
         now = clock() - origin
+        if now >= deadline:
+            break
         while next_entry < len(panel) and arrivals[next_entry] <= now:
-            entry = panel[next_entry]
-            record = OpenLoopRequestRecord(id=entry["id"], category=entry["category"], prompt_len=len(entry["prompt_token_ids"]),
-                                           submit_step=llm.num_steps, deliveries=[], finish_step=-1, token_ids=[],
-                                           arrival_seconds=arrivals[next_entry], submit_seconds=now)
-            in_flight.append([record, llm.add_request(entry["prompt_token_ids"], params), 0])
-            records.append(record)
+            record = records[next_entry]
+            record["submit_step"], record["submit_seconds"] = llm.num_steps, now
+            in_flight.append([record, llm.add_request(panel[next_entry]["prompt_token_ids"], params), 0])
             next_entry += 1
         if not in_flight:
             sleep(arrivals[next_entry] - now)
             continue
         step = llm.num_steps
         llm.step()
-        in_flight = record_deliveries(in_flight, step, clock() - origin)
+        delivered_at = clock() - origin
+        if delivered_at >= deadline:
+            break
+        in_flight = record_deliveries(in_flight, step, delivered_at)
     for record, seq, _ in in_flight:
         record["token_ids"] = seq.completion_token_ids
     return OpenLoopRecord(requests=records)
