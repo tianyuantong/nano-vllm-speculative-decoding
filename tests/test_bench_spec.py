@@ -23,6 +23,11 @@ def test_load_panel_full_cycles(tmp_path):
     assert load_panel(path, 32, "full_cycles")[48]["id"] == "p0"
 
 
+def test_load_panel_takes_a_number_of_entries(tmp_path):
+    path = write_panel(tmp_path, 32)
+    assert [entry["id"] for entry in load_panel(path, 1, 4)] == ["p0", "p1", "p2", "p3"]
+
+
 def test_load_panel_prefix(tmp_path):
     path = write_panel(tmp_path, 128)
     assert [entry["id"] for entry in load_panel(path, 8, "prefix")] == [f"p{index}" for index in range(48)]

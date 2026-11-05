@@ -66,11 +66,15 @@ class OpenLoopRecord(TypedDict):
     requests: list[OpenLoopRequestRecord]    # in arrival order
 
 
-def load_panel(path: Path, concurrency: int, take: str) -> list[PanelEntry]:
-    """take "full_cycles": L·⌈max(L, 4C)/L⌉ entries, whole cycles of the L-entry panel; "prefix": max(48, 4C), cycling."""
+def load_panel(path: Path, concurrency: int, take: str | int) -> list[PanelEntry]:
+    """take "full_cycles": L·⌈max(L, 4C)/L⌉ entries, whole cycles of the L-entry panel; "prefix": max(48, 4C), cycling;
+    a number: that many entries, cycling."""
     panel = json.loads(Path(path).read_text())
-    count = {"full_cycles": len(panel) * math.ceil(max(len(panel), 4 * concurrency) / len(panel)),
-             "prefix": max(48, 4 * concurrency)}[take]
+    if isinstance(take, int):
+        count = take
+    else:
+        count = {"full_cycles": len(panel) * math.ceil(max(len(panel), 4 * concurrency) / len(panel)),
+                 "prefix": max(48, 4 * concurrency)}[take]
     return [panel[index % len(panel)] for index in range(count)]
 
 
@@ -229,6 +233,7 @@ def parse_args(argv: list[str], mode: str) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     if mode == "closed-loop":
         parser.add_argument("--repeat", type=int, default=1, help="2 for the timing-noise repeat")
+        parser.add_argument("--max-model-len", type=int, help="in place of the protocol's: the long-context runs")
         parser.add_argument("--record-confidences", action="store_true",
                             help="keep every round's DSpark confidence logits and accepted counts in "
                                  "<output>.confidences.json (job A's calibration; the extra copy each round makes it "
@@ -303,6 +308,8 @@ def closed_loop(args: argparse.Namespace) -> None:
     panel = load_panel(panel_path, args.concurrency, panel_spec["take"])
     line = protocol["lines"][args.line]
     overrides = {"record_confidences": True} if args.record_confidences else {}
+    if args.max_model_len is not None:
+        overrides["max_model_len"] = args.max_model_len
     llm, target, draft, kwargs = warmed_up_engine(protocol, line, panel, args, **overrides)
     params = SamplingParams(max_tokens=protocol["sampling"]["max_tokens"], **sampling_kwargs(protocol))
     llm.start_measurement()

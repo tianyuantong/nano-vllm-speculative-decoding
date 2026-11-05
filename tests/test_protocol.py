@@ -15,7 +15,7 @@ TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1
                                                "hypotheses", "report_only", "stop_if"}
 TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
 PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
-           "protocol-v2.3.json": "protocol-v2.2.json"}
+           "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.4.json": "protocol-v2.3.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -103,3 +103,47 @@ def test_every_line_divides_by_a_k0_of_its_own_tree(m4_protocol):
 def test_every_concurrency_has_a_row_of_the_cost_table(m4_protocol):
     # The bench runs with max_num_seqs = C, which the verify schedule needs among its batch sizes.
     assert set(m4_protocol["concurrency"]) <= set(m4_protocol["verify_schedule"]["cost_curve"]["batch"])
+
+
+# ---------------------------------------------------------------- v2.4: M5's measurements before the engine is fixed
+V24 = json.loads((BENCHMARKS / "protocol-v2.4.json").read_text())
+V23 = json.loads((BENCHMARKS / "protocol-v2.3.json").read_text())
+
+
+def test_v2_4_keeps_what_the_measurements_are_compared_with():
+    for key in ("gpu", "models", "sampling", "max_model_len", "max_num_batched_tokens", "concurrency", "warmup", "metrics",
+                "timing_noise", "decision", "verify_schedule", "order"):
+        assert V24[key] == V23[key]
+    assert V24["seeds"]["dev"] == V23["seeds"]["dev"]
+    assert {name: V24["panels"][name] for name in V23["panels"]} == V23["panels"]
+    assert V24["gates"]["equivalence"] == V23["gates"]["equivalence"]
+    assert V24["dev"] == V23["dev"] and V24["confirm"]["concurrency"] == V23["confirm"]["concurrency"]
+
+
+def test_v2_4_slo_tiers_are_mlperfs_for_llama_3_1_8b():
+    assert V24["open_loop"]["slo"]["tiers"] == {"Conversational": {"ttft_ms": 2000, "tpot_ms": 100},
+                                                "Interactive": {"ttft_ms": 500, "tpot_ms": 30}}
+
+
+def test_v2_4_round_robin_arms_differ_from_their_base_only_by_the_flag():
+    lines = V24["lines"]
+    for base, arm in V24["round_robin"]["pairs"].items():
+        assert lines[arm].pop("round_robin_prefill") is True
+        assert {**lines[arm], "k0_line": None} == {**lines[base], "k0_line": None}
+    assert set(V24["round_robin"]["verdict_lines"]) < set(V24["round_robin"]["pairs"])
+
+
+def test_v2_4_round_robin_verdict_is_what_the_author_decided():
+    verdict = V24["round_robin"]["verdict"]
+    assert verdict["q_full_ratio_median_min"] == 0.98
+    assert verdict["itl_p99_ratio_max"] == {"8": 1.02, "32": 0.70, "64": 0.70}
+    assert (verdict["ttft_p50_ratio_max"], verdict["ttft_p99_ratio_max"]) == (2, 1.2)
+
+
+def test_v2_4_every_long_bucket_has_a_panel_and_fits_the_long_max_model_len():
+    long_context, pilot = V24["long_context"], V24["pilot"]["long_context"]
+    assert [bucket["name"] for bucket in long_context["buckets"]] == pilot["panels"]
+    for bucket in long_context["buckets"]:
+        assert SHA256.fullmatch(V24["panels"][bucket["name"]]["sha256"])
+        longest = bucket["tokens"] * (1 + long_context["window_fraction"])
+        assert longest + V24["sampling"]["max_tokens"] + 7 <= pilot["max_model_len"]

@@ -1,0 +1,585 @@
+{
+  "version": "2.4",
+  "frozen": false,
+  "derived_from": {
+    "file": "benchmarks/protocol-v2.3.json",
+    "sha256": "f93739d1fedad94fd4105b5860a67ee349823fb3fd172da7d6f3f3b5a0c9330f"
+  },
+  "changes_from_v2_3": [
+    "scope: M5's measurements before the engine is fixed, the same-machine diagnosis and the round-robin comparison; acceptance is protocol v3's. Models, sampling, panels D48 and K128b, seeds, closed-loop rules, the verify schedule and the decision rules are v2.3's",
+    "lines: the 0.6B baseline's lines leave, this protocol does not run them; dflash_k7 comes back from v2.1; the round-robin arms join",
+    "invalid_if: preemption is the scheduler's count, not excess prefill tokens; a slow step is judged within its kind",
+    "open_loop, pilot, samehost, diagnosis, round_robin and long_context are new",
+    "gates: not run here. identity stands in for them: a version whose tokens equal a gated version's needs no new gate"
+  ],
+  "gpu": {
+    "runtime": "colab new --gpu G4",
+    "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "power_limit_w": 600
+  },
+  "models": {
+    "target": "Qwen3-8B",
+    "dtype": "bfloat16",
+    "drafts": {
+      "model_0p6b": "Qwen3-0.6B",
+      "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
+      "dspark": "dspark_qwen3_8b_block7-03326e504381"
+    }
+  },
+  "sampling": {
+    "temperature": 0.7,
+    "top_k": 20,
+    "top_p": 0.8,
+    "max_tokens": 512,
+    "ignore_eos": false
+  },
+  "trees": {
+    "main": {
+      "branch": "feat/m5-gaps",
+      "rule": "a clean clone of one commit; every line's --commit"
+    },
+    "diagnosis": {
+      "branch": "exp/m5-diagnosis",
+      "rule": "never merged; a patch that exists only to measure stays here"
+    }
+  },
+  "lines": {
+    "k0": {
+      "tree": "main",
+      "drafter": null,
+      "k": 0,
+      "k0_line": "k0"
+    },
+    "dflash_k7": {
+      "tree": "main",
+      "drafter": "dflash",
+      "k": 7,
+      "k0_line": "k0"
+    },
+    "dspark_k7": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "k0_line": "k0"
+    },
+    "dspark_var": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "variable_length": true,
+      "k0_line": "k0"
+    },
+    "k0_rr": {
+      "tree": "main",
+      "drafter": null,
+      "k": 0,
+      "round_robin_prefill": true,
+      "k0_line": "k0_rr"
+    },
+    "dspark_k7_rr": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "round_robin_prefill": true,
+      "k0_line": "k0_rr"
+    },
+    "dspark_var_rr": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "variable_length": true,
+      "round_robin_prefill": true,
+      "k0_line": "k0_rr"
+    }
+  },
+  "max_model_len": 4096,
+  "max_num_batched_tokens": 16384,
+  "concurrency": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64
+  ],
+  "seeds": {
+    "dev": [
+      17011,
+      110017,
+      130031,
+      170041,
+      210011
+    ],
+    "confirm": [
+      17011,
+      110017,
+      130031
+    ],
+    "gate_g5": [
+      17011,
+      110017
+    ],
+    "external": [
+      17011
+    ]
+  },
+  "order": "all lines of one (C, seed) run back to back in one job; the i-th seed (0-based) of a panel starts with the (i mod n)-th of that panel's n lines (dev.lines on D48, confirm.versions on K128b) and continues in listed order",
+  "panels": {
+    "D48": {
+      "file": "benchmarks/inputs/panel-48.json",
+      "sha256": "071befa6898b31870770b653656e9e54465530d4d553f79b84a1aa8ec4958235",
+      "take": "full_cycles"
+    },
+    "K128": {
+      "file": "benchmarks/inputs/panel-K128.json",
+      "sha256": "44f6fb6b4922c3d85feb7f8e9eb6610c50a2865e106777bb1440d6a5cca70140",
+      "take": "prefix",
+      "salt": "bench-v2-confirm:",
+      "quotas": {
+        "code_completion": 40,
+        "NIAH": 43,
+        "open_books": 37,
+        "creative_writing": 8
+      },
+      "max_formatted_tokens": 2816
+    },
+    "K128b": {
+      "file": "benchmarks/inputs/panel-K128b.json",
+      "sha256": "cfd53af26e0cdcc2e5aee8680440ff0d35d78277d66795107c163158628ba710",
+      "take": "prefix",
+      "salt": "bench-v2.1-confirm:",
+      "quotas": {
+        "code_completion": 40,
+        "NIAH": 43,
+        "open_books": 37,
+        "creative_writing": 8
+      },
+      "max_formatted_tokens": 2816,
+      "interleave": "proportional"
+    },
+    "L4k": {
+      "file": "benchmarks/inputs/panel-L4k.json",
+      "sha256": "fa3e78c6cf03f95027443ac6850eb15b73ecae8cb842d26e3b1d086aa97dc6ba",
+      "take": 4
+    },
+    "L8k": {
+      "file": "benchmarks/inputs/panel-L8k.json",
+      "sha256": "18ecfd8cd4c2bc35c3f74bd92271de3c3bd8f4f935c8453fd946133e2ad53363",
+      "take": 4
+    },
+    "L16k": {
+      "file": "benchmarks/inputs/panel-L16k.json",
+      "sha256": "c6271d8dbe4de060ac7b0bdd91f993e5f0a131910fb1e35daa70a02781306904",
+      "take": 4
+    },
+    "L32k": {
+      "file": "benchmarks/inputs/panel-L32k.json",
+      "sha256": "5ee34327b779686944b12116d5dbfcb2741df4e1f8cffea52dc2f62db3cf1568",
+      "take": 4
+    }
+  },
+  "kv_budget": "C * ceil((max_prompt_len + max_tokens + 7) / 256) target blocks for every line; a block draft's cache mirrors the target's blocks",
+  "warmup": {
+    "requests": "first C of the panel, cycled",
+    "max_tokens": 64
+  },
+  "metrics": {
+    "primary": "Q_steady",
+    "secondary": "Q_full"
+  },
+  "timing_noise": {
+    "concurrency": [
+      1,
+      8,
+      32
+    ],
+    "seed": 17011,
+    "repeats": 2
+  },
+  "decision": {
+    "faster": "all seeds R > 1 + 2*N_t",
+    "a_beats_b": "all paired gains same sign and abs(median) > 2*N_t",
+    "report": "median (min-max), two decimals; range only if max-min > 0.05. The README's headline, total table and figures are the exception: only the median of the 3 seeds, marked as such; the ranges go in RESULTS",
+    "crossover": "smallest C with median R < 1",
+    "revised": "2026-11-02: the README rule of report decided by the author; the verdicts are unchanged"
+  },
+  "invalid_if": [
+    "gpu name mismatch",
+    "preemption > 0, the scheduler's direct count",
+    "non-finite value or assertion failure",
+    "a step other than a prefill > 3 x the median of its kind",
+    "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its tree",
+    "timing-noise repeats differ in tokens"
+  ],
+  "verify_schedule": {
+    "file": "benchmarks/inputs/verify-schedule-g4.json",
+    "sha256": "10017b48c9ea36dca41eb6482491d9fd829e62cdcafb53d72f87e70834d0c1c6",
+    "made_by": "job A on a G4 runtime at 5bf4cbc: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 5.15 x its median). The first rerun ran on kernels compiled under TORCH_LOGS=recompiles, which changes the kernels and the outputs, so it is not job A's command and does not count; a clean rerun passed with byte-identical confidences; reviewed by the author before this protocol is frozen",
+    "cost_curve": {
+      "line": "dspark_var",
+      "batch": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64
+      ],
+      "query_len": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "context_len": 2048,
+      "warmup": 25,
+      "iters": 100,
+      "statistic": "median",
+      "report": [
+        "median",
+        "p95"
+      ],
+      "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
+      "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"
+    },
+    "calibration": {
+      "line": "dspark_k7",
+      "panel": "D48",
+      "concurrency": 64,
+      "seeds": "dev",
+      "record": "every round, each row's 7 confidence logits and its accepted count; all 8 positions are verified, so 'the first i drafts all accepted' is observed for every i",
+      "method": "STS: for i = 1..7 in turn, T_i on the grid minimizing the binary cross-entropy of the survival prod_{j<=i} sigmoid(z_j / T_j) against 'the first i drafts all accepted', T_1..T_{i-1} fixed",
+      "grid": {
+        "low": 0.1,
+        "high": 10.0,
+        "points": 401,
+        "spacing": "geometric"
+      },
+      "report_only": [
+        "ECE over 10 equal-width bins, per position and pooled, raw and after STS",
+        "AUROC of the survival pooled over positions, raw and after STS"
+      ]
+    },
+    "replay": {
+      "concurrency": 64,
+      "rounds": "the calibration runs' rounds of C rows",
+      "rule": "a row with n of its 7 drafts accepted accepts min(n, L - 1) when it verifies L positions; a round's time is the cost table's at its token count, the fixed-length round's at 8 per row",
+      "stop_if_gain_below": 0.0252,
+      "source": "2 x N_t, N_t = 1.26% in the cluster's job 236550, kept until the G4's own is measured"
+    }
+  },
+  "dev": {
+    "panel": "D48",
+    "lines": [
+      "k0",
+      "dspark_k7",
+      "dspark_var"
+    ]
+  },
+  "confirm": {
+    "panel": "K128b",
+    "concurrency": [
+      1,
+      8,
+      32,
+      64
+    ],
+    "versions": [
+      "k0",
+      "dspark_k7",
+      "dspark_var"
+    ],
+    "runs_in": "protocol v3; this protocol runs no confirmation, the identity job only reads its concurrency"
+  },
+  "gates": {
+    "equivalence": {
+      "protocol": "benchmarks/protocol-v2.1.json",
+      "lines": [
+        "dspark_k7",
+        "dflash_k7"
+      ],
+      "panel": "K128b",
+      "concurrency": [
+        1,
+        8
+      ],
+      "seed": 17011,
+      "reference": "repeat 1 of the cluster reproduction, job 236550",
+      "rule": "token-identical"
+    }
+  },
+  "identity": {
+    "rule": "the tree at the job's commit against the reference's tokens, request by request, and the environment against job C's manifest: outputs/colab/m4-preflight.sh, m4-preflight-check.py. dev.lines on D48 at confirm.concurrency, seed 17011, against job C's repeat 1; gates.equivalence's dspark_k7 on K128b under protocol v2.1, against the cluster reproduction's repeat 1",
+    "why": "the fields of T1, the admission cap of T2 and the eager fallback of T5 must not change a token: the cap is redundant with at most C in flight"
+  },
+  "pilot": {
+    "report": "never: pilots only size what follows, and run under this protocol so no GPU job runs before a freeze",
+    "max_model_len": {
+      "panel": "D48",
+      "lines": [
+        "k0",
+        "dspark_k7"
+      ],
+      "concurrency": [
+        1,
+        8,
+        32,
+        64
+      ],
+      "seed": 17011,
+      "value": 36864,
+      "compare": "the identity job's runs at 4096, same VM"
+    },
+    "long_context": {
+      "panels": [
+        "L4k",
+        "L8k",
+        "L16k",
+        "L32k"
+      ],
+      "lines": [
+        "k0",
+        "dflash_k7",
+        "dspark_k7",
+        "dspark_var"
+      ],
+      "concurrency": 1,
+      "seed": 17011,
+      "max_model_len": 36864
+    },
+    "open_loop": {
+      "lines": [
+        "k0",
+        "dspark_var"
+      ],
+      "rate": 5,
+      "requests": 200,
+      "seed": 17011
+    }
+  },
+  "long_context": {
+    "salt": "bench-v2.4-long:",
+    "window_fraction": 0.1,
+    "buckets": [
+      {
+        "name": "L4k",
+        "tokens": 4000,
+        "source": "recipes",
+        "quotas": {
+          "NIAH": 16,
+          "creative_writing": 16
+        }
+      },
+      {
+        "name": "L8k",
+        "tokens": 8000,
+        "source": "throughput_8k",
+        "quotas": {
+          "code_completion": 16,
+          "open_books": 16
+        }
+      },
+      {
+        "name": "L16k",
+        "tokens": 16000,
+        "source": "throughput_16k",
+        "quotas": {
+          "code_completion": 16,
+          "open_books": 16
+        }
+      },
+      {
+        "name": "L32k",
+        "tokens": 32000,
+        "source": "throughput_32k",
+        "quotas": {
+          "code_completion": 16,
+          "open_books": 16
+        }
+      }
+    ],
+    "dataset": {
+      "name": "nvidia/SPEED-Bench",
+      "revision": "fa4e669bee2a4393c56aa8ed05a7c667897f9590"
+    },
+    "rule": "length is the final Qwen-formatted token count; the panels are reported on only, since length and content change together"
+  },
+  "open_loop": {
+    "panel": "D48",
+    "concurrency": 64,
+    "lines": [
+      "k0",
+      "dflash_k7",
+      "dspark_k7",
+      "dspark_var"
+    ],
+    "rates": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "requests": 1000,
+    "seed": 17011,
+    "order": "for each rate in order, the lines in listed order, back to back in one job",
+    "arrivals": "Poisson, generated before the run from --seed by a generator of its own; every line of a (rate, seed) gets the same plan; the panel cycles in order",
+    "warmup_fraction": 0.1,
+    "warmup": "the closed-loop warm-up runs first, then the plan starts. The first warmup_fraction of the planned requests run and are not counted, whatever the line; every later one counts",
+    "drain_seconds": 120,
+    "drain": "no request is added after the plan's last; a request unfinished drain_seconds after the last arrival counts as an infinite latency",
+    "clock": "latencies run on the host's clock from the planned arrival to the return of the step that delivered; round durations stay on CUDA events; the two never enter one number",
+    "gc": "after the warm-up gc.collect(), then the third generation's threshold at 10**9 until the run ends: ctx_store diagnosis §5. Only this mode",
+    "phases": "per-step CUDA events only; no per-phase events in these runs",
+    "slo": {
+      "percentile": 99,
+      "tiers": {
+        "Conversational": {
+          "ttft_ms": 2000,
+          "tpot_ms": 100
+        },
+        "Interactive": {
+          "ttft_ms": 500,
+          "tpot_ms": 30
+        }
+      },
+      "source": "MLPerf Inference rules, Llama3.1-8B",
+      "tpot": "per request: (end to end - TTFT) / (tokens - 1); a request with one token has none"
+    },
+    "capacity": "per line and tier a rate passes when every seed run at it meets both limits; capacity is the interval from the last rate that passes before the first that fails to that one",
+    "invalid_if": [
+      "gpu name mismatch",
+      "non-finite value or assertion failure"
+    ],
+    "report_only": [
+      "slow steps: over 3 x the median of their kind and batch size; a tail stays in the tail",
+      "full garbage collections",
+      "queue length",
+      "ITL and end to end p50 / p99",
+      "preemptions, which H1 of protocol v3 judges"
+    ]
+  },
+  "samehost": {
+    "panel": "D48",
+    "concurrency": [
+      1,
+      8,
+      32
+    ],
+    "seeds": "dev",
+    "lines": {
+      "nano": [
+        "k0",
+        "dflash_k7",
+        "dspark_k7"
+      ],
+      "vllm": [
+        "k0_v2",
+        "dflash_k7",
+        "dspark_k7"
+      ]
+    },
+    "metric": "wall-clock Q_full",
+    "clock": "wall clock on both sides, the GPU synchronized around it",
+    "order": "at each (C, seed) nano's lines then vLLM's, back to back in one job; every run a new process",
+    "gap_rule": "a gap remains on (line, C) when the 5 seeds' throughput ranges of nano and vLLM do not overlap; the other diagnostics run only there"
+  },
+  "external": {
+    "vllm": {
+      "version": "0.1.1.dev52+g372477d2d",
+      "commit": "372477d2d9890381dbc794cf66ef86ff989f04e0",
+      "wheel": "https://wheels.vllm.ai/372477d2d9890381dbc794cf66ef86ff989f04e0/vllm-0.1.1.dev52%2Bg372477d2d-cp38-abi3-manylinux_2_28_x86_64.whl",
+      "torch": "2.13.0+cu130",
+      "runner_rule": "dflash and dspark run only on the v2 model runner, whose k=0 line is k0_v2",
+      "dflash_rule": "DeepSpec's DFlash checkpoint is a Qwen3DSparkModel without the Markov head, so dflash_k7 runs through vLLM's dspark method",
+      "adaptive_profile_context_len": 2048,
+      "draft_sample_method": "probabilistic",
+      "seed_rule": "--seed seeds the engine; every seed a new process, since repeats in one engine only advance one generator",
+      "kv_cache_bytes": 34359738368
+    }
+  },
+  "diagnosis": {
+    "tree": "diagnosis",
+    "where": "D48, 5 dev seeds, only the (line, C) where samehost.gap_rule says a gap remains",
+    "experiments": [
+      {
+        "name": "torch",
+        "change": "nano on torch 2.13.0",
+        "question": "how much of the gap is the software version"
+      },
+      {
+        "name": "segments",
+        "change": "the same input state through both engines' round, timed in segments, with a host-side profile",
+        "question": "is the gap on the GPU or on the host; vLLM's timing patch stays on this branch"
+      },
+      {
+        "name": "temperature_draft",
+        "change": "nano's drafts sampled with temperature only, as vLLM's",
+        "question": "does tokens per round follow the top-k and top-p truncation of q"
+      }
+    ],
+    "overflow": "M3 §7: on real logits count the rows whose candidates overflow and the difference in q; no larger sample",
+    "merge_rule": "a fix found here goes to M6, unless a single-factor experiment measures a gain over 2*N_t and the change is a few lines",
+    "report": "H5 of protocol v3: the gap and what each experiment moves, reported only"
+  },
+  "round_robin": {
+    "rule": "after the initial C requests of a closed loop are prefilled, a step admits at most one request and a prefill step is followed by a round; an open loop has no initial group",
+    "panel": "D48",
+    "concurrency": [
+      8,
+      32,
+      64
+    ],
+    "seeds": "dev",
+    "pairs": {
+      "k0": "k0_rr",
+      "dspark_k7": "dspark_k7_rr",
+      "dspark_var": "dspark_var_rr"
+    },
+    "verdict_lines": [
+      "dspark_k7",
+      "dspark_var"
+    ],
+    "boundary": "the warm-up boundary of a run is the step of the last first delivery among its first C requests; the initial group is prefilled alike on both arms",
+    "metrics": {
+      "throughput": "Q_full over the same requests; the steady window would leave out the phase where requests wait for prefill",
+      "itl": "every consecutive pair of a request's deliveries that starts at or after the boundary",
+      "ttft": "as bench-v2, over every request"
+    },
+    "verdict": {
+      "itl_p99_ratio_max": {
+        "8": 1.02,
+        "32": 0.7,
+        "64": 0.7
+      },
+      "itl_p99": "every seed: rr / base at most this",
+      "q_full_ratio_median_min": 0.98,
+      "q_full": "the median over the seeds of rr / base at C = 8, 32, 64 each at least this; all seeds are listed. 2% is a trade the author accepts, not a statistical result",
+      "ttft_p50_ratio_max": 2,
+      "ttft_p99_ratio_max": 1.2,
+      "ttft": "every seed: rr / base at most these",
+      "slo": "on the same arrival plan, a tier the base line passes at a rate still passes with rr"
+    },
+    "open_loop": {
+      "lines": [
+        "dspark_k7",
+        "dspark_var"
+      ],
+      "seed": 17011,
+      "rates": "the three highest rates at which the line passed either tier on the coarse grid; both arms in one job"
+    },
+    "on_fail": "any condition fails on either verdict line: stop, the patch is not merged, nothing escalates to the mixed step"
+  },
+  "stop_if": [
+    "identity finds a difference: no performance numbers from this tree; find the cause",
+    "an open-loop run preempts: the admission cap is wrong; find the cause",
+    "an invalid closed-loop run: its whole (C, seed) rerun once, per invalid_if"
+  ]
+}
