@@ -43,6 +43,29 @@ DSpark shares the block forward pass, KV layout, and target verification path wi
 
 When all active requests use top-k truncation, each draft position samples within its top `max_top_k + 64` logits rather than running softmax over the full vocabulary (matching full-vocabulary truncation unless more than 64 tokens tie at the cutoff). CUDA graphs are captured for up to 4 distinct sampling configurations (`top_k` width, whether `top_p` is enabled, and whether all requests truncate); batches with other configurations fall back to eager sampling (~0.4–0.5 ms slower per round at `C = 1`).
 
+## Variable-length verification
+
+By default DSpark verifies all 8 positions of every row. With `variable_length=True`, each row verifies as many as its confidence justifies:
+
+```python
+llm = LLM(
+    "/models/Qwen3-8B",
+    draft_model="/models/dspark_qwen3_8b_block7",
+    draft_type="dspark",
+    variable_length=True,
+    verify_schedule="benchmarks/inputs/verify-schedule-g4.json",
+    enable_prefix_cache=False,
+    kv_cache_memory_bytes=10 << 30,
+    max_num_seqs=64,
+)
+```
+
+Each round the engine ranks the batch's draft positions by survival probability, the product of a row's calibrated confidences up to that position, and admits them while expected tokens over estimated round time keeps rising. It then rounds the total up to a CUDA Graph's size and fills the graph with the next positions in the same order. Whether a row's draft `i` is verified depends only on positions ranked no later than it, never on draft `i` or later drafts, which keeps rejection sampling lossless.
+
+The schedule file holds round times measured by batch size and verified length, and the 7 confidence temperatures. It holds only for the environment it was measured on, and `max_num_seqs` must be one of its batch sizes. Measure a new one with `tools/profile_verify_cost.py` and `tools/fit_confidence_sts.py`. Variable length needs a DSpark checkpoint with a confidence head.
+
+Results are in [RESULTS.md](RESULTS.md#8-variable-length-verification).
+
 ## Execution flow of a speculative round
 
 At the start of every round, both the target KV cache and the draft context KV cache hold entries up to `len - 1` for each sequence in the batch:
