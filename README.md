@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): evolving from a 0.6B standalone draft to DFlash parallel blocks and DSpark's in-block Markov correction.
+Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): evolving from a 0.6B standalone draft to DFlash parallel blocks, DSpark's in-block Markov correction, and variable-length verification.
 
 **Single-request 2.10× · 8 concurrent 1.78× · 32 concurrent 1.43× · 64 concurrent 1.15×**
 
@@ -31,6 +31,28 @@ Measured on Qwen3-8B and a single RTX PRO 6000 (600 W), with standard rejection 
 
 Values are steady-state throughput multiples over plain decoding on 128-prompt held-out test sets (medians over 3 seeds). The 0.6B standalone draft ([`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), 2.49–2.53 tokens/round) was measured on the first 128-prompt set (where DFlash reaches 2.19× / 1.80× / 1.40× / 1.08×, left panel); all other columns were measured back-to-back on the second 128-prompt set (right panel). [Full results and protocol →](docs/RESULTS.md) · [0.6B baseline comparison →](docs/v2/RESULTS.md)
 
+## Variable-length verification
+
+Variable-length verification raises DSpark's speedup from 1.44× to **1.48×** (+2.2%) at 32 concurrent requests and from 1.14× to **1.25×** (+8.9%) at 64. Target verification takes about three quarters of a round, and extra positions cost more as the batch grows: in the measured cost table, a round verifying 8 positions per request runs 14% longer than one verifying 1 with 16 requests in the batch, 25% with 32, and 49% with 64. Following DSpark's Algorithm 1, the engine ranks all candidate positions in the batch by predicted survival probability, keeps admitting them while estimated throughput (from a measured round-time table) rises, and rounds the total up to a CUDA Graph size.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-variable-dark.svg">
+  <img alt="Speedup over plain decoding on the 128-prompt held-out test set (medians over 3 seeds). Fixed-length DSpark reaches 2.08×, 1.76×, 1.44×, 1.14× at 1, 8, 32, 64 concurrent requests; variable-length DSpark reaches 2.02×, 1.79×, 1.48×, 1.25×; 0.6B standalone draft reaches 1.50×, 1.21×, 1.00×, 0.85×." src="docs/assets/speedup-variable-light.svg" width="760">
+</picture>
+
+| Concurrent requests | 0.6B draft (k=3) | DSpark fixed-length | DSpark variable-length | Variable vs fixed | Positions verified per request per round |
+|---:|---|---|---|---|---|
+| 1 | 1.50× | 2.08× | 2.02× | −2.7% | 8.00 |
+| 8 | 1.21× | 1.76× | 1.79× | Seeds disagree | 6.68 |
+| 32 | 1.00× | 1.44× | **1.48×** | **+2.2%** | 4.62 |
+| 64 | 0.85× | 1.14× | **1.25×** | **+8.9%** | 4.43 |
+
+Medians over 3 seeds on the second 128-prompt set, measured on a separate RTX PRO 6000 (600 W, Colab G4) instance. Variable vs fixed is paired seed by seed, so it is not the ratio of the two medians. [Variable-length results and protocol →](docs/RESULTS.md#8-variable-length-verification)
+
+- **Where 64 concurrent requests save time.** Verification drops from 36.51 ms to 27.96 ms per round and acceptance from 4.31 ms to 2.45 ms. A round is 18.6% shorter and delivers 5.6% fewer tokens, gaining +16.1% on decode rounds alone and +8.9% once prefill steps are included.
+- **Single-request overhead.** With one request, every round verifies all 8 positions and the output matches fixed-length DSpark token for token, so the 2.7% slowdown is the cost of the variable-length path.
+- **Outputs differ at 8, 32 and 64 concurrent requests.** These are measured throughput gains, not speedups on identical output.
+
 ## Performance breakdown and comparisons
 
 - **Block drafting eliminates serial autoregressive overhead.** A standalone 0.6B draft runs 3 sequential decode steps per round (~6 ms) and maintains a separate KV cache, falling below plain decoding at 32 concurrent requests (0.96×); a block draft proposes all 7 candidate tokens in a single forward pass.
@@ -38,14 +60,15 @@ Values are steady-state throughput multiples over plain decoding on 128-prompt h
 - **Speedup narrows at high concurrency.** Verification costs more per row as batch size grows, and prefill steps—which pause decoding in this engine—take 31% of DSpark's steady-state window at 32 concurrent requests.
 - **Comparison with vLLM** (48-prompt dev set, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 7.6–7.9% behind vLLM at 1–32 concurrent requests; on plain decoding without speculation, it is 1–5% faster than vLLM.
 
-## Core implementation (three-stage evolution)
+## Core implementation (four-stage evolution)
 
-The `main` engine is 2,570 lines of Python, built across three generations:
+The `main` engine is 2,850 lines of Python, built across four generations:
 - **Stage 1 — 0.6B standalone draft (branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft))**: two separate models with independent block tables and KV caches; the 0.6B model runs k=3 autoregressive steps per round, the target verifies all positions in one fixed-length CUDA Graph pass, and a vectorized GPU sampler (`SpecSampler`) performs batched rejection sampling and KV rollback.
 - **Stage 2 — DFlash parallel block draft**: replaces the standalone model with a single 7-query, non-causal pass through the decode attention path that reads 5 auxiliary target layers; a 5-layer draft KV cache shares the target's block table (`block_tables`) and stores context K/V for accepted positions after verification.
 - **Stage 3 — DSpark in-block Markov correction**: adds a Markov head on top of the DFlash block features to draw the 7 candidate positions left to right, passing each position's bias-adjusted distribution to the rejection sampler. Three CUDA Graphs cover target verification, the draft block forward pass, and DSpark's 7 sampling steps.
+- **Stage 4 — Variable-length verification**: uses DSpark's confidence head to compute each position's survival probability (the prefix product of calibrated confidences), admits positions across the batch while expected tokens divided by the measured round-time schedule keep rising, and pads the total verified token count up to a captured CUDA Graph size without breaking lossless rejection sampling.
 
-Entry points: `SpeculativeDecoder.run_round` (five-step round pipeline), `DFlashDrafter.propose`, `_markov_rows` and `after_verify`, and the decode branch of `Attention.forward`.
+Entry points: `SpeculativeDecoder.run_round` (five-step round pipeline), `VerifySchedule.verify_lengths`, `DFlashDrafter.propose`, `_markov_rows` and `after_verify`, and the decode branch of `Attention.forward`.
 
 ## Correctness verification
 
@@ -56,6 +79,8 @@ Verified on GPU across four checks:
 - DSpark block and Markov-corrected logits against the DeepSpec reference implementation (0.59–1.08% relative error)
 - Verification logits against step-by-step decoding (0.84 max absolute difference)
 - GSM8K math reasoning accuracy (84.7% vs 85.2% plain decoding, −0.5 pt difference, 95% CI −1.7 to +0.8 pt)
+
+Variable-length verification passes the sampler, verification-logit and GSM8K checks: 84.2% vs 85.1% plain decoding, −0.87 pt difference, 95% CI −2.14 to +0.40 pt.
 
 ## Engineering pitfalls
 
@@ -105,7 +130,7 @@ DSpark and DFlash propose a fixed block of 7 tokens per round (set by the checkp
 `bench_spec.py` checks that the GPU matches `protocol["gpu"]["name"]` before running. Build the prompt panels first, then run plain decoding (`k0`) and the speculative lines across concurrencies and seeds in one directory:
 
 ```bash
-python -m pytest -q    # CPU tests, ~6 s
+python -m pytest -q    # CPU tests, under 30 s
 python tools/fetch_panels.py && python tools/build_panel_k128.py
 for c in 1 8 32 64; do
   for s in 17011 110017 130031; do
@@ -119,13 +144,13 @@ done
 python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results runs
 ```
 
-`tools/report_v2.py` summarizes throughput and speedup ratios, `tools/gain_factors.py` decomposes speedup gains by factor, and `tools/plot_speedup.py` generates the speedup bar charts. Raw result JSONs and prompt panels for every table are packaged in the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark).
+For variable-length verification, pass `benchmarks/protocol-v2.3.json` and run lines `k0 dspark_k7 dspark_var` (line names, concurrencies, and seeds are defined in the protocol file). Token-for-token reproduction also needs the compile caches and job order in the `results-variable-length` release. `tools/report_v2.py` summarizes throughput and speedup ratios, `tools/gain_factors.py` decomposes speedup gains by factor, and `tools/plot_speedup.py` generates the speedup bar charts. Raw result JSONs and prompt panels are packaged in two release assets: [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) and [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length) (for the variable-length runs).
 
 ## Explore the project
 
 | Document | Contents |
 |---|---|
-| [Results](docs/RESULTS.md) | DSpark vs DFlash, speedup breakdown, vLLM comparison and correctness checks |
+| [Results](docs/RESULTS.md) | DSpark vs DFlash, variable-length verification, speedup breakdown, vLLM comparison and correctness checks |
 | [DFlash results](docs/v2/RESULTS.md) | DFlash vs the 0.6B standalone draft, per-round phase timings and prefill stalls |
 | [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
 | [Tools](tools/README.md) | Measurement, verification and analysis scripts |

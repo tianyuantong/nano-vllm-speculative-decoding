@@ -176,6 +176,41 @@ The extra tokens per round were estimated too high: nano's DFlash already gets m
 
 Measurement scope as in the DFlash results: offline closed loop, one GPU model, one target model, random sampling (T 0.7, top-k 20, top-p 0.8); see [v2/RESULTS.md](v2/RESULTS.md) §7.
 
+## 8. Variable-length verification
+
+Fixed-length DSpark verifies 8 positions in every row, every round, and yields 2.81–2.95 tokens per round, counted as in §1. Verification is about three quarters of a round, and its cost climbs with the batch: in this machine's cost table, a round verifying 8 positions per row runs 14% longer than one verifying 1 at 16 rows, 25% at 32 and 49% at 64. The table comes from one run, with fresh prompts for each length.
+
+With `variable_length=True` the engine follows DSpark's Algorithm 1: it ranks the batch's positions by the predicted chance that they survive and admits them while estimated throughput keeps rising. The estimate comes from a measured round-time table, and the total is rounded up to a CUDA Graph's size ([usage](DECODING.md#variable-length-verification)).
+
+These runs come from a different machine and protocol from §1–7, so they stay in their own tables: Colab's G4 runtime, an RTX PRO 6000 at 600 W, [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json), K128b, 3 seeds.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/speedup-variable-dark.svg">
+    <img alt="Speedup over plain decoding on K128b, medians over 3 seeds. Fixed-length DSpark: 2.08×, 1.76×, 1.44×, 1.14× at 1, 8, 32, 64 concurrent requests. Variable-length DSpark: 2.02×, 1.79×, 1.48×, 1.25×. Qwen3-0.6B draft: 1.50×, 1.21×, 1.00×, 0.85×." src="assets/speedup-variable-light.svg" width="760">
+  </picture>
+</p>
+
+| C | 0.6B draft (k = 3) | DSpark, fixed length | DSpark, variable length | Variable over fixed, per seed | Positions verified per row | Tokens per round, fixed / variable |
+|---:|---|---|---|---|---:|---|
+| 1 | **1.50 (1.49–1.52)** | **2.05–2.18** | **2.00–2.12** | −2.83 … −2.48% | 8.00 | 2.82 / 2.82 |
+| 8 | **1.21 (1.20–1.22)** | **1.71–1.80** | **1.73–1.80** | −3.96 … +4.51% | 6.68 | 2.81 / 2.87 |
+| 32 | 1.00 (1.00–1.01) | **1.44 (1.44–1.46)** | **1.48 (1.47–1.49)** | **+2.17 … +2.77%** | 4.62 | 2.95 / 2.79 |
+| 64 | 0.85 (0.84–0.85) | **1.14 (1.12–1.15)** | **1.25 (1.23–1.26)** | **+8.19 … +10.06%** | 4.43 | 2.93 / 2.77 |
+
+R as in §1, median (min–max). **Bold** marks a line faster than plain decoding at every seed, and a gain whose seeds share a sign with a median beyond `2 × N_t`. `N_t = 0.14%`, from 15 repeat pairs. 75 runs, none void. Tokens per round are round-weighted as in §1, accepted + 1, so they include tokens later cut off by EOS or the length limit; counted as delivered they are 0.01–0.02 lower. The two trees' plain decoding agrees within `2 × N_t` at every C, so the 0.6B draft shares the table.
+
+- **Variable length wins at C = 32 and 64:** medians +2.21% and +8.91%. On the 48-prompt development panel, with 5 seeds, the same comparison gave +2.41% and +8.71%, and C = 32 was the first concurrency it called faster (C = 16: +1.78%, undecided).
+- **At C = 1 every row verifies all 8 positions.** The outputs match fixed length token for token on all three seeds, so the 2.66% loss is the cost of the variable path.
+- **C = 8 has no direction.** The seeds disagree in sign, and steady-state and full-run throughput disagree on seed 130031 (+2.23% and −1.97%). This concurrency was set as report-only before the run.
+- **The gain is in verification.** At C = 64, verification falls from 36.51 to 27.96 ms a round and acceptance from 4.31 to 2.45 ms. A round is 18.6% shorter and delivers 5.6% fewer tokens, so rounds alone gain 16.1%; prefill steps, which take 32.5% of the steady window on fixed length and 35.9% on variable, leave +8.9%.
+- **Latency follows the rounds.** At C = 64 ITL p50 falls from 51.5 to 42.3 ms and TTFT p50 stays at 88–89 ms. ITL p99 sits between two steps of its distribution there: 182–183 ms on fixed length, 138, 139 and 173 ms on variable.
+- **Full-run throughput agrees at C = 32 and 64:** +2.63% (+2.39 … +4.22%) and +8.87% (+6.88 … +9.61%).
+- **Outputs differ from fixed length at C = 8, 32 and 64,** so these are measured throughput gains, not gains on identical output. Variable length passed the same gates: G1-wide 1.14 against 3.0, 71 multi-step sampler cases, G2-real, and GSM8K accuracy 84.2% against 85.1% for plain decoding (−0.87 pt, 95% CI −2.14 to +0.40 pt, threshold −3 pt; 1,319 problems over 2 seeds, counted as 2,638 pairs).
+- **Two K128b prompts are mislabelled.** Items 63 and 79, tagged as creative writing, are entries of `meetingpred_4k.jsonl`. C = 1 and 8 do not reach them, and every line sees the same inputs.
+
+Engine `97fdd3c`, baseline branch `66f99b6`, verify schedule [`benchmarks/inputs/verify-schedule-g4.json`](../benchmarks/inputs/verify-schedule-g4.json). Driver 580.82.07; the other software versions match the appendix.
+
 ## Appendix: environment and data
 
 | item | value |

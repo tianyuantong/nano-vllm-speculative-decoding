@@ -2,7 +2,7 @@
 
 # nano-vllm-speculative-decoding
 
-基于 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 的块式投机解码：从 0.6B 独立小模型演进至 DFlash 并行草稿与 DSpark 块内 Markov 修正。
+基于 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 的块式投机解码：从 0.6B 独立小模型演进至 DFlash 并行草稿、DSpark 块内 Markov 修正与变长验证。
 
 **单请求 2.10× · 8 并发 1.78× · 32 并发 1.43× · 64 并发 1.15×**
 
@@ -31,6 +31,28 @@
 
 表中为 128 条留出测试集上相对普通解码的稳态吞吐倍数（3 个 seed 中位数）。其中 0.6B 独立小模型（[`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)，每轮生成 2.49–2.53 token）测于第一批 128 题测试集（同集下 DFlash 为 2.19× / 1.80× / 1.40× / 1.08×，对应左图）；其余各列均在同一批测试集（对应右图）中背靠背测得。[完整数据与评测协议 →](docs/RESULTS.md) · [0.6B 基线对照详情 →](docs/v2/RESULTS.md)
 
+## 变长验证
+
+变长验证在 32 和 64 并发下将 DSpark 的加速比从 1.44× 提升至 **1.48×**（+2.2%）、从 1.14× 提升至 **1.25×**（+8.9%）。一轮里验证约占四分之三耗时，批越大，多验的位置越贵：实测成本表里，每个请求验 8 个比验 1 个，一轮时长在一批 16 个请求时多 14%，32 个时多 25%，64 个时多 49%。引擎按 DSpark 论文的算法 1 把一批里所有候选位置按预测存活概率排序，只要用实测轮时长表算出的估算吞吐还在涨就继续收，最后把总数向上取整到一个 CUDA Graph 的大小。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-variable-dark.svg">
+  <img alt="128 条留出测试集上相对普通解码的吞吐倍数（3 个 seed 中位数）。DSpark 定长在 1/8/32/64 并发下为 2.08×、1.76×、1.44×、1.14×；DSpark 变长为 2.02×、1.79×、1.48×、1.25×；0.6B 小模型为 1.50×、1.21×、1.00×、0.85×。" src="docs/assets/speedup-variable-light.svg" width="760">
+</picture>
+
+| 并发请求数 | 0.6B 小模型 (k=3) | DSpark 定长 | DSpark 变长 | 变长相对定长 | 每请求每轮验证位置数 |
+|---:|---|---|---|---|---|
+| 1 | 1.50× | 2.08× | 2.02× | −2.7% | 8.00 |
+| 8 | 1.21× | 1.76× | 1.79× | 各 seed 方向不一致 | 6.68 |
+| 32 | 1.00× | 1.44× | **1.48×** | **+2.2%** | 4.62 |
+| 64 | 0.85× | 1.14× | **1.25×** | **+8.9%** | 4.43 |
+
+表中为第二批 128 题测试集上 3 个 seed 的中位数，测于另一台 RTX PRO 6000（600 W，Colab G4）实例。变长相对定长一列按 seed 配对，所以不等于两列中位数之比。[变长验证详情 →](docs/RESULTS.md#8-variable-length-verification)
+
+- **64 并发省在哪。** 单轮验证从 36.51 ms 降到 27.96 ms，接受从 4.31 ms 降到 2.45 ms；一轮短 18.6%、每轮少交付 5.6%。只算解码轮吞吐 +16.1%，算上 prefill 是 +8.9%。
+- **单请求开销。** 单请求时每轮都验满 8 个位置，输出和定长逐 token 相同，这 2.7% 是变长路径的开销。
+- **8、32、64 并发下输出不同。** 这里是实测吞吐的差，不是相同输出下的加速。
+
 ## 性能拆解与横向对比
 
 - **块式草稿消除了串行自回归开销。** 独立 0.6B 模型每轮需串行跑 3 步 decode（耗时约 6 ms）并维护独立 KV cache，并发升至 32 时被验证成本反超（0.96×）；块式 draft 一次前向同时提出 7 个候选 token，大幅压低草稿耗时。
@@ -38,14 +60,15 @@
 - **高并发下收益收窄。** 并发升高后，target 验证步每行的计算成本上升；同时本引擎的 prefill 步会暂停 decode，在 C=32 时占了 DSpark 稳态窗口 31% 的时间。
 - **对比 vLLM**（48 条开发集，全流程挂钟吞吐，vLLM `372477d`）：跑 DSpark 时，C=1–32 下比 vLLM 慢 7.6–7.9%；关闭投机时，本引擎比 vLLM 快 1–5%。
 
-## 核心实现（三代架构演进）
+## 核心实现（四代架构演进）
 
-当前主分支引擎共 2,570 行，沿三条线递进演进：
+当前主分支引擎共 2,850 行，沿四条线递进演进：
 - **第一代：0.6B 独立小模型（分支 [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）**：双模型独立维护各自的块表与 KV cache，draft 串行自回归起草 k=3 步，target 通过固定长度 CUDA Graph 一次前向验证，并在 GPU 上用向量化采样器（`SpecSampler`）完成整批拒绝采样与回滚。
 - **第二代：DFlash 块式并行草稿**：移除独立小模型与双份块表，复用 decode 注意力路径一次跑 7 个 query 的非因果注意力，直接读取 target 的 5 层辅助特征；5 层 draft KV cache 与 target 共用同一张块表（`block_tables`），在验证后写入已接受位置的上下文 K/V。
 - **第三代：DSpark 块内 Markov 修正**：在 DFlash 块特征之上通过 Markov head 由左向右依次采样 7 个位置，并以叠加偏置后的分布参与拒绝采样验证；全程由三段 CUDA Graph 覆盖（target 验证前向、draft 块前向、DSpark 7 步块内采样）。
+- **第四代：变长验证**：利用 DSpark 置信度头计算各位置的存活概率（校准后置信度的前缀积），结合实测轮时长表在整批内按估算吞吐增量决定每行验证长度，并将总验证位置数向上对齐至 CUDA Graph 档位，同时保持无损拒绝采样。
 
-入口代码：`SpeculativeDecoder.run_round`（单轮五步流水）、`DFlashDrafter.propose`、`_markov_rows` 与 `after_verify`，以及 `Attention.forward` 的 decode 分支。
+入口代码：`SpeculativeDecoder.run_round`（单轮五步流水）、`VerifySchedule.verify_lengths`、`DFlashDrafter.propose`、`_markov_rows` 与 `after_verify`，以及 `Attention.forward` 的 decode 分支。
 
 ## 正确性验证
 
@@ -56,6 +79,8 @@ GPU 实测覆盖四项检验：
 - DSpark 块输出与 Markov 修正后 logits 对比参考实现 DeepSpec（相对误差 0.59–1.08%）
 - 验证步 logits 对比逐步 decode（最大绝对差 0.84）
 - GSM8K 数学推理数据集准确率（84.7% 对比普通解码 85.2%，差值 −0.5 个百分点，95% 置信区间 −1.7 ~ +0.8 个百分点）
+
+变长验证通过了采样器、验证 logits 和 GSM8K 三项检验：准确率 84.2%，普通解码 85.1%，差值 −0.87 个百分点，95% 置信区间 −2.14 ~ +0.40 个百分点。
 
 ## 踩过的坑
 
@@ -105,7 +130,7 @@ DSpark 与 DFlash 每轮固定提出 7 个候选 token（由权重块大小决�
 `bench_spec.py` 开跑前会校验 GPU 型号是否与 `protocol["gpu"]["name"]` 一致。先构建测试面板，再在同一目录下跑完普通解码（`k0`）与投机解码的各并发及 seed：
 
 ```bash
-python -m pytest -q    # CPU 测试，约 6 秒
+python -m pytest -q    # CPU 测试，30 秒内
 python tools/fetch_panels.py && python tools/build_panel_k128.py
 for c in 1 8 32 64; do
   for s in 17011 110017 130031; do
@@ -119,13 +144,13 @@ done
 python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results runs
 ```
 
-`tools/report_v2.py` 汇总吞吐与加速比，`tools/gain_factors.py` 拆解各因素贡献，`tools/plot_speedup.py` 生成加速比柱状图。各表对应的原始结果 JSON 与测试面板已打包在 release 附件 [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 中。
+变长验证改用 `benchmarks/protocol-v2.3.json`，评测线为 `k0 dspark_k7 dspark_var`（线名、并发与 seed 均定义在该协议文件中）。要逐 token 复现，还需要 `results-variable-length` 里的编译缓存和作业顺序。`tools/report_v2.py` 汇总吞吐与加速比，`tools/gain_factors.py` 拆解各因素贡献，`tools/plot_speedup.py` 生成加速比柱状图。各表对应的原始结果 JSON 与测试面板打包在两个 release 附件中：[`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 与存放变长验证数据的 [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length)。
 
 ## 深入了解
 
 | 文档 | 内容 |
 |---|---|
-| [结果](docs/RESULTS.md) | DSpark 对比 DFlash、领先来源、与 vLLM 对比及正确性检验 |
+| [结果](docs/RESULTS.md) | DSpark 对比 DFlash、变长验证、领先来源、与 vLLM 对比及正确性检验 |
 | [DFlash 结果](docs/v2/RESULTS.md) | DFlash 对比 0.6B 独立小模型、单轮阶段耗时与 prefill 停顿 |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
 | [工具](tools/README.md) | 测量、校验与分析脚本清单 |
