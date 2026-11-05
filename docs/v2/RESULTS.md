@@ -203,7 +203,7 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 
 | item | value |
 |---|---|
-| engine | development matrix at `1f78eca`, confirmation set at `10b38b4` (same engine code) |
+| engine | development matrix at `c21aea4`, confirmation set at `a01aadd` (same engine code) |
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts Qwen3-0.6B and DeepSpec's `dflash_qwen3_8b_block7` |

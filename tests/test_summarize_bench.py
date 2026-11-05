@@ -6,7 +6,7 @@ import pytest  # noqa: E402
 
 from summarize_bench import (excess_prefill_tokens, full_batch_share, itl_ms, mbu, percentile,  # noqa: E402
                              prefill_share, q_full, q_steady, request_latencies, round_ms, steady_window,
-                             throughput, tokens_per_round, ttft_ms)
+                             throughput, tokens_per_round, ttft_ms, verified_per_row)
 
 TIMINGS = [
     {"step": 0, "kind": "prefill", "batch_size": 2, "tokens_out": 20, "start_ms": 0.0, "duration_ms": 10.0},
@@ -77,3 +77,8 @@ def test_v2_preemption_and_shares():
 
 def test_v2_mbu():
     assert mbu(v2_steps(), V2_REQUESTS, 1000, 10, 1e6) == pytest.approx([0.644, 0.586, 0.48])
+
+
+def test_verified_per_row():
+    assert verified_per_row({"rounds": 2, "accepted_0": 3, "accepted_5": 1, "verified_1": 2, "verified_8": 2}) == 4.5
+    assert verified_per_row({"rounds": 2, "accepted_7": 4}) is None              # fixed length: no verified_ counts

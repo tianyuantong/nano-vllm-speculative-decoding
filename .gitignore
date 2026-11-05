@@ -203,7 +203,8 @@ results/raw/
 *.qdrep
 *.sqlite
 # --- benchmark inputs and results (downloaded / generated) ---
-benchmarks/inputs/
+benchmarks/inputs/*
+!benchmarks/inputs/verify-schedule-g4.json
 benchmarks/results/
 
 # macOS

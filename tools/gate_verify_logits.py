@@ -8,6 +8,11 @@ D48: the first of each category, the two longest, and those two cut to 2046 and 
 crosses a 256-token block boundary. Pass: every |delta| <= 2 x the noise floor's worst delta, and the argmax agrees
 wherever the reference's top-2 margin exceeds 0.5.
 
+A variable-length line (v2.2's dspark_var) also verifies the eight prompts together, once per rotation of the lengths
+1..k+1, so each prompt verifies each length once, with the graph's empty row slots and padding tokens: each row's
+first L positions against its own reference, under the same bound and argmax rule; and each of those batches through
+the graph and eagerly, which must agree bit for bit (protocol v2.2 graph_eager_varlen).
+
   python tools/gate_verify_logits.py --line LINE [--protocol FILE] --models-root DIR --commit C --out FILE
 """
 import argparse
@@ -100,9 +105,46 @@ def verify_vs_decode(llm, prompt_ids: list[int], k: int, batch_sizes: tuple[int,
     return rows
 
 
+@torch.inference_mode()
+def verify_varlen_vs_decode(llm, prompts: list[list[int]], k: int) -> tuple[list[dict], list[bool]]:
+    """The prompts verified together, row r at length (r + rotation) mod (k+1) + 1 for each rotation, against each
+    prompt's single-copy decode reference. Returns per (rotation, row, position) {max_abs_delta, argmax_agrees,
+    top2_margin_reference} through the production path, and per rotation whether graph and eager logits are equal."""
+    params = SamplingParams(temperature=0, max_tokens=k + 2)
+    pairs = [(llm.add_request(prompt, params), llm.add_request(prompt, params)) for prompt in prompts]
+    while llm.scheduler.waiting:
+        llm.step()                                             # prefill; greedy, so both copies get the same first token
+    assert all(reference.last_token == verified.last_token for reference, verified in pairs)
+    references = [torch.stack([decode_step(llm, reference) for _ in range(k + 1)]) for reference, _ in pairs]
+    decoder, verified = llm.speculative, [seq for _, seq in pairs]
+    drafts = torch.tensor([reference.completion_token_ids[1:k + 1] for reference, _ in pairs], device=decoder.device)
+    for seq in verified:
+        llm.scheduler.block_manager.reserve(seq, len(seq) + k)
+    rows, graph_equals_eager = [], []
+    for rotation in range(k + 1):
+        lengths = [(row + rotation) % (k + 1) + 1 for row in range(len(prompts))]
+        logits = decoder.verify_logits(verified, drafts, verified_lens=lengths)                  # [T, V], the graph
+        eager = decoder.target.model.compute_logits(decoder._verify_eager(verified, drafts, lengths), all_logits=True)
+        graph_equals_eager.append(torch.equal(logits, eager))
+        start = 0
+        for row, length in enumerate(lengths):
+            for position in range(length):
+                reference, verified_logits = references[row][position], logits[start + position].float()
+                top2 = reference.topk(2).values
+                rows.append({"rotation": rotation, "row": row, "length": length, "position": position,
+                             "max_abs_delta": (verified_logits - reference).abs().max().item(),
+                             "argmax_agrees": bool(verified_logits.argmax() == reference.argmax()),
+                             "top2_margin_reference": float(top2[0] - top2[1])})
+            start += length
+    for seq in list(llm.scheduler.running):
+        llm.scheduler._finish(seq)
+    return rows, graph_equals_eager
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--line", required=True, help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7)")
+    parser.add_argument("--line", required=True,
+                        help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7; v2.2: dspark_var)")
     parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True)
@@ -114,25 +156,31 @@ def main(argv: list[str] | None = None) -> int:
     line, batch_sizes = protocol["lines"][args.line], tuple(gate["batch"])
     target, _, kwargs = engine_kwargs(protocol, line, panel, 1 + max(batch_sizes) + sum(batch_sizes),
                                       protocol["seeds"]["dev"][0], args.models_root)
+    kwargs.pop("verify_schedule", None)      # every verification here is given its lengths; no schedule picks them
     llm = LLM(target, **kwargs)
     prompts = wide_prompts(panel, gate["block_crossing_lengths"])
     assert len(prompts) == gate["prompts"]
     results = [{"prompt_len": len(prompt), "rows": verify_vs_decode(llm, prompt, line["k"], batch_sizes)}
                for prompt in prompts]
+    varlen_rows, graph_equals_eager = (verify_varlen_vs_decode(llm, prompts, line["k"]) if line.get("variable_length")
+                                       else ([], []))
     llm.exit()
     rows = [row for result in results for row in result["rows"]]
-    worst = max(row["max_abs_delta"] for row in rows)
+    worst = max(row["max_abs_delta"] for row in [*rows, *varlen_rows])
     floor = max(row["floor_max_abs_delta"] for row in rows)
     bound = gate["floor_multiple"] * floor
-    argmax_ok = all(row["argmax_agrees"] for row in rows if row["top2_margin_reference"] > gate["margin"])
-    report = {"gate": "G1-wide", "engine_commit": args.commit, "passed": worst <= bound and argmax_ok,
+    argmax_ok = all(row["argmax_agrees"] for row in [*rows, *varlen_rows]
+                    if row["top2_margin_reference"] > gate["margin"])
+    report = {"gate": "G1-wide", "engine_commit": args.commit,
+              "passed": worst <= bound and argmax_ok and all(graph_equals_eager),
               "statistic": worst, "threshold": bound,
               "threshold_source": f"{gate['floor_multiple']} x the noise floor {floor:.4g}: decode alone, only the batch "
                                   f"size changed, same prompts and job (protocol G1_wide revised 2026-10-23); the argmax "
                                   f"must agree where the reference's top-2 margin exceeds {gate['margin']}",
-              "n": len(rows), "details": {"line": args.line, "k": line["k"], "batch": list(batch_sizes),
-                                          "noise_floor": floor, "argmax_agrees_where_decided": argmax_ok,
-                                          "prompts": results}}
+              "n": len(rows) + len(varlen_rows),
+              "details": {"line": args.line, "k": line["k"], "batch": list(batch_sizes), "noise_floor": floor,
+                          "argmax_agrees_where_decided": argmax_ok, "prompts": results,
+                          "varlen": {"rows": varlen_rows, "graph_equals_eager": graph_equals_eager}}}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({key: report[key] for key in ("gate", "passed", "statistic", "threshold", "n")}))

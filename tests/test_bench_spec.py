@@ -167,3 +167,12 @@ def test_engine_kwargs_follow_the_protocol_lines(tmp_path):
 def test_engine_kwargs_give_dspark_its_draft_type(tmp_path):
     kwargs = kwargs_of_every_line("protocol-v2.1.json", tmp_path)
     assert kwargs["dspark_k7"]["draft_type"] == "dspark" and kwargs["dspark_k7"]["num_speculative_tokens"] == 7
+
+
+@pytest.mark.parametrize("protocol, schedule", [("protocol-v2.2.json", "verify-schedule-v1.json"),
+                                                 ("protocol-v2.3.json", "verify-schedule-g4.json")])
+def test_engine_kwargs_give_the_variable_length_line_the_frozen_schedule(tmp_path, protocol, schedule):
+    kwargs = kwargs_of_every_line(protocol, tmp_path)
+    assert kwargs["dspark_var"]["variable_length"] is True
+    assert kwargs["dspark_var"]["verify_schedule"] == str(ROOT / "benchmarks" / "inputs" / schedule)
+    assert "variable_length" not in kwargs["dspark_k7"] and "draft_model" not in kwargs["k0_base"]

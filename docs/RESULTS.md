@@ -72,7 +72,7 @@ Milliseconds, medians over the 3 seeds, from [`tools/request_stats.py`](../tools
 
 D48 has 5 seeds per C and also covers C = 2, 4 and 16: DSpark 1.99–2.06, 1.78–1.88 and 1.56–1.65; DFlash 1.91–1.96, 1.71–1.84 and 1.54 (1.54–1.58). DSpark is faster than DFlash at all seven. The two panels agree on the direction and on every verdict.
 
-- **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`3dc0dba`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
+- **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`ed4a35c`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
 - **Releasing the confirmation set.** The design's stop rule, revised after the first matrix and before the second, released the confirmation set when, at every C, DSpark's tokens per round were higher and the median paired gain was positive; both held at all seven.
 - **A new machine.** The cloud instance changed between the DFlash and DSpark runs. Plain decoding on the new one gives 80.1 / 557.4 / 1459.0 / 2031.9 tok/s at C = 1 / 8 / 32 / 64, against 80.4 / 554.8 / 1466.0 / 2040.5 before: within ±0.5%, below the timing noise, so §4 compares the new nano numbers with vLLM's from the old machine.
 
@@ -155,7 +155,7 @@ All 1319 questions × 2 seeds, paired by question and seed. The gate requires th
 | G2-real | acceptance rate and output distribution on a real distribution | acceptance error 0.003 (bound 0.02), worst frequency gap 0.0023 (bound 0.0064) |
 
 - **Decided position**: one where the reference's top logit leads the second by more than 0.5.
-- G1-draft and G1-wide ran on the engine before candidate sampling (`3dc0dba`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
+- G1-draft and G1-wide ran on the engine before candidate sampling (`ed4a35c`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
 
 ## 6. Estimates made beforehand
 
@@ -176,11 +176,43 @@ The extra tokens per round were estimated too high: nano's DFlash already gets m
 
 Measurement scope as in the DFlash results: offline closed loop, one GPU model, one target model, random sampling (T 0.7, top-k 20, top-p 0.8); see [v2/RESULTS.md](v2/RESULTS.md) §7.
 
+## 8. Variable-length verification
+
+Fixed-length DSpark verifies all 8 positions in every row of every round (yielding 2.81–2.95 tokens per round). Target verification accounts for roughly three quarters of a round's duration, and its marginal cost grows with batch size: in the measured cost table, verifying 8 positions per row instead of 1 increases round time by 14% at batch size 16, 25% at 32, and 49% at 64.
+
+With `variable_length=True`, the engine implements DSpark's Algorithm 1: it ranks all candidate positions across the batch by predicted survival probability, admits positions while estimated throughput (computed from the measured round-time table) continues to rise, and rounds the total verified token count up to a captured CUDA Graph size ([usage](DECODING.md#variable-length-verification)).
+
+These runs were executed on a Colab G4 RTX PRO 6000 (600 W) instance under [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json) on the K128b confirmation panel across 3 seeds:
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/speedup-variable-dark.svg">
+    <img alt="Speedup over plain decoding on K128b, medians over 3 seeds. Fixed-length DSpark: 2.08×, 1.76×, 1.44×, 1.14× at 1, 8, 32, 64 concurrent requests. Variable-length DSpark: 2.02×, 1.79×, 1.48×, 1.25×. Qwen3-0.6B draft: 1.50×, 1.21×, 1.00×, 0.85×." src="assets/speedup-variable-light.svg" width="760">
+  </picture>
+</p>
+
+| C | 0.6B draft (k = 3) | DSpark, fixed length | DSpark, variable length | Variable over fixed, per seed | Positions verified per row | Tokens per round, fixed / variable |
+|---:|---|---|---|---|---:|---|
+| 1 | **1.50 (1.49–1.52)** | **2.05–2.18** | **2.00–2.12** | −2.83 … −2.48% | 8.00 | 2.82 / 2.82 |
+| 8 | **1.21 (1.20–1.22)** | **1.71–1.80** | **1.73–1.80** | −3.96 … +4.51% | 6.68 | 2.81 / 2.87 |
+| 32 | 1.00 (1.00–1.01) | **1.44 (1.44–1.46)** | **1.48 (1.47–1.49)** | **+2.17 … +2.77%** | 4.62 | 2.95 / 2.79 |
+| 64 | 0.85 (0.84–0.85) | **1.14 (1.12–1.15)** | **1.25 (1.23–1.26)** | **+8.19 … +10.06%** | 4.43 | 2.93 / 2.77 |
+
+Values follow §1 (`median (min–max)`). **Bold** marks lines faster than plain decoding across all seeds, and paired gains where all seeds share the same sign with a median exceeding `2 × N_t` (`N_t = 0.14%` from 15 repeat pairs; 75 runs, 0 void). Plain decoding throughput between the `main` tree and `baseline/qwen3-0.6b-draft` agrees within `2 × N_t` at every concurrency, allowing direct comparison in a single table.
+
+- **High-concurrency speedup (`C = 32` and `C = 64`)**: Variable-length verification improves throughput by medians of +2.21% at `C = 32` and +8.91% at `C = 64` (matching the 5-seed D48 development matrix at +2.41% and +8.71%, where `C = 32` was the crossover concurrency).
+- **Verification phase savings**: At `C = 64`, verification time drops from 36.51 ms to 27.96 ms per round and acceptance from 4.31 ms to 2.45 ms. Each round is 18.6% shorter while delivering 5.6% fewer tokens, resulting in a +16.1% speedup on decode rounds alone and +8.9% overall once prefill stalls are included (32.5% of the steady window on fixed-length vs 35.9% on variable-length). Full-run wall-clock throughput shows matching gains of +2.63% (`+2.39 … +4.22%`) at `C = 32` and +8.87% (`+6.88 … +9.61%`) at `C = 64`.
+- **Single-request overhead (`C = 1`)**: Every round verifies all 8 positions and produces token-identical outputs to fixed-length DSpark across all 3 seeds; the 2.66% slowdown reflects the scheduling and confidence-scoring overhead. At `C = 8` (pre-registered as report-only), per-seed gains span `−3.96%` to `+4.51%`.
+- **Latency impact**: At `C = 64`, ITL p50 drops from 51.5 ms to 42.3 ms while TTFT p50 remains at 88–89 ms (ITL p99 is 138–173 ms on variable-length vs 182–183 ms on fixed-length).
+- **Verification gates**: Variable-length verification passes `G1-wide` (max difference 1.14 against the 3.0 bound), 71 multi-step sampler distribution cases (`G2-multi`), `G2-real`, and paired GSM8K accuracy (84.2% vs 85.1% plain decoding, −0.87 pt difference, 95% CI −2.14 to +0.40 pt, threshold −3 pt).
+
+Engine `70e0d4d`, baseline branch `4d8426f`, verify schedule [`benchmarks/inputs/verify-schedule-g4.json`](../benchmarks/inputs/verify-schedule-g4.json), driver 580.82.07; raw run JSONs and gates are archived in release [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length).
+
 ## Appendix: environment and data
 
 | item | value |
 |---|---|
-| engine | `f30ed0a` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `3dc0dba` for G1-draft, G1-wide and the first matrix |
+| engine | `2d64fa4` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `ed4a35c` for G1-draft, G1-wide and the first matrix |
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts DeepSpec's `dflash_qwen3_8b_block7` and `dspark_qwen3_8b_block7` (`deepseek-ai/dspark_qwen3_8b_block7` at `03326e5`) |

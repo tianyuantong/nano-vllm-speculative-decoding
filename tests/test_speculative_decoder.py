@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from nanovllm.engine import speculative
+from nanovllm.engine.batch_metadata import verify_varlen_metadata
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.speculative import SpeculativeDecoder
 from nanovllm.layers.spec_sampler import probs_from_logits
@@ -67,7 +68,7 @@ class FakeDrafter:
     def __init__(self, config, decoder):
         self.decoder = decoder
 
-    def propose(self, seqs, sampling):
+    def propose(self, seqs, sampling, with_confidence=False):
         rows = []
         for seq in seqs:
             token, row = seq.last_token, []
@@ -76,18 +77,20 @@ class FakeDrafter:
                 row.append(token)
             rows.append(row)
         drafts = torch.tensor(rows)
+        confidence = torch.zeros(len(seqs), self.decoder.num_drafts) if with_confidence else None
         if sampling.temperatures is None:
-            return drafts, None
-        return drafts, probs_from_logits(peaked(drafts), sampling)
+            return drafts, None, confidence
+        return drafts, probs_from_logits(peaked(drafts), sampling), confidence
 
-    def after_verify(self, seqs, aux):
+    def after_verify(self, seqs, aux, verified_lens=None):
         pass
 
 
 def make_decoder():
     target = FakeRunner(target_rule)
     config = SimpleNamespace(num_speculative_tokens=K, kvcache_block_size=BLOCK_SIZE, max_model_len=64,
-                             hf_config=SimpleNamespace(vocab_size=VOCAB))
+                             hf_config=SimpleNamespace(vocab_size=VOCAB), variable_length=False, verify_schedule=None,
+                             record_confidences=False)
     with mock.patch.object(speculative, "DFlashDrafter", FakeDrafter):    # the real one loads a checkpoint
         decoder = SpeculativeDecoder(target, config)
     return decoder, target, decoder.drafter
@@ -153,6 +156,66 @@ def test_random_mode_with_peaked_distributions_matches_greedy():
     seq = make_sequence([1, 2, 3], 4, target_blocks=[3, 4], temperature=1.0)
     appended = decoder.run_round([seq])
     assert appended == [[5, 6]]
+
+
+@pytest.mark.parametrize("temperature", [0, 1.0], ids=["greedy", "random"])
+def test_rows_verify_lengths_of_their_own(temperature):
+    # Drafts 12, 13, 14 after 11 and 5, 0, 1 after 4. The first row verifies 12 only: accepted, then the bonus at
+    # its second position, 13. The second verifies all three: 5 accepted, 0 rejected for the target's 6.
+    decoder, target, drafter = make_decoder()
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=temperature)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=temperature)
+    appended = decoder.run_round([first, second], verified_lens=[2, 4])
+    assert appended == [[12, 13], [5, 6]]
+    (verify,) = target.calls
+    assert verify["input_ids"] == [11, 12, 4, 5, 0, 1] and verify["positions"] == [3, 4, 3, 4, 5, 6]
+    assert verify["slot_mapping"] == [15, 16, 35, 36, 37, 38]
+    assert verify["cu_seqlens_q"] == [0, 2, 6] and verify["cu_seqlens_k"] == [0, 5, 12]
+    assert (decoder.stats["verified_2"], decoder.stats["verified_4"], decoder.stats["accepted_1"]) == (1, 1, 2)
+
+
+def test_graph_inputs_hold_the_metadata_and_the_drafts():
+    # What _verify_graph writes before a replay, on CPU buffers: a graph of 8 tokens and 4 slots, rows of 2 and 3.
+    decoder, target, drafter = make_decoder()
+    decoder.graph_vars = {name: torch.zeros(size, dtype=torch.int64 if name in ("input_ids", "positions") else torch.int32)
+                          for name, size in [("input_ids", 32), ("positions", 32), ("slot_mapping", 32),
+                                             ("cu_seqlens_q", 9), ("cu_seqlens_k", 9), ("block_tables", (8, 2))]}
+    seqs = [make_sequence([8, 9, 10], 11, target_blocks=[3, 4]), make_sequence([1, 2, 3], 4, target_blocks=[8, 9])]
+    metadata = verify_varlen_metadata(seqs, [2, 3], K, BLOCK_SIZE, 4, 8, 99, 2)
+    decoder._load_graph_inputs(metadata, 4, 8)
+    decoder._place_drafts(decoder.graph_vars["input_ids"], torch.tensor([[12, 13, 14], [5, 0, 1]]), metadata)
+    buffers = decoder.graph_vars
+    assert buffers["input_ids"][:8].tolist() == [11, 12, 4, 5, 0, 0, 0, 0]
+    assert buffers["cu_seqlens_q"][:5].tolist() == [0, 2, 5, 8, 8]
+    assert buffers["block_tables"][:4].tolist() == [[3, 4], [8, 9], [99, 99], [99, 99]]
+
+
+def test_a_variable_length_round_takes_its_lengths_from_the_schedule():
+    # The same two rows as above, the lengths now picked by the schedule from the round's confidences, [B, k].
+    decoder, target, drafter = make_decoder()
+    shapes = []
+
+    def pick_lengths(logits):
+        shapes.append(logits.shape)
+        return [2, 4]
+
+    decoder.variable_length = True
+    decoder.schedule = SimpleNamespace(verify_lengths=pick_lengths)
+    decoder.enable_phase_timings(event_factory=FakeEvent, synchronize=lambda: None)
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=0)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=0)
+    assert decoder.run_round([first, second]) == [[12, 13], [5, 6]] and shapes == [(2, K)]
+    assert [phase["phase"] for phase in decoder.phase_timings()][:2] == ["propose", "schedule"]
+
+
+def test_a_recording_round_keeps_its_confidences_and_accepted_counts():
+    # Fixed length: the first row accepts all three drafts, the second one of 5, 0, 1.
+    decoder, target, drafter = make_decoder()
+    decoder.record_confidences = True
+    first = make_sequence([8, 9, 10], 11, target_blocks=[3, 4], temperature=0)
+    second = make_sequence([1, 2, 3], 4, target_blocks=[8, 9], temperature=0)
+    decoder.run_round([first, second])
+    assert decoder.confidence_log == [{"logits": [[0.0] * K, [0.0] * K], "accepted": [3, 1]}]
 
 
 def test_round_entry_invariants_are_asserted():
