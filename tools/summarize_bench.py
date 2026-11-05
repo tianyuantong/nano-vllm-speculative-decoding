@@ -136,13 +136,6 @@ def round_weighted_tokens(speculative_stats: dict) -> float | None:
     return sum((accepted + 1) * n for accepted, n in counts.items()) / rounds if rounds else None
 
 
-def verified_per_row(speculative_stats: dict) -> float | None:
-    """Positions verified per row and round over a run's variable-length rounds; None for a fixed-length run."""
-    counts = {int(key.split("_")[1]): n for key, n in speculative_stats.items() if key.startswith("verified_")}
-    rows = sum(counts.values())
-    return sum(length * n for length, n in counts.items()) / rows if rows else None
-
-
 def excess_prefill_tokens(steps: list[dict], requests: list[dict]) -> int:
     """Prefilled tokens beyond the prompts submitted; above 0 means a request was preempted and recomputed."""
     return (sum(step["tokens_out"] for step in steps if step["kind"] == "prefill")

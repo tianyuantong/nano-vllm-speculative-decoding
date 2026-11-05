@@ -235,9 +235,8 @@ def check_graphs(target: str, draft: str, panel: Path, seed: int) -> dict:
         with torch.inference_mode():
             eager_aux = torch.empty(batch_size * query_len, spec.drafter.aux_width, dtype=spec.drafter.aux_dtype,
                                     device=spec.device)
-            lens = [query_len] * batch_size
-            eager = spec.target.model.compute_logits(spec._verify_eager(batch, drafts, lens, eager_aux), all_logits=True)
-            graph = spec.target.model.compute_logits(spec._verify_graph(batch, drafts, lens), all_logits=True)
+            eager = spec.target.model.compute_logits(spec._verify_eager(batch, drafts, eager_aux), all_logits=True)
+            graph = spec.target.model.compute_logits(spec._verify_graph(batch, drafts), all_logits=True)
             graph_aux = spec.graph_vars["aux"][:batch_size * query_len]
             slots = torch.tensor(draft_block_metadata(batch, spec.block_size, spec.num_drafts, drafter.model.mask_token_id,
                                                       batch_size, spec.target.pad_block_id, spec.max_num_blocks).slot_mapping,

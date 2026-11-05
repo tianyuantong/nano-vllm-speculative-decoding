@@ -8,9 +8,7 @@ Block: the anchor (the last committed token, position P) and block_size - 1 mask
 go through ordinary Qwen3 layers. They see the context below P and the whole block (no causal mask); row j
 predicts the token at P+1+j.
 DSpark's Markov head adds to row j's logits a bias from the token sampled at row j-1 (the anchor for row 0), so its
-rows are sampled left to right. Its confidence head gives row j the logit that draft j is accepted when the drafts
-before it are, from row j's output and the Markov embedding of the token before draft j; variable-length
-verification reads it.
+rows are sampled left to right. Its confidence head is loaded but unused: it serves variable-length verification.
 """
 import torch
 import torch.nn.functional as F
@@ -32,28 +30,17 @@ class MarkovHead(nn.Module):
         self.markov_w1 = VocabParallelEmbedding(vocab_size, rank)
         self.markov_w2 = ReplicatedLinear(rank, vocab_size, bias=False)
 
-    def embed(self, prev_token_ids: torch.Tensor) -> torch.Tensor:
-        """[...] previous tokens -> [..., r] embeddings; the confidence head reads them too."""
-        return self.markov_w1(prev_token_ids)
-
     def forward(self, prev_token_ids: torch.Tensor) -> torch.Tensor:
         """[B] previous tokens -> [B, V] bias for the next row's logits."""
-        return self.markov_w2(self.embed(prev_token_ids))
+        return self.markov_w2(self.markov_w1(prev_token_ids))
 
 
 class ConfidenceHead(nn.Module):
-    """DSpark's acceptance predictor over [hidden, Markov embedding of the previous token]; without its Markov input
-    (markov_rank 0), over the hidden state alone."""
+    """DSpark's acceptance predictor over [hidden, Markov embedding of the previous token]."""
 
-    def __init__(self, hidden_size: int, markov_rank: int) -> None:
+    def __init__(self, input_size: int) -> None:
         super().__init__()
-        self.with_markov = markov_rank > 0
-        self.proj = ReplicatedLinear(hidden_size + markov_rank, 1, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor, prev_embeddings: torch.Tensor | None) -> torch.Tensor:
-        """[..., H] hidden states and [..., r] Markov embeddings (None without the Markov input) -> [...] logits."""
-        features = hidden_states if prev_embeddings is None else torch.cat([hidden_states, prev_embeddings], dim=-1)
-        return self.proj(features).squeeze(-1)
+        self.proj = ReplicatedLinear(input_size, 1, bias=True)
 
 
 class DFlashDraftModel(nn.Module):
@@ -79,7 +66,7 @@ class DFlashDraftModel(nn.Module):
         self.confidence_head = None
         if config.enable_confidence_head:
             markov_width = markov_rank if config.confidence_head_with_markov else 0
-            self.confidence_head = ConfidenceHead(config.hidden_size, markov_width)
+            self.confidence_head = ConfidenceHead(config.hidden_size + markov_width)
 
     def context_features(self, aux: torch.Tensor) -> torch.Tensor:
         """[T, len(aux_layer_ids) * H] -> [T, H]."""
@@ -106,10 +93,3 @@ class DFlashDraftModel(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.lm_head(hidden_states, all_logits=True)
-
-    def confidence_logits(self, hidden_states: torch.Tensor, prev_token_ids: torch.Tensor) -> torch.Tensor:
-        """Block outputs [B, k, H] and, per row, the token before its draft [B, k] (the anchor for row 0) -> fp32
-        logits [B, k]. Row j never reads draft j, so its confidence may decide whether draft j is verified."""
-        assert self.confidence_head is not None
-        embeddings = self.markov_head.embed(prev_token_ids) if self.confidence_head.with_markov else None
-        return self.confidence_head(hidden_states, embeddings).float()

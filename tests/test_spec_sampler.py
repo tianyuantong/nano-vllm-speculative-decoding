@@ -11,12 +11,9 @@ from random_sampling_cases import CASES  # noqa: E402
 
 from nanovllm.layers.spec_sampler import (  # noqa: E402
     accept_greedy,
-    accept_greedy_varlen,
     accept_random,
-    accept_random_varlen,
     probs_from_logits,
     sample,
-    sampling_per_token,
     sampling_tensors,
     truncate_logits,
 )
@@ -174,80 +171,3 @@ def test_accept_greedy_is_per_row():
     n_accept, tail = accept_greedy(logits, torch.tensor([[1], [1]]))
     assert n_accept.tolist() == [1, 0]
     assert tail.tolist() == [2, 3]
-
-
-# ---------------------------------------------------------------- variable-length verification
-def m3_accept_random(p, q, drafts, generator):
-    """accept_random's body as it was at 7bf0466, before the variable-length rewrite."""
-    batch_size, num_drafts = drafts.shape
-    draft_index = drafts.unsqueeze(-1)
-    p_draft = p[:, :num_drafts].gather(-1, draft_index).squeeze(-1)      # [B, k]
-    q_draft = q.gather(-1, draft_index).squeeze(-1)                      # [B, k]
-    uniforms = torch.rand(batch_size, num_drafts, device=p.device, generator=generator)
-    accepted = uniforms * q_draft < p_draft                              # u < min(1, p/q) without dividing
-    n_accept = accepted.long().cumprod(dim=-1).sum(dim=-1)              # length of the accepted prefix
-    rows = torch.arange(batch_size, device=p.device)
-    p_next = p[rows, n_accept]                                          # [B, V] first rejected or bonus position
-    q_next = q[rows, n_accept.clamp(max=num_drafts - 1)]
-    residual = (p_next - q_next).clamp_(min=0)
-    is_bonus = (n_accept == num_drafts).unsqueeze(-1)
-    tail = sample(torch.where(is_bonus, p_next, residual), generator)  # the race needs no normalization
-    return n_accept, tail
-
-
-def m3_accept_greedy(target_logits, drafts):
-    """accept_greedy's body as it was at 7bf0466."""
-    target_tokens = target_logits.argmax(dim=-1)                         # [B, k+1]
-    num_drafts = drafts.shape[1]
-    accepted = target_tokens[:, :num_drafts] == drafts
-    n_accept = accepted.long().cumprod(dim=-1).sum(dim=-1)
-    rows = torch.arange(drafts.shape[0], device=drafts.device)
-    return n_accept, target_tokens[rows, n_accept]
-
-
-@pytest.mark.parametrize("seed", range(5))
-def test_every_row_verifying_all_drafts_reproduces_the_m3_rule(seed):
-    # The fixed-length path now runs through accept_random_varlen: same accepts, same tails, same generator state.
-    torch.manual_seed(seed)
-    batch_size, num_drafts, vocab_size = 6, 7, 5
-    p = torch.softmax(torch.randn(batch_size, num_drafts + 1, vocab_size), dim=-1)
-    q = torch.softmax(torch.randn(batch_size, num_drafts, vocab_size), dim=-1)
-    drafts = torch.randint(vocab_size, (batch_size, num_drafts))
-    ours, theirs = torch.Generator().manual_seed(seed), torch.Generator().manual_seed(seed)
-    for got, expected in zip(accept_random(p, q, drafts, ours), m3_accept_random(p, q, drafts, theirs)):
-        assert torch.equal(got, expected)
-    assert torch.equal(ours.get_state(), theirs.get_state())
-    for got, expected in zip(accept_greedy(p.log(), drafts), m3_accept_greedy(p.log(), drafts)):
-        assert torch.equal(got, expected)
-
-
-def varlen_case() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Three rows verifying 1, 2 and 4 positions; every row's drafts are 1, 2, 3 and every p, q a point mass, so a
-    verified draft is always accepted. Flat p: row 0 at 0, row 1 at 1-2, row 2 at 3-6; each row's last position,
-    its bonus, holds token 3, 2, 0. Row 1's bonus is its unverified draft d2, which must not count as accepted."""
-    point = torch.eye(4)
-    p = point[[3, 1, 2, 1, 2, 3, 0]]
-    drafts = torch.tensor([[1, 2, 3]] * 3)
-    return p, drafts, torch.tensor([1, 2, 4])
-
-
-def test_a_row_accepts_at_most_its_verified_drafts():
-    p, drafts, verified_lens = varlen_case()
-    q = torch.eye(4)[drafts]                                     # [3, 3, 4]: point masses on the drafts
-    n_accept, tail = accept_random_varlen(p, q, drafts, verified_lens, torch.Generator().manual_seed(0))
-    assert (n_accept.tolist(), tail.tolist()) == ([0, 1, 3], [3, 2, 0])
-
-
-def test_greedy_accepts_at_most_the_verified_drafts():
-    p, drafts, verified_lens = varlen_case()
-    n_accept, tail = accept_greedy_varlen(p, drafts, verified_lens)
-    assert (n_accept.tolist(), tail.tolist()) == ([0, 1, 3], [3, 2, 0])
-
-
-def test_per_token_parameters_give_each_row_its_own_probabilities():
-    # Rows verifying every position: the flat probabilities are the per-row ones, position by position.
-    sampling = rows((0.7, 3, 0.9), (1.0, 0, 1.0))
-    logits = torch.randn(2, 4, 6, generator=torch.Generator().manual_seed(3))
-    verified_lens = torch.tensor([4, 4])
-    flat = probs_from_logits(logits.flatten(0, 1), sampling_per_token(sampling, verified_lens, 8))
-    assert torch.equal(flat, probs_from_logits(logits, sampling).flatten(0, 1))

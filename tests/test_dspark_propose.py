@@ -24,8 +24,7 @@ BIAS = torch.tensor([[0.0, 2.0, 0.0],
 def make_drafter(k: int, bias: torch.Tensor = BIAS) -> DFlashDrafter:
     """A drafter whose Markov head looks the bias up by previous token and whose hidden states are its logits."""
     config = SimpleNamespace(num_speculative_tokens=k, kvcache_block_size=256, max_model_len=64,
-                             hf_config=SimpleNamespace(vocab_size=bias.shape[1]), variable_length=False,
-                             verify_schedule=None, record_confidences=False)
+                             hf_config=SimpleNamespace(vocab_size=bias.shape[1]))
     target = SimpleNamespace(device=CPU, generator=torch.Generator().manual_seed(0))
     with mock.patch.object(speculative, "DFlashDrafter", lambda config, decoder: None):    # it would load a checkpoint
         decoder = SpeculativeDecoder(target, config)
@@ -71,16 +70,6 @@ def test_without_a_bias_the_rows_draw_what_dflash_draws():
     assert torch.equal(probs, dflash_probs)
     assert torch.equal(drafts, sample(dflash_probs, generator))
     assert torch.equal(drafter.decoder.target.generator.get_state(), generator.get_state())
-
-
-def test_row_j_confidence_reads_the_token_before_draft_j():
-    # Variable-length verification may decide whether draft j is verified from row j's confidence only if row j
-    # never reads draft j: row j's previous token is the anchor for row 0, draft j-1 after it.
-    seqs = [Sequence([2, 0]), Sequence([1, 2])]
-    drafter = make_drafter(k=3)
-    drafter.model.confidence_logits = lambda hidden, prev: prev.float()    # hands back what each row read
-    drafts = torch.tensor([[1, 0, 1], [0, 1, 0]])
-    assert drafter._confidence_logits(seqs, torch.zeros(6, 4), drafts).tolist() == [[0, 1, 0], [2, 0, 1]]
 
 
 def test_candidate_rows_give_the_whole_vocabulary_distribution():

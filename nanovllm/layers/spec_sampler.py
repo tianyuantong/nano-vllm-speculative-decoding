@@ -2,10 +2,9 @@
 
 Pure tensor code; runs on CPU or CUDA. A batch has B rows. Logits and probabilities
 are [B, V] (one position per row) or [B, n, V] (n positions per row); per-row
-parameters are [B] and broadcast over the middle dimensions. A variable-length
-verification lays its positions out flat, [T, V], row after row.
+parameters are [B] and broadcast over the middle dimensions.
 """
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 
@@ -39,17 +38,6 @@ def sampling_tensors(seqs, device: torch.device) -> SamplingTensors:
         has_top_p=any(value < 1.0 for value in top_p),
         all_top_k=min(top_k) > 0,
     )
-
-
-def sampling_per_token(sampling: SamplingTensors, verified_lens: torch.Tensor, num_tokens: int) -> SamplingTensors:
-    """Each row's parameters repeated over its verified positions, [B] -> [num_tokens], for the probabilities of a
-    variable-length verification's flat [T, V] logits; the host flags stay the batch's."""
-    temperatures = sampling.temperatures
-    return replace(sampling,
-                   temperatures=None if temperatures is None else
-                   temperatures.repeat_interleave(verified_lens, output_size=num_tokens),
-                   top_k=sampling.top_k.repeat_interleave(verified_lens, output_size=num_tokens),
-                   top_p=sampling.top_p.repeat_interleave(verified_lens, output_size=num_tokens))
 
 
 def _to_device(values: list, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -113,68 +101,36 @@ def sample(weights: torch.Tensor, generator: torch.Generator | None) -> torch.Te
 
 def accept_random(p: torch.Tensor, q: torch.Tensor, drafts: torch.Tensor,
                   generator: torch.Generator | None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rejection sampling of k drafts per row, every row verifying all of them: accept_random_varlen with
-    k + 1 verified positions per row. p: [B, k+1, V] at the k draft positions and the bonus position."""
-    batch_size, num_drafts = drafts.shape
-    verified_lens = torch.full((batch_size,), num_drafts + 1, dtype=torch.int64, device=p.device)
-    return accept_random_varlen(p.flatten(0, 1), q, drafts, verified_lens, generator)
+    """Rejection sampling of k drafts per row.
 
-
-def accept_random_varlen(p: torch.Tensor, q: torch.Tensor, drafts: torch.Tensor, verified_lens: torch.Tensor,
-                         generator: torch.Generator | None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rejection sampling of each row's first verified_lens - 1 drafts.
-
-    p: [T, V] target probabilities at the verified positions, row after row: row r's verified_lens[r] positions
-       are its last committed token and its first verified_lens[r] - 1 drafts; the last of them is its bonus position.
+    p: [B, k+1, V] target probabilities at the k draft positions and the bonus position.
     q: [B, k, V] draft probabilities the drafts were sampled from.
-    drafts: [B, k] int64; verified_lens: [B] int64 in 1..k+1, summing to T.
-    Returns n_accept [B] in 0..verified_lens - 1 and tail [B]: the token following the accepted prefix, drawn from
-    normalize(max(p - q, 0)) at the first rejected position, or from the bonus position when every verified draft
-    was accepted. The output distribution equals the target's when the lengths were chosen without the drafts they
-    cover. A uniform is drawn for each of the k drafts, verified or not, so the random numbers do not depend on the
-    lengths.
+    drafts: [B, k] int64.
+    Returns n_accept [B] in 0..k and tail [B]: the token following the accepted prefix,
+    drawn from normalize(max(p - q, 0)) at the first rejected position, or from the
+    bonus row when every draft was accepted. The output distribution equals the target's.
     """
     batch_size, num_drafts = drafts.shape
-    starts, positions, verified = _verified_positions(verified_lens, num_drafts)
-    p_draft = p[positions, drafts]                                       # [B, k]
-    q_draft = q.gather(-1, drafts.unsqueeze(-1)).squeeze(-1)             # [B, k]
+    draft_index = drafts.unsqueeze(-1)
+    p_draft = p[:, :num_drafts].gather(-1, draft_index).squeeze(-1)      # [B, k]
+    q_draft = q.gather(-1, draft_index).squeeze(-1)                      # [B, k]
     uniforms = torch.rand(batch_size, num_drafts, device=p.device, generator=generator)
-    accepted = (uniforms * q_draft < p_draft) & verified                # u < min(1, p/q) without dividing
+    accepted = uniforms * q_draft < p_draft                              # u < min(1, p/q) without dividing
     n_accept = accepted.long().cumprod(dim=-1).sum(dim=-1)              # length of the accepted prefix
     rows = torch.arange(batch_size, device=p.device)
-    p_next = p[starts + n_accept]                                       # [B, V] first rejected or bonus position
+    p_next = p[rows, n_accept]                                          # [B, V] first rejected or bonus position
     q_next = q[rows, n_accept.clamp(max=num_drafts - 1)]
     residual = (p_next - q_next).clamp_(min=0)
-    is_bonus = (n_accept == verified_lens - 1).unsqueeze(-1)
+    is_bonus = (n_accept == num_drafts).unsqueeze(-1)
     tail = sample(torch.where(is_bonus, p_next, residual), generator)  # the race needs no normalization
     return n_accept, tail
 
 
 def accept_greedy(target_logits: torch.Tensor, drafts: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Greedy verification of all k drafts per row: accept_greedy_varlen with k + 1 verified positions per row.
-    target_logits: [B, k+1, V]."""
-    batch_size, num_drafts = drafts.shape
-    verified_lens = torch.full((batch_size,), num_drafts + 1, dtype=torch.int64, device=drafts.device)
-    return accept_greedy_varlen(target_logits.flatten(0, 1), drafts, verified_lens)
-
-
-def accept_greedy_varlen(target_logits: torch.Tensor, drafts: torch.Tensor,
-                         verified_lens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Greedy verification of each row's first verified_lens - 1 drafts: a draft is accepted iff it equals the
-    target's argmax at its position. target_logits: [T, V], laid out as accept_random_varlen's p."""
-    target_tokens = target_logits.argmax(dim=-1)                         # [T]
-    starts, positions, verified = _verified_positions(verified_lens, drafts.shape[1])
-    accepted = (target_tokens[positions] == drafts) & verified
+    """Greedy verification: a draft is accepted iff it equals the target's argmax at its position."""
+    target_tokens = target_logits.argmax(dim=-1)                         # [B, k+1]
+    num_drafts = drafts.shape[1]
+    accepted = target_tokens[:, :num_drafts] == drafts
     n_accept = accepted.long().cumprod(dim=-1).sum(dim=-1)
-    return n_accept, target_tokens[starts + n_accept]
-
-
-def _verified_positions(verified_lens: torch.Tensor,
-                        num_drafts: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Where each row's drafts sit among the flat verified positions: the row's first position [B], each draft's
-    position [B, k] (a verified one's own; an unverified one's clamped to the row's bonus position, never read
-    as accepted) and whether each draft is verified [B, k]."""
-    starts = verified_lens.cumsum(0) - verified_lens
-    max_drafts = (verified_lens - 1).unsqueeze(1)
-    steps = torch.arange(num_drafts, device=verified_lens.device)
-    return starts, starts.unsqueeze(1) + torch.minimum(steps, max_drafts), steps < max_drafts
+    rows = torch.arange(drafts.shape[0], device=drafts.device)
+    return n_accept, target_tokens[rows, n_accept]

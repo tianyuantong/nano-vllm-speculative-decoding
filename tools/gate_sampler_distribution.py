@@ -67,15 +67,14 @@ def pick_real_position(llm, prompts: list[list[int]], sampling: SamplingParams, 
     propose, verify = decoder.drafter.propose, decoder.verify_logits
     seen = {}
 
-    def propose_and_keep(seqs, sampling_tensors, with_confidence=False):
-        drafts, draft_probs, confidence = propose(seqs, sampling_tensors, with_confidence)
+    def propose_and_keep(seqs, sampling_tensors):
+        drafts, draft_probs = propose(seqs, sampling_tensors)
         seen["q"], seen["sampling"] = draft_probs[0, 0], sampling_tensors
-        return drafts, draft_probs, confidence
+        return drafts, draft_probs
 
-    def verify_and_keep(seqs, drafts, aux_out=None, verified_lens=None):
-        logits = verify(seqs, drafts, aux_out, verified_lens)
-        first = logits[0, 0] if verified_lens is None else logits[0]       # row 0's first position, [B, k+1, V] or [T, V]
-        seen["p"] = probs_from_logits(first.unsqueeze(0), seen["sampling"])[0]
+    def verify_and_keep(seqs, drafts, aux_out=None):
+        logits = verify(seqs, drafts, aux_out)
+        seen["p"] = probs_from_logits(logits, seen["sampling"])[0, 0]
         return logits
 
     decoder.drafter.propose, decoder.verify_logits = propose_and_keep, verify_and_keep
@@ -130,8 +129,7 @@ def check_real_position(position: RealPosition, accept_trials: int, emit_trials:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--line", required=True,
-                        help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7; v2.2: dspark_var)")
+    parser.add_argument("--line", required=True, help="a line with a drafter (v2: model_k3, dflash_k7; v2.1: dspark_k7)")
     parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True)

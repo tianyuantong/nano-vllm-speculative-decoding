@@ -72,13 +72,11 @@ class LLMEngine:
         return seq
 
     def start_measurement(self) -> None:
-        """Forget earlier step timings, round phases, acceptance counts and recorded confidences, and restart the step
-        count."""
+        """Forget earlier step timings, round phases and acceptance counts, and restart the step count."""
         self.step_timer.reset()
         if self.speculative is not None:
             self.speculative.reset_phase_timings()
             self.speculative.stats.clear()
-            self.speculative.confidence_log.clear()
         self.num_steps = 0
 
     def step(self):

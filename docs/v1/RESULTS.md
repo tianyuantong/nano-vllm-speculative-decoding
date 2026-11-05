@@ -40,6 +40,13 @@ release asset `results-batched-v1`:
 
 ## Headline
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/speedup-dark.svg">
+    <img alt="Speedup over ordinary decoding on the 48-prompt panel (rec k=3): 1.50x at B=1, 1.37x at B=2, 1.24x at B=4, 1.17x at B=8, 1.04x at B=16" src="../assets/speedup-light.svg" width="760">
+  </picture>
+</p>
+
 | max_num_seqs B | rec k=3 | flat k=3 | greedy k=4 |
 |---:|---:|---:|---:|
 | 1 | **1.50** | 1.45 | 1.53 |
@@ -135,6 +142,13 @@ do not add: the sum of the phase medians differs from the round median above by 
 fully accepted round left one KV entry short; its p50 is ≈ 0 when fewer than half the rounds
 need it. "accept rate by position" is the share of rows whose first *n* drafts were all
 accepted (draft-prefix survival), not a per-position conditional rate.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/round-anatomy-dark.svg">
+    <img alt="Time per speculative round versus one ordinary decode step across B=1..16 (rec k=3): target verification, draft steps and sampling" src="../assets/round-anatomy-light.svg" width="760">
+  </picture>
+</p>
 
 | line | B | k | catch_up | propose | verify | accept | copy | sum | draft-prefix survival by position |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
