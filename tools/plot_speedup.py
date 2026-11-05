@@ -14,16 +14,18 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_v2 import BASELINE, count_runs, load_runs, range_of  # noqa: E402
+from report_v2 import count_runs, k0_line_of, load_runs, range_of  # noqa: E402
 
 THEMES = {
     "light": {"surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e", "grid": "#e1e0d9", "reference": "#898781",
-              "series": {"dflash_k7": "#2a78d6", "dspark_k7": "#1baf7a", "model_k3": "#eb6834", "k0": "#c8c7c0"}},
+              "series": {"dflash_k7": "#2a78d6", "dspark_k7": "#1baf7a", "dspark_var": "#6250d6", "model_k3": "#eb6834",
+                         "k0": "#c8c7c0"}},
     "dark": {"surface": "#1a1a19", "text": "#f0efec", "muted": "#c3c2b7", "grid": "#2c2c2a", "reference": "#898781",
-             "series": {"dflash_k7": "#3987e5", "dspark_k7": "#199e70", "model_k3": "#d95926", "k0": "#5c5b57"}},
+             "series": {"dflash_k7": "#3987e5", "dspark_k7": "#199e70", "dspark_var": "#9085e9", "model_k3": "#d95926",
+                        "k0": "#5c5b57"}},
 }
 LINES = {"dflash_k7": "DFlash draft, k = 7", "dspark_k7": "DSpark draft, k = 7",
-         "model_k3": "Qwen3-0.6B draft, k = 3"}    # drawn in this order
+         "dspark_var": "DSpark draft, variable length", "model_k3": "Qwen3-0.6B draft, k = 3"}    # drawn in this order
 FONT = "font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'"
 WIDTH, HEIGHT = 760, 430
 LEFT, RIGHT, TOP, BOTTOM = 56, 24, 104, 60
@@ -31,21 +33,22 @@ BAR_WIDTH, BAR_PITCH, RADIUS = 22, 32, 4
 
 
 def speedups(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> dict[str, dict[int, list[float]]]:
-    """line -> C -> R for every seed of the panel with valid runs of the line and of k0."""
+    """line -> C -> R for every seed of the panel with valid runs of the line and of its k0 line."""
     _, _, q = count_runs(runs, protocol)
     out = defaultdict(lambda: defaultdict(list))
     for (run_panel, concurrency, _), by_line in sorted(q.items()):
-        if run_panel == panel and BASELINE in by_line:
+        if run_panel == panel:
             for line in LINES:
-                if line in by_line:
-                    out[line][concurrency].append(by_line[line][0] / by_line[BASELINE][0])
+                if line in by_line and k0_line_of(protocol, line) in by_line:
+                    out[line][concurrency].append(by_line[line][0] / by_line[k0_line_of(protocol, line)][0])
     return out
 
 
-def label(ratios: list[float]) -> str:
-    """The report's R without its parenthesis: the range when the protocol reports only the range, else the median."""
+def label(ratios: list[float], median_only: bool = False) -> str:
+    """The report's R without its parenthesis: the range when the protocol reports only the range, else the median.
+    median_only is the protocol's exception for the README's figures."""
     median, low, high, range_only = range_of(ratios)
-    return (f"{low:.2f}–{high:.2f}" if range_only else f"{median:.2f}") + "×"
+    return (f"{low:.2f}–{high:.2f}" if range_only and not median_only else f"{median:.2f}") + "×"
 
 
 def text(x: float, y: float, content: str, size: int, fill: str, anchor: str = "start", weight: str = "normal") -> str:
@@ -61,7 +64,7 @@ def column(x: float, y_top: float, y_base: float, fill: str) -> str:
             f"V{y_base:.1f} Z' fill='{fill}'/>")
 
 
-def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle: str) -> str:
+def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle: str, median_only: bool = False) -> str:
     lines = [line for line in LINES if line in values]
     concurrencies = sorted({concurrency for by_concurrency in values.values() for concurrency in by_concurrency})
     top_value = max(max(ratios) for by_concurrency in values.values() for ratios in by_concurrency.values())
@@ -112,7 +115,8 @@ def speedup_svg(values: dict[str, dict[int, list[float]]], theme: dict, subtitle
                              f"stroke='{theme['muted']}' stroke-width='1.5'/>")
             parts.append(f"<line x1='{middle:.1f}' y1='{y_of(high):.1f}' x2='{middle:.1f}' y2='{y_of(low):.1f}' "
                          f"stroke='{theme['muted']}' stroke-width='1.5'/>")
-            parts.append(text(middle, y_of(high) - 8, label(ratios), 11, theme["text"], anchor="middle", weight="600"))
+            parts.append(text(middle, y_of(high) - 8, label(ratios, median_only), 11, theme["text"], anchor="middle",
+                              weight="600"))
         parts.append(text(center, TOP + plot_h + 20, str(concurrency), 12, theme["muted"], anchor="middle"))
     parts.append(text(LEFT + plot_w / 2, TOP + plot_h + 42, "concurrent requests (C)", 11, theme["muted"], anchor="middle"))
     return "\n".join(parts) + "\n</svg>\n"
@@ -125,6 +129,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--results", type=Path, nargs="+", required=True,
                         help="directories of bench-v2 result files; a rerun directory last replaces the runs it repeats")
     parser.add_argument("--out", type=Path, required=True, help="path prefix: writes PREFIX-light.svg and PREFIX-dark.svg")
+    parser.add_argument("--median-labels", action="store_true", help="label every column with its median, for the README")
     args = parser.parse_args(argv)
     protocol = json.loads(args.protocol.read_text())
     values = speedups(load_runs(args.results), protocol, args.panel)
@@ -134,7 +139,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"{args.panel} panel · median and range over {seeds} seeds")
     for mode, theme in THEMES.items():
         path = args.out.with_name(f"{args.out.name}-{mode}.svg")
-        path.write_text(speedup_svg(values, theme, subtitle))
+        path.write_text(speedup_svg(values, theme, subtitle, args.median_labels))
         print(path)
 
 
