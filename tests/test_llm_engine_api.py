@@ -53,12 +53,15 @@ def test_start_measurement_clears_timings_stats_and_steps():
                                   reset_phase_timings=lambda: resets.append(1))
     engine = make_engine(speculative=speculative, num_steps=7)
     engine.scheduler.num_preemptions = 3
+    engine.scheduler.initial_requests_left = 8
     for _ in range(2):
         engine.step_timer.end(engine.step_timer.begin(), "round", 1, 2, decode_rows=1, prefill_tokens=0, delivered_tokens=2)
     engine.start_measurement()
     assert engine.step_timer.timings() == []
     assert engine.num_steps == 0 and not speculative.stats and not speculative.confidence_log and len(resets) == 1
-    assert engine.scheduler.num_preemptions == 0
+    assert engine.scheduler.num_preemptions == 0 and engine.scheduler.initial_requests_left == 0
+    engine.start_measurement(initial_group=8)
+    assert engine.scheduler.initial_requests_left == 8
 
 
 def test_start_measurement_without_a_draft():
@@ -69,7 +72,8 @@ def test_start_measurement_without_a_draft():
 
 def test_step_records_what_it_delivered_not_what_the_round_returned():
     config = SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=64, eos=7, kvcache_block_size=256,
-                             num_kvcache_blocks=16, enable_prefix_cache=False, num_speculative_tokens=3)
+                             num_kvcache_blocks=16, enable_prefix_cache=False, num_speculative_tokens=3,
+                             round_robin_prefill=False)
     speculative = SimpleNamespace(prefill_aux=lambda seqs: None, prefill_draft=lambda seqs, aux: None,
                                   run_round=lambda seqs: [[7, 5, 6, 8]])    # EOS first: the row delivers 1 of its 4
     engine = make_engine(scheduler=Scheduler(config), speculative=speculative,

@@ -6,11 +6,11 @@
     "sha256": "f93739d1fedad94fd4105b5860a67ee349823fb3fd172da7d6f3f3b5a0c9330f"
   },
   "changes_from_v2_3": [
-    "scope: M5's measurements before the engine is fixed, the same-machine diagnosis and the round-robin comparison; acceptance is protocol v3's. Models, sampling, panels D48 and K128b, seeds, closed-loop rules, the verify schedule and the decision rules are v2.3's",
+    "scope: every GPU job of M5. The author decided on 2026-11-05 that M5 runs experiments to understand the system and stays off main: no protocol v3, no confirmation set, no merge. Models, sampling, panels D48 and K128b, seeds, closed-loop rules, the verify schedule and the decision rules are v2.3's",
     "lines: the 0.6B baseline's lines leave, this protocol does not run them; dflash_k7 comes back from v2.1; the round-robin arms join",
     "invalid_if: preemption is the scheduler's count, not excess prefill tokens; a slow step is judged within its kind",
     "open_loop, pilot, samehost, diagnosis, round_robin and long_context are new",
-    "gates: not run here. identity stands in for them: a version whose tokens equal a gated version's needs no new gate"
+    "gates: unchanged and not run here, except the G4's equivalence inside identity: a version whose tokens equal a gated version's needs no new gate; the tools' G1-wide and G2-real changes wait for a protocol that runs them"
   ],
   "gpu": {
     "runtime": "colab new --gpu G4",
@@ -36,11 +36,11 @@
   "trees": {
     "main": {
       "branch": "feat/m5-gaps",
-      "rule": "a clean clone of one commit; every line's --commit"
+      "rule": "a clean clone of one commit from a git bundle of the local branch, which stays off the public repository; every line's --commit"
     },
     "diagnosis": {
       "branch": "exp/m5-diagnosis",
-      "rule": "never merged; a patch that exists only to measure stays here"
+      "rule": "local as well; a patch that exists only to measure stays here"
     }
   },
   "lines": {
@@ -295,9 +295,21 @@
       "dspark_k7",
       "dspark_var"
     ],
-    "runs_in": "protocol v3; this protocol runs no confirmation, the identity job only reads its concurrency"
+    "runs_in": "nowhere: M5 runs no confirmation set; the identity job only reads this concurrency"
   },
   "gates": {
+    "G2_multi": {
+      "trials": 100000,
+      "delta": 0.001,
+      "k": [
+        2,
+        3,
+        7
+      ],
+      "scheduled_batch": 4,
+      "appendix_a_trials": 20000,
+      "appendix_a": "the early stop emits A within the bound of the target's 0.70; the global maximum's 0.85 lies outside it"
+    },
     "equivalence": {
       "protocol": "benchmarks/protocol-v2.1.json",
       "lines": [
@@ -312,6 +324,67 @@
       "seed": 17011,
       "reference": "repeat 1 of the cluster reproduction, job 236550",
       "rule": "token-identical"
+    },
+    "G1_wide": {
+      "prompts": 8,
+      "block_crossing_lengths": [
+        1022,
+        2046
+      ],
+      "batch": [
+        1,
+        4,
+        16
+      ],
+      "floor_multiple": 2,
+      "margin": 0.5,
+      "revised": "2026-10-23 after the first run: decode alone moves logits by up to 1.5 between B=1 and B=16 on these prompts, so the fixed bound 0.5 was below the reference path's own batch-size noise; the bound is now floor_multiple x the decode-only noise floor measured on the same prompts in the same job (the rule G1-aux had)",
+      "varlen": {
+        "lengths": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "rule": "one batch of the 8 prompts per rotation of the lengths, so each prompt verifies each length once, with the graph's empty row slots and padding tokens; each row's first L positions against the reference's first L decode steps, under the same bound and argmax rule"
+      }
+    },
+    "graph_eager_varlen": {
+      "rule": "the G1_wide varlen batches through the verification graph and eagerly: bit-identical logits"
+    },
+    "G2_real": {
+      "line": "dspark_var",
+      "scan_rounds": 64,
+      "accept_mass": [
+        0.2,
+        0.9
+      ],
+      "min_draft_support": 2,
+      "min_target_support": 2,
+      "accept_trials": 16384,
+      "accept_tolerance": 0.02,
+      "emit_trials": 100000,
+      "delta": 0.001,
+      "revised": "2026-10-23 after the first run: both lines picked the same position, where the target split 0.5/0.5 over two tokens and the draft put all its mass on one; a one-hot q tests only the trivial residual, so q must now be positive on at least min_draft_support tokens",
+      "revised_again": "2026-10-23 after the second run: both picked positions had a one-hot target p, so every rejection emits the one target token and the output-distribution check passes trivially (gap 0); p must now be positive on at least min_target_support tokens (decision D3)"
+    },
+    "G5": {
+      "lines": [
+        "dspark_var",
+        "k0"
+      ],
+      "dataset": "openai/grade-school-math test.jsonl",
+      "commit": "3101c7d5072418e28b9008a6636bde82a006892c",
+      "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "rows": 1319,
+      "concurrency": 32,
+      "ci_low_min": -0.03,
+      "max_unparseable": 0.02,
+      "min_k0_accuracy": 0.8
     }
   },
   "identity": {
@@ -463,7 +536,7 @@
       "full garbage collections",
       "queue length",
       "ITL and end to end p50 / p99",
-      "preemptions, which H1 of protocol v3 judges"
+      "preemptions, which stop_if judges"
     ]
   },
   "samehost": {
@@ -526,8 +599,8 @@
       }
     ],
     "overflow": "M3 §7: on real logits count the rows whose candidates overflow and the difference in q; no larger sample",
-    "merge_rule": "a fix found here goes to M6, unless a single-factor experiment measures a gain over 2*N_t and the change is a few lines",
-    "report": "H5 of protocol v3: the gap and what each experiment moves, reported only"
+    "merge_rule": "nothing found here is merged: M5 stays off main; a single-factor gain over 2*N_t is recorded as a candidate for later",
+    "report": "the gap and what each experiment moves, reported only"
   },
   "round_robin": {
     "rule": "after the initial C requests of a closed loop are prefilled, a step admits at most one request and a prefill step is followed by a round; an open loop has no initial group",
@@ -575,7 +648,8 @@
       "seed": 17011,
       "rates": "the three highest rates at which the line passed either tier on the coarse grid; both arms in one job"
     },
-    "on_fail": "any condition fails on either verdict line: stop, the patch is not merged, nothing escalates to the mixed step"
+    "on_fail": "any condition fails on either verdict line: the result is written down as a fail, nothing escalates to the mixed step",
+    "order": "all arms of one (C, seed) back to back in one job; the i-th dev seed starts with the (i mod 6)-th of k0, k0_rr, dspark_k7, dspark_k7_rr, dspark_var, dspark_var_rr"
   },
   "stop_if": [
     "identity finds a difference: no performance numbers from this tree; find the cause",

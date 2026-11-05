@@ -70,6 +70,7 @@ class TestPrefixCacheSwitch(unittest.TestCase):
             num_kvcache_blocks=8,
             enable_prefix_cache=False,
             num_speculative_tokens=0,
+            round_robin_prefill=False,
         )
 
         scheduler = Scheduler(config)

@@ -110,6 +110,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
         kwargs.update(draft_model=draft, num_speculative_tokens=line["k"], draft_type=line["drafter"])
         if line.get("variable_length"):
             kwargs.update(variable_length=True, verify_schedule=str(ROOT / protocol["verify_schedule"]["file"]))
+    if line.get("round_robin_prefill"):
+        kwargs["round_robin_prefill"] = True
     return target, draft, kwargs
 
 
@@ -312,7 +314,7 @@ def closed_loop(args: argparse.Namespace) -> None:
         overrides["max_model_len"] = args.max_model_len
     llm, target, draft, kwargs = warmed_up_engine(protocol, line, panel, args, **overrides)
     params = SamplingParams(max_tokens=protocol["sampling"]["max_tokens"], **sampling_kwargs(protocol))
-    llm.start_measurement()
+    llm.start_measurement(initial_group=args.concurrency)
     wall_start = time.perf_counter()
     record = run_closed_loop(llm, panel, params, args.concurrency)
     torch.cuda.synchronize()

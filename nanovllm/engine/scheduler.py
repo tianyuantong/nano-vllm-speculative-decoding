@@ -17,12 +17,22 @@ class Scheduler:
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
         self.num_preemptions = 0
+        self.round_robin_prefill = config.round_robin_prefill
+        self.initial_requests_left = config.max_num_seqs    # admitted as usual; start_measurement sets it again
+        self.last_step_prefilled = False
 
     def is_finished(self):
         return not self.waiting and not self.running
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
+
+    def _prefill_limit(self) -> int:
+        """Requests this step may prefill: every one that fits, or with round-robin prefill, past the initial group, one
+        at a time, and none right after a prefill step while requests wait to decode."""
+        if not self.round_robin_prefill or self.initial_requests_left > 0:
+            return self.max_num_seqs
+        return 0 if self.last_step_prefilled and self.running else 1
 
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
@@ -31,7 +41,8 @@ class Scheduler:
         num_occupied_slots = len(self.running) + sum(1 for seq in self.waiting if seq.block_table)
 
         # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+        prefill_limit = self._prefill_limit()
+        while self.waiting and len(scheduled_seqs) < prefill_limit:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
@@ -50,6 +61,7 @@ class Scheduler:
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
                 num_occupied_slots += 1
+                self.initial_requests_left = max(self.initial_requests_left - 1, 0)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
@@ -58,6 +70,7 @@ class Scheduler:
                 self.running.append(seq)
             scheduled_seqs.append(seq)
 
+        self.last_step_prefilled = bool(scheduled_seqs)
         if scheduled_seqs:
             return scheduled_seqs, True
 
