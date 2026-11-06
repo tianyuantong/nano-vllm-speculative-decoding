@@ -42,6 +42,11 @@ def test_engine_kwargs_hold_the_comparison_settings_fixed():
     assert adaptive["attention_backend"] == "TRITON_ATTN"
 
 
+def test_batched_tokens_fit_every_slot_of_the_engine():
+    assert engine_kwargs("k0_v2", 8, PROTOCOL, MODELS)["max_num_batched_tokens"] == PROTOCOL["max_num_batched_tokens"]
+    assert engine_kwargs("k0_v2", 1, PROTOCOL, MODELS)["max_num_batched_tokens"] == PROTOCOL["max_model_len"]
+
+
 def test_panel_prompts_use_whole_cycles():
     panel = [{"prompt_token_ids": [index]} for index in range(48)]
     assert [len(panel_prompts(panel, concurrency)) for concurrency in (1, 8, 32)] == [48, 48, 144]
