@@ -16,7 +16,8 @@ TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1
 TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
 PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
            "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.4.json": "protocol-v2.3.json",
-           "protocol-v2.5.json": "protocol-v2.4.json", "protocol-v2.6.json": "protocol-v2.5.json"}
+           "protocol-v2.5.json": "protocol-v2.4.json", "protocol-v2.6.json": "protocol-v2.5.json",
+           "protocol-v2.7.json": "protocol-v2.6.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -203,3 +204,32 @@ def test_v2_6_is_v2_5_but_for_the_prefix_gate_rule():
     assert {key for key in set(new) | set(old) if new.get(key) != old.get(key)} == {"argmax_kinds", "revised", "rule",
                                                                                      "verdict_by"}
     assert new["argmax_kinds"] == ["target"] and V26["frozen"] is True
+
+
+# ---------------------------------------------------------------- v2.7: v2.6 and M6 ③, nano and vLLM on one machine
+V27 = json.loads((BENCHMARKS / "protocol-v2.7.json").read_text())
+V24_ = json.loads((BENCHMARKS / "protocol-v2.4.json").read_text())
+
+
+def test_v2_7_is_v2_6_with_the_samehost_sections():
+    keep = set(V26) - {"version", "frozen", "derived_from", "changes_from_v2_5"}
+    assert set(V27) == keep | {"version", "frozen", "derived_from", "changes_from_v2_6", "external", "samehost_prefix"}
+    assert all(V27[key] == V26[key] for key in keep)
+
+
+def test_v2_7_runs_m5s_vllm_with_a_larger_kv_pool():
+    new, old = V27["external"]["vllm"], V24_["external"]["vllm"]
+    assert {key for key in set(new) | set(old) if new.get(key) != old.get(key)} == {
+        "kv_cache_bytes", "kv_cache_rule", "prefix_caching", "detokenize", "detokenize_rule", "settle_seconds",
+        "timing_rule"}
+    assert new["kv_cache_bytes"] == 48 * 2 ** 30 and new["detokenize"] is False
+
+
+def test_v2_7_samehost_jobs_use_the_shared_prefix_panels_and_v2_6s_lines():
+    section = V27["samehost_prefix"]
+    for job in section["jobs"]:
+        assert V27["panels"][job["panel"]]["warmup"] and set(job["cache"]) <= {"on", "off"}
+    for nano, vllm in section["pairs"]:
+        assert nano in V27["lines"] and f"{nano}_pc" in V27["lines"] and V27["lines"][f"{nano}_pc"]["prefix_cache"]
+        assert vllm in VLLM_LINES
+    assert set(section["concurrency"]) <= set(V27["concurrency"]) and section["seeds"] == "dev"
