@@ -130,7 +130,7 @@
    17011
   ]
  },
- "order": "all lines of one (panel, C, seed) run back to back in one job, by pairs: main.pairs rotated so the i-th seed (0-based) of the dev seeds starts with the (i mod 4)-th pair; the pair in place j runs its line with the cache off first when i + j is even, on first when it is odd",
+ "order": "all lines of one (panel, C, seed) run back to back in one job, by pairs: main.pairs rotated so the i-th seed (0-based) of the dev seeds starts with the (i mod 4)-th pair; the pair in place j (0-based) runs its line with the cache off first when j is even, on first when it is odd, so each pair alternates over the seeds; the second pass of a timing-noise group runs every pair the other way round",
  "panels": {
   "D48": {
    "file": "benchmarks/inputs/panel-48.json",
@@ -166,53 +166,53 @@
   },
   "S0": {
    "file": "benchmarks/inputs/panel-S0.json",
-   "sha256": "3950b1ba324c9e26d062f43ad108d577dc698b09dae4bd067cd81ce972231bd5",
+   "sha256": "94babc90f9e81183f57f1419ef4813b7d7aa0c8db3c22f3594e9824c3b60a314",
    "take": "prefix",
    "warmup": "S0w",
    "shared_tokens": 0
   },
   "S0w": {
    "file": "benchmarks/inputs/panel-S0w.json",
-   "sha256": "a21a54420897be47f65c46131f16d4ff1c2a07fcad7d07737fb784946e23aac6",
+   "sha256": "248fec2d7f0055de75d197569ca402abedcc76dba6afffa4857861613ce97e29",
    "role": "warm-up only",
    "shared_tokens": 0
   },
   "S512": {
    "file": "benchmarks/inputs/panel-S512.json",
-   "sha256": "8fd0d13ad8f9f3301f43f768eebf3b188a3882567807cb2a87adc44d0ec45d58",
+   "sha256": "bf1c70a2bc1216ef3f63cb840613c4a65e69d9319b08c2426b2b2e0797d9694d",
    "take": "prefix",
    "warmup": "S512w",
    "shared_tokens": 512
   },
   "S512w": {
    "file": "benchmarks/inputs/panel-S512w.json",
-   "sha256": "9762ac49eb921b302045ca9e408ea3f6f2830d33b4c3ce82921b03a663355aeb",
+   "sha256": "ce4ac0fd63c4734ac1697d344e0477560329f4ac524531c0d7be55f7abedc5b9",
    "role": "warm-up only",
    "shared_tokens": 512
   },
   "S1024": {
    "file": "benchmarks/inputs/panel-S1024.json",
-   "sha256": "72622b0c1685142c3c4b9273a95dddf96f1fe670227f35eeafb923aaa6b94c88",
+   "sha256": "1b3666f631be49bf5652eeca773aaf365028945093e104272175c0856d80c016",
    "take": "prefix",
    "warmup": "S1024w",
    "shared_tokens": 1024
   },
   "S1024w": {
    "file": "benchmarks/inputs/panel-S1024w.json",
-   "sha256": "a5cba6a7121c1e2ab6e28cfc97adfb57bb52e2849f0f9cacb473f9d7d762db86",
+   "sha256": "bde3dc80bce1612e3b8d0207f51263d908629295f09517736738e7902a70880e",
    "role": "warm-up only",
    "shared_tokens": 1024
   },
   "S2048": {
    "file": "benchmarks/inputs/panel-S2048.json",
-   "sha256": "e0e673f156f94dbfc9566458798083fe401c05394f5e5fc268e0bb25986c5d95",
+   "sha256": "042b887c08b9b4098d1587406dd47fb73b75ee5c86496a5935156bd5dbe5e163",
    "take": "prefix",
    "warmup": "S2048w",
    "shared_tokens": 2048
   },
   "S2048w": {
    "file": "benchmarks/inputs/panel-S2048w.json",
-   "sha256": "e220fff3af2e17ba138afd5ca3fa16dcd52c5214d4f25519c3649148e8b1b592",
+   "sha256": "2310deffac34b78bddaccedce18c7a9abff14c278345df59e9a88bbb3fffe710",
    "role": "warm-up only",
    "shared_tokens": 2048
   }
@@ -236,7 +236,7 @@
   ],
   "seed": 17011,
   "repeats": 2,
-  "runs_in": "every main job on its own panel: at the seed and each concurrency the whole group runs a second time right after it; the two runs of a line must be token-identical. N_t is the largest |a/b - 1| of Q_steady over the job's 24 pairs; N_rho the largest |rho_1/rho_2 - 1| over the job's 9 (C, drafting line) whose four runs both repeats have. That job's verdicts use them"
+  "runs_in": "every main job on its own panel: at the seed and each concurrency the whole group runs a second time right after it; the two runs of a line must be token-identical. N_t is the largest |a/b - 1| of Q_steady over the job's 24 pairs, N_rho the largest |rho_1/rho_2 - 1| over its 9 (C, drafting line), both from valid runs only; without all 24 and all 9, the job's gain and rho verdicts are not given. The 9 share their k0 runs and one seed: an engineering threshold, not independent repeats or a bound"
  },
  "decision": {
   "faster": "all seeds R > 1 + 2*N_t",
@@ -251,8 +251,7 @@
   "non-finite value or assertion failure",
   "a step other than a prefill > 3 x the median of its kind",
   "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its tree",
-  "timing-noise repeats differ in tokens",
-  "main.verdicts.hits fails"
+  "timing-noise repeats differ in tokens"
  ],
  "verify_schedule": {
   "file": "benchmarks/inputs/verify-schedule-g4.json",
@@ -372,8 +371,8 @@
    "floor_multiple": 2,
    "margin": 0.5,
    "sampling": "greedy",
-   "prompts": "the first per_category entries of each category; the next two entries of the panel, cut to a length of 0 and of 254 mod 256; and the first entry's private part alone, which must hit nothing",
-   "donor": "the first prompt of the panel's warm-up panel, prefilled and run 2 rounds (2 decode steps for k0) on a hash table that holds nothing else, and kept until the arm ends",
+   "prompts": "the first per_category entries of each category, with the first entry's private part alone, which must hit nothing, second in the list so the first floor_batch of them mix hits and the miss; then the next two entries of the panel, cut to a length of 0 and of 254 mod 256",
+   "donor": "the first prompt of the panel's warm-up panel, prefilled and run 2 rounds (k0: decode steps) on a hash table that holds nothing else, run one more round once half the arm's prompts hit, and kept until the arm ends",
    "arms": {
     "reference": "hashing off: each prompt prefilled alone in one step, then `rounds` of the line's own greedy rounds (k0: decode steps), each the draft's block forward, the target's verification, after_verify and the commit",
     "floor": "hashing off: floor_batch prompts at a time, prefilled and run as one batch (a batch short of a graph size pads)",
@@ -384,10 +383,12 @@
    "forced": "every arm but the reference takes the reference's first token, drafts, verified lengths and commits; a variable-length line verifies (prompt index + round) mod (k + 1) + 1 positions per round in every arm",
    "compared": {
     "target": "the prefill's last-position logits, then every verification's (k0: decode step's) logits",
-    "draft": "every round's block-forward logits, and for DSpark the same after the Markov bias of the forced previous token",
+    "draft": "every round's block-forward logits, and for DSpark the logits it samples from: the Markov bias of the forced previous token added in the model's dtype, as the engine adds it",
     "confidence": "a variable-length line's confidence logits every round; no argmax over them"
    },
-   "rule": "per line and panel and for each compared kind: the largest |arm - reference| of chunked, hit and hit_batch at most floor_multiple x the largest |floor - reference|, and the argmax agrees (target, draft) wherever the reference's top-2 margin exceeds margin; and every hit as designed. hit against chunked, which differ only in whose K/V the shared blocks hold, is reported"
+   "rule": "per line and panel and for each compared kind: the largest |arm - reference| of chunked, hit and hit_batch at most floor_multiple x the largest |floor - reference|, and the argmax agrees (target, draft) wherever the reference's top-2 margin exceeds margin; and every hit as designed. hit against chunked, which differ only in whose K/V the shared blocks hold, is reported; and the writes as gates.G_prefix.writes has them",
+   "writes": "through every hit arm: the target's and the draft's K/V of the shared blocks bitwise as the donor left them; and after every step of hit_batch, the padding rows' slots in the graphs' slot buffers (verification, draft block, k0's decode) are -1, so they write nothing",
+   "scope": "a forced trajectory: the same forwards on the same tokens, not the equivalence of the sampling flow; chunked and hit differ in who computed the shared K/V and in what forward shape, not in K/V alone"
   }
  },
  "identity": {
@@ -456,26 +457,29 @@
   "seeds": "dev",
   "jobs": "one job per panel, in listed order; a job's report and its hits check before the next starts",
   "definitions": {
-   "window": "the steady window of bench-v2: F the prefill steps' time in it, D the time of its steps that decode or verify C rows, I the rest of its time (the gaps between steps and the steps with fewer rows), O the tokens delivered in it by the requests' deliveries, N_pf the requests whose first delivery is on a prefill step in it, N_r its steps of C rows",
+   "window": "the steady window of bench-v2: F the prefill steps' time in it, D the time of its steps that decode or verify C rows, I the rest of its time (the gaps between steps and the steps with fewer rows), O the tokens delivered in it by the requests' deliveries, N_pf the requests whose first delivery is on a prefill step in it, N_r its steps of C rows; T the window's time",
    "G": "Q_steady(line_pc) / Q_steady(line) - 1, the same seed and C",
    "R": "Q_steady(line) / Q_steady(k0_line of the line)",
    "rho": "R(line_pc) / R(line)",
-   "f, r, i": "F / O, D / O, I / O: 1 + G = (f + r + i)(off) / (f + r + i)(on) exactly",
-   "p": "F / window time, of the run with the cache off",
+   "p": "F / T, of the run with the cache off",
    "h": "1 - t_pf(on) / t_pf(off), t_pf = F / N_pf",
    "d": "1 - t_r(on) / t_r(off), t_r = D / N_r",
    "kappa": "kappa_pf = (N_pf / O)(on) / (N_pf / O)(off), kappa_r = (N_r / O)(on) / (N_r / O)(off)",
    "h_tok": "over the N_pf requests of the run with the cache on: the sum of cached_tokens over the sum of prompt_len",
-   "rho_hat_tok": "(1 - p_k0 h_tok) / (1 - p h_tok), with h_tok of the panel's design (shared tokens over prompt length) and the runs with the cache off: the direction note's formula, the only prediction",
-   "rho_hat_0": "(1 - p_k0 h_k0) / (1 - p h): the measured prefill saving alone",
-   "rho_hat_1": "(1 - p_k0 h_k0 - (1 - p_k0) d_k0) / (1 - p h - (1 - p) d): the measured prefill and round",
-   "premise": "rho_hat_0 and rho_hat_1 hold when kappa_pf = kappa_r = 1 and i does not change; the report lists kappa and f, r, i"
+   "rho_hat_tok": "(1 - p_k0 h_tok_off,k0) / (1 - p h_tok_off): the direction note's formula on the runs with the cache off alone, a prediction conditional on them",
+   "rho_hat_0": "(1 - p_k0 h_k0) / (1 - p h): the measured prefill saving alone, an accounting",
+   "rho_hat_1": "(1 - p_k0 h_k0 - s_k0 d_k0) / (1 - p h - s d): the measured prefill and round, an accounting",
+   "premise": "rho_hat_0 and rho_hat_1 are the identity with kappa_pf = kappa_r = 1 and i unchanged; the report lists kappa and f, r, i so the gap between them and rho can be read",
+   "s": "D / T, of the run with the cache off",
+   "G identity": "1 + G = 1 / [p kappa_pf (1 - h) + s kappa_r (1 - d) + i(on) / tau(off)], tau = T / O; exact, the same as (f + r + i)(off) / (f + r + i)(on)",
+   "f, r, i": "F / O, D / O, I / O",
+   "h_tok_off": "shared_tokens x N_pf / (the sum of prompt_len of those N_pf requests), over the run with the cache off: the hit rate the panel's design gives the requests that run prefills inside its window"
   },
   "verdicts": {
-   "null": "on S0 every (line, C, seed) gives the same tokens with the cache on and off, request by request. Otherwise stop_if",
-   "hits": "with the cache on every measured request of a run has cached_tokens equal to the panel's shared_tokens, with it off every one 0; and the run's prefill_tokens over its measured steps equal its requests' prompt_len - cached_tokens. Otherwise the run is invalid",
-   "gain": "per (panel, C, line) with all 5 seeds: faster when every seed's 1 + G > 1 + 2 * N_t, slower when every seed's 1 + G < 1 - 2 * N_t, else undecided",
-   "rho": "per (panel, C, drafting line) with all 5 seeds: decision.a_beats_b on the seeds' rho - 1 with N_rho in place of N_t",
+   "null": "on S0 every (line, C, seed) gives the same tokens with the cache on and off, request by request. Otherwise stop_if: the job stops at once, nothing is rerun, and no gain or rho verdict is given",
+   "hits": "with the cache on every measured request of a run has cached_tokens equal to the panel's shared_tokens, with it off every one 0; and the run's prefill_tokens over its measured steps equal its requests' prompt_len - cached_tokens. Otherwise stop_if, as null",
+   "gain": "per (panel, C, line) with all 5 seeds and the job's noise complete: faster when every seed's 1 + G > 1 + 2 * N_t, slower when every seed's 1 + G < 1 - 2 * N_t, else undecided",
+   "rho": "per (panel, C, drafting line) with all 5 seeds and the job's noise complete: decision.a_beats_b on the seeds' rho - 1 with N_rho in place of N_t",
    "complete": "a (panel, C, line) without all 5 seeds is reported, not judged",
    "formula": "report only: per (panel, C, drafting line) the seeds' rho - rho_hat_tok, rho - rho_hat_0 and rho - rho_hat_1, median (min-max), and kappa",
    "report_only": [
@@ -512,7 +516,6 @@
   "panel": "S2048",
   "lines": "every line of main.lines",
   "concurrency": [
-   8,
    64
   ],
   "seed": 17011
@@ -520,7 +523,7 @@
  "stop_if": [
   "identity finds a difference: no performance numbers from this tree; find the cause",
   "G_prefix fails",
-  "main.verdicts.null fails",
+  "main.verdicts.null or main.verdicts.hits fails: the job stops at once without a rerun",
   "an invalid run: its whole (panel, C, seed) rerun once, per invalid_if; still invalid: stop"
  ],
  "shared_kv": {
@@ -534,9 +537,10 @@
    32,
    64
   ],
+  "steps": 20,
   "warmup": 5,
-  "iters": 20,
   "repeats": 2,
-  "rule": "tools/shared_kv_bench.py: the first C prompts of the panel, once with every row owning a copy of the shared prefix (hashing off) and once all reading one (hashing on, after the warm-up panel's first prompt), the layouts alternating over the repeats; every row's tokens forced to one token, a drafting line verifying the same k drafts and committing 3 per round. Reported only: per C and part (k0's decode step; propose, verify, ctx_store) the median of the timed steps, and d = 1 - shared / private"
- }
+  "rule": "tools/shared_kv_bench.py: the first C prompts of the panel prefilled once with hashing on, after the warm-up panel's first prompt, so every row's shared blocks are one physical copy; then every row's shared blocks copied, target and draft K/V, into blocks of its own. The two layouts are the same state but for the block tables: the same values, tokens, positions and graphs. Each layout, alternating over the repeats, runs the same step at the same position warmup + steps times without committing: k0's decode forward; a drafting line's draft block forward and its verification of k fixed drafts. Reported only: per C and part the median of the timed steps, and d = 1 - shared / private. The draft block forward is not the whole propose: no logits, Markov or sampling"
+ },
+ "compile_caches": "every job archives /content/cache into its OUT when it ends, with the archive's sha256; a new VM restores the newest archive the Mac holds and records which; within one job every comparison runs on one VM"
 }

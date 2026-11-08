@@ -51,9 +51,10 @@ class CapturingSampler:
 
 
 def test_prompts(panel: list[dict], per_category: int, shared_tokens: int, block: int) -> list[dict]:
-    """The first per_category entries of each category; two more entries cut so their last block is just full and
-    so the first round crosses a block (length 0 and 254 mod 256); and the first entry's private part alone, which
-    hits nothing. Each with the tokens it must hit and where its chunked prefill splits."""
+    """The first per_category entries of each category, with the first entry's private part alone second, which hits
+    nothing, so the first batch of three mixes hits and the miss; then two more entries cut so their last block is just
+    full and so the first round crosses a block (length 0 and 254 mod 256). Each with the tokens it must hit and where
+    its chunked prefill splits."""
     taken, picked, rest = {}, [], []
     for entry in panel:
         if taken.get(entry["category"], 0) < per_category:
@@ -63,13 +64,13 @@ def test_prompts(panel: list[dict], per_category: int, shared_tokens: int, block
             rest.append(entry)
     prompts = [{"id": entry["id"], "prompt_token_ids": entry["prompt_token_ids"], "shared": shared_tokens}
                for entry in picked]
+    private = picked[0]["prompt_token_ids"][shared_tokens:]
+    prompts.insert(1, {"id": f"{picked[0]['id']}-private", "prompt_token_ids": private, "shared": 0})
     for entry, remainder in zip(rest[:2], (0, block - 2)):
         tokens = entry["prompt_token_ids"]
         cut = (len(tokens) - remainder) // block * block + remainder
         assert shared_tokens + block <= cut <= len(tokens)
         prompts.append({"id": f"{entry['id']}-cut{cut}", "prompt_token_ids": tokens[:cut], "shared": shared_tokens})
-    private = picked[0]["prompt_token_ids"][shared_tokens:]
-    prompts.append({"id": f"{picked[0]['id']}-private", "prompt_token_ids": private, "shared": 0})
     for prompt in prompts:
         prompt["split"] = prompt["shared"] or block
     return prompts
@@ -116,7 +117,8 @@ def speculative_round(llm, seqs, lengths: list[int] | None, forced: list[dict] |
         llm.scheduler.block_manager.reserve(seq, len(seq) + k)
     sampling = sampling_tensors(seqs, decoder.device)
     hidden = drafter._forward_graph(seqs) if drafter.graphs else drafter._forward_eager(seqs)
-    base = drafter.model.compute_logits(hidden).float().view(len(seqs), k, -1).clone()
+    raw = drafter.model.compute_logits(hidden).view(len(seqs), k, -1)
+    base = raw.float().clone()
     if forced is None:
         drafts, _ = drafter._draw(seqs, hidden, sampling)
         drafts = drafts.clone()
@@ -128,7 +130,7 @@ def speculative_round(llm, seqs, lengths: list[int] | None, forced: list[dict] |
     if drafter.model.markov_head is not None:
         anchors = torch.tensor([[seq.last_token] for seq in seqs], dtype=torch.int64, device=decoder.device)
         previous = torch.cat([anchors, drafts[:, :-1]], dim=1)
-        biased = base + drafter.model.markov_head(previous).float()
+        biased = (raw + drafter.model.markov_head(previous)).float()    # added in the model's dtype, as _markov_rows does
     rows = [k + 1] * len(seqs) if lengths is None else lengths
     aux = decoder._aux_buffer(sum(rows))
     target = decoder.verify_logits(seqs, drafts, aux, lengths).float().clone()
@@ -147,6 +149,28 @@ def speculative_round(llm, seqs, lengths: list[int] | None, forced: list[dict] |
              "confidence": None if confidence is None else confidence[row:row + 1],
              "target": target[starts[row]:starts[row] + rows[row]], "drafts": drafts[row].tolist(),
              "appended": appended[row]} for row in range(len(seqs))]
+
+
+def padding_slot_writes(llm, seqs, lengths: list[int] | None) -> int:
+    """Entries of the graphs' slot buffers past the real rows, from the step just run, that are not -1: what the padding
+    rows would write. 0 when nothing ran through a graph."""
+    decoder, count = llm.speculative, 0
+    if decoder is None:
+        runner = llm.model_runner
+        if getattr(runner, "graphs", None):
+            padded = next(size for size in runner.graph_bs if size >= len(seqs))
+            count += int((runner.graph_vars["slot_mapping"][len(seqs):padded] != -1).sum())
+        return count
+    k, drafter = decoder.num_drafts, decoder.drafter
+    if drafter.graphs:
+        padded = next(size for size in decoder.graph_batch_sizes if size >= len(seqs))
+        count += int((drafter.graph_vars["slot_mapping"][len(seqs) * k:padded * k] != -1).sum())
+    if decoder.graphs:
+        verified = len(seqs) * (k + 1) if lengths is None else sum(lengths)
+        rows, tokens = next(shape for shape in decoder.graph_shapes if shape[1] >= verified)
+        if (rows - len(seqs)) * (k + 1) >= tokens - verified:    # else _verify_graph ran eagerly, without padding
+            count += int((decoder.graph_vars["slot_mapping"][verified:tokens] != -1).sum())
+    return count
 
 
 def decode_step(llm, seqs, forced: list[int] | None) -> list[dict]:
@@ -172,15 +196,17 @@ def observe(llm, prompts: list[dict], indices: list[int], k: int, gate: dict, re
     if reference is not None:
         force_first(seqs, [ref["first"] for ref in reference])
     out = [{"hit_tokens": seq.prefix_hit_tokens, "first": seq.last_token, "target": [prefill_logits[row:row + 1]],
-            "draft": [], "confidence": [], "steps": []} for row, seq in enumerate(seqs)]
+            "draft": [], "confidence": [], "steps": [], "padding_writes": 0} for row, seq in enumerate(seqs)]
     for step in range(gate["rounds"]):
         forced = [ref["steps"][step] for ref in reference] if reference is not None else None
+        lengths = ([(index + step) % (k + 1) + 1 for index in indices]
+                   if llm.speculative is not None and llm.config.variable_length else None)
         if llm.speculative is None:
             rows = decode_step(llm, seqs, [row["appended"][0] for row in forced] if forced else None)
         else:
-            lengths = ([(index + step) % (k + 1) + 1 for index in indices]
-                       if llm.config.variable_length else None)
             rows = speculative_round(llm, seqs, lengths, forced)
+        for record in out:
+            record["padding_writes"] += padding_slot_writes(llm, seqs, lengths)
         for record, row in zip(out, rows):
             record["target"].append(row["target"])
             record["draft"] += [tensor for tensor in (row.get("draft"), row.get("draft_biased")) if tensor is not None]
@@ -207,20 +233,35 @@ def argmax_disagreements(observed: list[dict], reference: list[dict], key: str, 
     return found
 
 
-def with_donor(llm, donor: list[int], k: int, run):
-    """`run()` on a hash table that holds only a fresh donor's blocks, the donor prefilled and run 2 rounds first and
-    kept until `run` returns: the shared blocks come from another request that went on decoding."""
+def shared_blocks_kv(llm, block_ids: list[int]) -> list[torch.Tensor]:
+    """The target's and, with a draft, the draft's K/V of these blocks."""
+    caches = [llm.model_runner.kv_cache] + ([llm.speculative.drafter.kv_cache] if llm.speculative is not None else [])
+    return [cache[:, :, block_ids].clone() for cache in caches]
+
+
+def with_donor(llm, donor: list[int], shared_tokens: int, k: int, run):
+    """`run(donor_round)` on a hash table that holds only a fresh donor's blocks, the donor prefilled and run 2 rounds
+    first and kept until `run` returns, `donor_round()` running it one more: the shared blocks come from another
+    request that goes on decoding. Returns run's result and whether the shared blocks' K/V, target and draft, stayed
+    bitwise as the donor left them."""
     manager = llm.scheduler.block_manager
     manager.enable_prefix_cache = True
     manager.hash_to_block_id.clear()
     donor_seqs, _ = prefill(llm, [donor], k)
-    for _ in range(2):
+
+    def donor_round():
         if llm.speculative is None:
             decode_step(llm, donor_seqs, None)
         else:
             speculative_round(llm, donor_seqs, [k + 1] if llm.config.variable_length else None, None)
+    for _ in range(2):
+        donor_round()
+    shared_ids = donor_seqs[0].block_table[:shared_tokens // manager.block_size]
+    before = shared_blocks_kv(llm, shared_ids)
     try:
-        return run()
+        result = run(donor_round)
+        kept = all(torch.equal(a, b) for a, b in zip(before, shared_blocks_kv(llm, shared_ids)))
+        return result, kept
     finally:
         for seq in donor_seqs:
             llm.scheduler._finish(seq)
@@ -245,18 +286,33 @@ def gate_panel(llm, panel: list[dict], donor: list[int], shared_tokens: int, k: 
         arms["floor"] += observe(llm, prompts[batch], indices[batch], k, gate, reference[batch])
     arms["chunked"] = [observe(llm, [prompt], [index], k, gate, [ref], chunked=True)[0]
                        for index, (prompt, ref) in enumerate(zip(prompts, reference))]
-    arms["hit"] = with_donor(llm, donor, k, lambda: [observe(llm, [prompt], [index], k, gate, [ref])[0]
-                                                    for index, (prompt, ref) in enumerate(zip(prompts, reference))])
-    arms["hit_batch"] = with_donor(llm, donor, k, lambda: [row for batch in batches(prompts, size)
-                                                          for row in observe(llm, prompts[batch], indices[batch], k,
-                                                                             gate, reference[batch])])
+    def hit_arm(donor_round):
+        out = []
+        for index, (prompt, ref) in enumerate(zip(prompts, reference)):
+            if index == len(prompts) // 2:
+                donor_round()
+            out += observe(llm, [prompt], [index], k, gate, [ref])
+        return out
+
+    def hit_batch_arm(donor_round):
+        out, slices = [], batches(prompts, size)
+        for number, batch in enumerate(slices):
+            if number == len(slices) // 2:
+                donor_round()
+            out += observe(llm, prompts[batch], indices[batch], k, gate, reference[batch])
+        return out
+    arms["hit"], hit_kept = with_donor(llm, donor, shared_tokens, k, hit_arm)
+    arms["hit_batch"], hit_batch_kept = with_donor(llm, donor, shared_tokens, k, hit_batch_arm)
     hashing_off = reference + arms["floor"] + arms["chunked"]
     result = {"prompts": [prompt["id"] for prompt in prompts], "shared_tokens": shared_tokens,
               "hits": {arm: [ob["hit_tokens"] for ob in arms[arm]] for arm in ("hit", "hit_batch")},
               "hits_as_designed": all(ob["hit_tokens"] == prompt["shared"] for arm in ("hit", "hit_batch")
                                       for ob, prompt in zip(arms[arm], prompts)),
-              "hashing_off_hits": sum(ob["hit_tokens"] for ob in hashing_off)}
-    passed = result["hits_as_designed"] and result["hashing_off_hits"] == 0
+              "hashing_off_hits": sum(ob["hit_tokens"] for ob in hashing_off),
+              "shared_blocks_kept": {"hit": hit_kept, "hit_batch": hit_batch_kept},
+              "padding_writes": sum(ob["padding_writes"] for arm in arms.values() for ob in arm)}
+    passed = (result["hits_as_designed"] and result["hashing_off_hits"] == 0 and hit_kept and hit_batch_kept
+              and result["padding_writes"] == 0)
     for key in ("target", "draft", "confidence"):    # confidences are 7 binary logits: no argmax over them
         if not reference[0][key]:
             continue

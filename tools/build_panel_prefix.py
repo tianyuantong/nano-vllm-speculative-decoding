@@ -115,13 +115,19 @@ def main() -> None:
         stackselect.setdefault(str(row["question_id"]), row)            # upstream keeps the first match
     bamboo = [json.loads(line) for line in (directory / "meetingpred_4k.jsonl").read_text().splitlines() if line.strip()]
     encode = chat_encoder(directory / "qwen-tokenizer")
-    encoded = {}
+    encoded, bodies = {}, {}    # bodies: each untagged prompt, the first candidate that has it
 
     def fits(candidate: dict) -> bool:
+        """At most max_formatted_tokens long with its tag; untagged, not an excluded panel's prompt and not one a
+        candidate picked earlier already has (two question ids can carry the same text)."""
         prompt, recipe = first_turn(candidate, recipes, stackselect, bamboo)
+        body = tuple(encode(prompt))
         encoded[candidate["question_id"]] = (recipe, encode(spec["tag"].format(id=candidate["question_id"]) + prompt))
-        token_ids = encoded[candidate["question_id"]][1]
-        return len(token_ids) <= spec["max_formatted_tokens"] and tuple(token_ids) not in excluded_prompts
+        if len(encoded[candidate["question_id"]][1]) > spec["max_formatted_tokens"] or body in excluded_prompts:
+            return False
+        if bodies.setdefault(body, candidate["question_id"]) != candidate["question_id"]:
+            return False
+        return True
 
     chosen = select_candidates(candidates, excluded_ids, excluded_sources, spec["salt"], spec["quotas"], fits)
     picked = interleave_proportional(chosen, list(spec["quotas"]))

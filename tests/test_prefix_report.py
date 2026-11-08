@@ -142,3 +142,11 @@ def test_gain_verdict():
     assert gain_verdict([0.10, 0.12, 0.09], 0.004) == "faster"
     assert gain_verdict([-0.02, -0.03, -0.01], 0.004) == "slower"
     assert gain_verdict([0.02, -0.001, 0.03], 0.004) == "undecided"
+
+
+def test_without_every_repeat_no_verdict_is_given():
+    runs = [run for run in matrix() if not run[0].endswith("dspark_k7_pc-s1-r2.json")]
+    analysis = analyse(runs, PROTOCOL, "S1024")
+    assert not analysis["noise_complete"] and analysis["pairs"] == 3 and analysis["rho_pairs"] == 0
+    text = markdown(analysis)
+    assert "NOT GIVEN" in text and "faster" not in text and "undecided" not in text

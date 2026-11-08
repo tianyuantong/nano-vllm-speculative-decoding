@@ -77,6 +77,7 @@ def run_metrics(result: dict, summary: dict) -> dict:
     return {"window": [first, last], "window_ms": window_ms, "F": prefill_ms, "D": full_ms,
             "I": window_ms - prefill_ms - full_ms, "O": delivered, "N_pf": len(prefilled), "N_r": len(full),
             "q_steady": summary["q_steady"], "q_full": summary["q_full"], "p": prefill_ms / window_ms,
+            "s": full_ms / window_ms,
             "t_pf_ms": prefill_ms / len(prefilled), "t_r_ms": full_ms / len(full),
             "h_tok": sum(r["cached_tokens"] for r in prefilled) / sum(r["prompt_len"] for r in prefilled),
             "prompt_len_prefilled": sum(r["prompt_len"] for r in prefilled),
@@ -107,16 +108,21 @@ def compare(off: dict, on: dict) -> dict:
                                                       for side, values in ttft.items()} if paired else {})}}
 
 
+def h_tok_off(run: dict, shared_tokens: int) -> float:
+    """The hit rate the panel's design gives the requests a cache-off run prefills inside its window."""
+    return shared_tokens * run["N_pf"] / run["prompt_len_prefilled"]
+
+
 def rho_terms(k0_off: dict, k0_on: dict, line_off: dict, line_on: dict, shared_tokens: int) -> dict:
-    """rho and its three model values from the four runs of one seed (main.definitions)."""
+    """rho and its three model values from the four runs of one seed (main.definitions): rho_hat_tok from the cache-off
+    runs alone, a prediction conditional on them; rho_hat_0 and rho_hat_1 accountings of the measured h and d."""
     k0, line = compare(k0_off, k0_on), compare(line_off, line_on)
     rho = (line_on["q_steady"] / k0_on["q_steady"]) / (line_off["q_steady"] / k0_off["q_steady"])
-    p0, p = k0_off["p"], line_off["p"]
-    tok0 = shared_tokens * k0_off["N_pf"] / k0_off["prompt_len_prefilled"]
-    tok = shared_tokens * line_off["N_pf"] / line_off["prompt_len_prefilled"]
-    return {"rho": rho, "rho_hat_tok": (1 - p0 * tok0) / (1 - p * tok),
+    p0, p, s0, s = k0_off["p"], line_off["p"], k0_off["s"], line_off["s"]
+    return {"rho": rho,
+            "rho_hat_tok": (1 - p0 * h_tok_off(k0_off, shared_tokens)) / (1 - p * h_tok_off(line_off, shared_tokens)),
             "rho_hat_0": (1 - p0 * k0["h"]) / (1 - p * line["h"]),
-            "rho_hat_1": (1 - p0 * k0["h"] - (1 - p0) * k0["d"]) / (1 - p * line["h"] - (1 - p) * line["d"])}
+            "rho_hat_1": (1 - p0 * k0["h"] - s0 * k0["d"]) / (1 - p * line["h"] - s * line["d"])}
 
 
 def gain_verdict(gains: list[float], noise: float) -> str:
@@ -141,21 +147,25 @@ def analyse(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> d
     main_spec = protocol["main"]
     shared = protocol["panels"][panel]["shared_tokens"]
     runs = [run for run in runs if run[1]["config"]["panel"] == panel]
-    invalid, pairs, _ = count_runs(runs, protocol)
+    invalid, _, _ = count_runs(runs, protocol)
     for name, result, _ in runs:
         on = protocol["lines"][result["config"]["line"]].get("prefix_cache", False)
         invalid[name] += [f"hits: {problem}" for problem in hits_check(result, shared, on)]
-    noise = timing_noise(pairs) if pairs else None
     by_key = final_runs(runs)
-    repeats = defaultdict(dict)    # (C, repeat) -> line -> Q_steady, at the timing-noise seed
+    repeats = defaultdict(dict)    # (C, repeat) -> line -> Q_steady of a valid run, at the timing-noise seed
     for (_, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
         if seed == protocol["timing_noise"]["seed"] and not invalid[name]:
             repeats[(concurrency, repeat)][line] = summary["q_steady"]
     bases = [off for off, _ in main_spec["pairs"]]
     drafting = [line for line in bases if protocol["lines"][line]["k"] > 0]
+    pairs = [(repeats[(c, 1)][line], repeats[(c, 2)][line]) for c in main_spec["concurrency"] for line in main_spec["lines"]
+             if all(line in repeats[(c, r)] for r in (1, 2))]
     rho_pairs = [(rho_of(repeats[(c, 1)], line), rho_of(repeats[(c, 2)], line))
                  for c in main_spec["concurrency"] for line in drafting
                  if all(name in repeats[(c, r)] for r in (1, 2) for name in (line, f"{line}_pc", "k0", "k0_pc"))]
+    noise_complete = (len(pairs) == len(main_spec["concurrency"]) * len(main_spec["lines"])
+                      and len(rho_pairs) == len(main_spec["concurrency"]) * len(drafting))
+    noise = timing_noise(pairs) if pairs else None
     noise_rho = timing_noise(rho_pairs) if rho_pairs else None
     metrics, results = {}, {}
     for (_, concurrency, line, seed, repeat), (name, result, summary) in by_key.items():
@@ -182,8 +192,11 @@ def analyse(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> d
                 if shared == 0 and same < 1:
                     null.append(f"C={concurrency} {line} seed {seed}: {same:.4f} of the requests the same")
             table[(concurrency, line)] = entries
+    null_failures = null if shared == 0 else None
+    stopped = bool(null_failures) or any(reason.startswith("hits:") for reasons in invalid.values() for reason in reasons)
     return {"panel": panel, "shared_tokens": shared, "noise": noise, "pairs": len(pairs), "noise_rho": noise_rho,
-            "rho_pairs": len(rho_pairs), "seeds": len(seeds), "null_failures": null if shared == 0 else None,
+            "rho_pairs": len(rho_pairs), "noise_complete": noise_complete, "stopped": stopped, "seeds": len(seeds),
+            "null_failures": null_failures,
             "invalid": {name: reasons for name, reasons in invalid.items() if reasons}, "table": table}
 
 
@@ -195,11 +208,16 @@ def _fmt(values: list[float], scale: float = 1, digits: int = 2) -> str:
 
 
 def markdown(analysis: dict) -> str:
-    noise, noise_rho, complete = analysis["noise"], analysis["noise_rho"], analysis["seeds"]
+    complete = analysis["seeds"]
+    judged = analysis["noise_complete"] and not analysis["stopped"]
+    noise, noise_rho = (analysis["noise"], analysis["noise_rho"]) if judged else (None, None)
     out = [f"# {analysis['panel']}: shared prefix {analysis['shared_tokens']} tokens", "",
-           f"- N_t = {noise:.4f} from {analysis['pairs']} repeat pairs" if noise is not None else "- N_t unavailable",
-           f"- N_rho = {noise_rho:.4f} from {analysis['rho_pairs']} repeat pairs" if noise_rho is not None
-           else "- N_rho unavailable"]
+           "- verdicts: " + ("given" if judged else "NOT GIVEN: " + ("main.verdicts.null or hits failed"
+                                                                       if analysis["stopped"] else "the noise repeats are incomplete")),
+           f"- N_t = {analysis['noise']:.4f} from {analysis['pairs']} repeat pairs" if analysis["noise"] is not None
+           else "- N_t unavailable",
+           f"- N_rho = {analysis['noise_rho']:.4f} from {analysis['rho_pairs']} repeat pairs"
+           if analysis["noise_rho"] is not None else "- N_rho unavailable"]
     if analysis["null_failures"] is not None:
         out.append("- null (S0, tokens the same on and off): " +
                    ("holds" if not analysis["null_failures"] else "FAILS: " + "; ".join(analysis["null_failures"])))

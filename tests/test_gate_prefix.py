@@ -34,12 +34,36 @@ class FakeEvent:
         return 0.0
 
 
+NUM_BLOCKS = 256
+
+
+def rendered(cache: dict) -> torch.Tensor:
+    """A fake model's slot -> record dict as a [1, 1, block, slot, 1, 3] tensor, so the gate can read blocks of it."""
+    out = torch.zeros(1, 1, NUM_BLOCKS + 1, BLOCK_SIZE, 1, 3)
+    for slot, record in cache.items():
+        if slot >= 0:
+            values = [{"context": 1.0, "block": 2.0}.get(record[0], 3.0), *map(float, record[1:])] \
+                if isinstance(record[0], str) else [3.0, *map(float, record)]
+            out[0, 0, slot // BLOCK_SIZE, slot % BLOCK_SIZE, 0, :len(values)] = torch.tensor(values)
+    return out
+
+
 class FakeRunner:
     """ModelRunner's prefill and decode over test_dflash_round's FakeTarget."""
 
     def __init__(self, target):
         self.target, self.generator = target, target.generator
         self.sampler = lambda logits, sampling, generator=None: logits.argmax(dim=-1)
+
+    override = None    # the shared-block bench copies blocks, so it needs a real tensor
+
+    @property
+    def kv_cache(self):
+        return self.override if self.override is not None else rendered(self.target.kv)
+
+    @kv_cache.setter
+    def kv_cache(self, tensor):
+        self.override = tensor
 
     def call(self, name, seqs, is_prefill, aux=None):
         assert name == "run" and is_prefill
@@ -72,7 +96,7 @@ def make_llm(drafting: bool):
     decoder.drafter._forward_eager = forward_eager
     k = K if drafting else 0
     config = SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=4096, eos=-1, kvcache_block_size=BLOCK_SIZE,
-                             num_kvcache_blocks=256, enable_prefix_cache=True, num_speculative_tokens=k,
+                             num_kvcache_blocks=NUM_BLOCKS, enable_prefix_cache=True, num_speculative_tokens=k,
                              round_robin_prefill=False, max_model_len=4096, variable_length=False)
     llm = object.__new__(LLMEngine)
     llm.config, llm.scheduler = config, Scheduler(config)
@@ -108,12 +132,15 @@ def small_blocks():
 
 
 @pytest.mark.parametrize("drafting", [True, False])
-def test_the_five_arms_run_and_every_hit_is_as_designed(drafting):
+def test_the_five_arms_run_and_every_hit_is_as_designed(drafting, monkeypatch):
+    from nanovllm.engine.speculative import DFlashDrafter
+    monkeypatch.setattr(DFlashDrafter, "kv_cache", property(lambda self: rendered(self.model.cache)), raising=False)
     llm, draft = make_llm(drafting)
     donor = [right(p) for p in range(SHARED)] + [14, 13, 12, 11, 10]
     result = gate_prefix.gate_panel(llm, panel(), donor, SHARED, K, GATE)
     assert result["hits_as_designed"] and result["hashing_off_hits"] == 0, result["hits"]
-    assert result["hits"]["hit"] == [SHARED] * 10 + [0] and result["hits"]["hit_batch"] == result["hits"]["hit"]
+    assert result["hits"]["hit"] == [SHARED, 0] + [SHARED] * 9 and result["hits"]["hit_batch"] == result["hits"]["hit"]
+    assert result["shared_blocks_kept"] == {"hit": True, "hit_batch": True} and result["padding_writes"] == 0
     assert result["passed"] and result["target"]["hit"]["statistic"] == 0
     assert ("draft" in result) == drafting
     if drafting:
@@ -133,18 +160,30 @@ class FakeTimedEvent:
 
 
 @pytest.mark.parametrize("drafting", [True, False])
-def test_the_shared_block_bench_runs_both_layouts(drafting, monkeypatch):
+def test_the_shared_block_bench_points_one_state_at_shared_or_private_blocks(drafting, monkeypatch):
     import shared_kv_bench
     llm, _ = make_llm(drafting)
+    num_blocks = llm.scheduler.block_manager.blocks.__len__() + 1
+    llm.model_runner.kv_cache = torch.arange(2 * num_blocks * BLOCK_SIZE, dtype=torch.float32).view(2, 1, num_blocks,
+                                                                                                    BLOCK_SIZE, 1, 1)
     if drafting:
-        monkeypatch.setattr(llm.speculative.drafter, "_forward_graph", llm.speculative.drafter._forward_eager)
+        drafter = llm.speculative.drafter
+        drafter.kv_cache = llm.model_runner.kv_cache.clone() + 0.5
+        monkeypatch.setattr(drafter, "_forward_graph", drafter._forward_eager)
     monkeypatch.setattr(shared_kv_bench, "event", FakeTimedEvent)
     monkeypatch.setattr(shared_kv_bench.torch.cuda, "synchronize", lambda: None)
     prompts = [entry["prompt_token_ids"] for entry in panel()[:3]]
     donor = [right(p) for p in range(SHARED)] + [14, 13, 12, 11, 10]
-    spec = {"warmup": 1, "iters": 3}
-    private = shared_kv_bench.measure(llm, prompts, donor, "private", spec)
-    shared = shared_kv_bench.measure(llm, prompts, donor, "shared", spec)
-    assert private["hits"] == [0] and shared["hits"] == [SHARED]
-    assert set(private["median_ms"]) == ({"propose", "verify", "ctx_store"} if drafting else {"decode"})
-    assert not llm.scheduler.running and not llm.scheduler.waiting
+    seqs, shared, private = shared_kv_bench.build_state(llm, prompts, donor, SHARED)
+    assert len(shared) == SHARED // BLOCK_SIZE and all(len(set(ids) & set(shared)) == 0 for ids in private)
+    for cache in shared_kv_bench.caches(llm):
+        assert all(torch.equal(cache[:, :, ids], cache[:, :, shared]) for ids in private)    # the same values
+    spec = {"warmup": 1, "steps": 3}
+    lengths = [len(seq) for seq in seqs]
+    for table in (private, [shared] * len(seqs)):
+        medians = shared_kv_bench.measure(llm, seqs, table, len(shared), spec)
+        assert set(medians) == ({"draft_forward", "verify"} if drafting else {"decode"})
+    assert [len(seq) for seq in seqs] == lengths                                             # nothing committed
+    shared_kv_bench.teardown(llm, seqs, shared, private)
+    manager = llm.scheduler.block_manager
+    assert not llm.scheduler.running and not manager.used_block_ids
