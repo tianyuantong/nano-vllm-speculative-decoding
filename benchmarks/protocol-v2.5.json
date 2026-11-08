@@ -1,6 +1,6 @@
 {
  "version": "2.5",
- "frozen": false,
+ "frozen": true,
  "derived_from": {
   "file": "benchmarks/protocol-v2.4.json",
   "sha256": "f4eb7ef991e4af3ddbe952e939b13bb2c0d2fbb9295974131b113978538c6037"
@@ -542,5 +542,5 @@
   "repeats": 2,
   "rule": "tools/shared_kv_bench.py: the first C prompts of the panel prefilled once with hashing on, after the warm-up panel's first prompt, so every row's shared blocks are one physical copy; then every row's shared blocks copied, target and draft K/V, into blocks of its own. The two layouts are the same state but for the block tables: the same values, tokens, positions and graphs. Each layout, alternating over the repeats, runs the same step at the same position warmup + steps times without committing: k0's decode forward; a drafting line's draft block forward and its verification of k fixed drafts. Reported only: per C and part the median of the timed steps, and d = 1 - shared / private. The draft block forward is not the whole propose: no logits, Markov or sampling"
  },
- "compile_caches": "every job archives /content/cache into its OUT when it ends, with the archive's sha256; a new VM restores the newest archive the Mac holds and records which; within one job every comparison runs on one VM"
+ "compile_caches": "every job archives /content/cache into its OUT when it ends, with the archive's sha256. A new VM restores job D's archive; one that replaces a lost VM restores the newest archive an M6 job left, copied to outputs/colab/ and named through PREP_CACHES and PREP_CACHES_SHA256, and the job records which. identity checks the old panels with the cache off, not the shapes the cache adds; within one job every comparison runs on one VM"
 }
