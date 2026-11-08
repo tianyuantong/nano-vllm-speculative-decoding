@@ -6,11 +6,15 @@
   run     one (line, concurrency) in this process; probe and formal call it in a child process,
           because vLLM reads VLLM_USE_V2_MODEL_RUNNER when it is imported. With --seed the engine samples from that seed:
           a same-machine comparison runs each seed in a new process, since repeats in one engine only advance one
-          generator (protocol v2.4 samehost)
+          generator (protocol v2.4 samehost). With --panel-name the prompts are a protocol panel's, taken as
+          bench_spec.py takes them, and the warm-up is that panel's own warm-up panel if it names one; --prefix-cache
+          turns vLLM's prefix caching on; the result then records each request's prompt length, cached tokens and
+          tokens (protocol v2.7 samehost_prefix)
 
 vLLM imports only inside run_line, so the CPU tests can import this module.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -62,7 +66,8 @@ def speculative_config(line: str, protocol: dict, models_root: str) -> dict | No
     return config
 
 
-def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str, seed: int | None = None) -> dict:
+def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str, seed: int | None = None,
+                  prefix_cache: bool = False) -> dict:
     vllm_settings = protocol["external"]["vllm"]
     target = f"{models_root}/{protocol['models']['target']}"
     # vLLM's dummy runs give each slot max_num_batched_tokens / max_num_seqs tokens, which must fit max_model_len: at C=1
@@ -70,7 +75,7 @@ def engine_kwargs(line: str, concurrency: int, protocol: dict, models_root: str,
     max_num_batched_tokens = min(protocol["max_num_batched_tokens"], concurrency * protocol["max_model_len"])
     kwargs = dict(model=target, tokenizer=target, dtype=protocol["models"]["dtype"], tensor_parallel_size=1,
                   max_model_len=protocol["max_model_len"], max_num_seqs=concurrency,
-                  max_num_batched_tokens=max_num_batched_tokens, enable_prefix_caching=False,
+                  max_num_batched_tokens=max_num_batched_tokens, enable_prefix_caching=prefix_cache,
                   enable_chunked_prefill=True, async_scheduling=False, enforce_eager=False,
                   kv_cache_memory_bytes=vllm_settings["kv_cache_bytes"], generation_config="vllm",
                   seed=protocol["seeds"]["external"][0] if seed is None else seed, disable_log_stats=False,
@@ -89,13 +94,38 @@ def sampling_kwargs(protocol: dict, max_tokens: int, supplement: bool = False) -
     rec = protocol["sampling"]
     settings = (protocol["external"]["vllm"]["supplement"]["sampling"] if supplement
                 else dict(temperature=rec["temperature"], top_k=rec["top_k"], top_p=rec["top_p"]))
-    return dict(settings, max_tokens=max_tokens, ignore_eos=rec["ignore_eos"])
+    # v2.7 turns detokenizing off, so both sides end where the tokens are back; EOS is a token check in the engine
+    detokenize = {} if "detokenize" not in protocol["external"]["vllm"] else {"detokenize": protocol["external"]["vllm"]["detokenize"]}
+    return dict(settings, max_tokens=max_tokens, ignore_eos=rec["ignore_eos"], **detokenize)
 
 
 def panel_prompts(panel: list[dict], concurrency: int) -> list[list[int]]:
     """Whole cycles of the panel, at least 4C requests (bench-v2 §2.2), so the batch stays full."""
     cycles = math.ceil(max(len(panel), 4 * concurrency) / len(panel))
     return [entry["prompt_token_ids"] for entry in panel] * cycles
+
+
+def protocol_panel_prompts(protocol: dict, panel_name: str, concurrency: int,
+                           prefix_cache: bool) -> tuple[list[list[int]], list[list[int]]]:
+    """The measured prompts and the warm-up prompts of a protocol panel, as bench_spec.py's load_panel and warmup_entries
+    take them: "full_cycles" whole cycles of at least 4C, "prefix" the first max(48, 4C), a number that many, cycling;
+    the warm-up the first C of the panel's own warm-up panel if it names one, else the first C of the measured prompts,
+    cycled. With the prefix cache on the panel must not cycle, or a request would hit its own earlier copy."""
+    spec = protocol["panels"][panel_name]
+    entries = json.loads((ROOT / spec["file"]).read_text())
+    take = spec["take"]
+    count = take if isinstance(take, int) else {
+        "full_cycles": len(entries) * math.ceil(max(len(entries), 4 * concurrency) / len(entries)),
+        "prefix": max(48, 4 * concurrency)}[take]
+    if prefix_cache and count > len(entries):
+        raise ValueError(f"{count} requests from a panel of {len(entries)}: with the prefix cache on the panel must not cycle")
+    measured = [entries[index % len(entries)]["prompt_token_ids"] for index in range(count)]
+    if "warmup" not in spec:
+        return measured, [measured[index % len(measured)] for index in range(concurrency)]
+    warmup = json.loads((ROOT / protocol["panels"][spec["warmup"]]["file"]).read_text())
+    if len(warmup) < concurrency:
+        raise ValueError(f"the warm-up panel {spec['warmup']} has {len(warmup)} prompts, C is {concurrency}")
+    return measured, [entry["prompt_token_ids"] for entry in warmup[:concurrency]]
 
 
 def counter_totals(metrics) -> dict:
@@ -108,42 +138,104 @@ def counter_totals(metrics) -> dict:
     return totals
 
 
+def histogram_totals(metrics) -> dict:
+    """Each histogram's count and sum over its label sets."""
+    totals = {}
+    for metric in metrics:
+        if hasattr(metric, "buckets"):
+            count, total = totals.get(metric.name, (0, 0.0))
+            totals[metric.name] = (count + metric.count, total + metric.sum)
+    return totals
+
+
+def engine_cache(llm) -> dict:
+    """The cache settings the engine resolved: the engine core sends its block size and KV size back to this process
+    once it is up (vllm/v1/engine/core_client.py, _apply_ready_response)."""
+    config = llm.llm_engine.vllm_config
+    cache, speculative = config.cache_config, config.speculative_config
+    return dict(block_size=cache.block_size, num_gpu_blocks=cache.num_gpu_blocks,
+                kv_cache_size_tokens=getattr(cache, "kv_cache_size_tokens", None),
+                enable_prefix_caching=cache.enable_prefix_caching, hash_algo=cache.prefix_caching_hash_algo,
+                eagle_block_drop=speculative.use_eagle_block_drop() if speculative is not None else None)
+
+
+def gpu_memory_used_mib() -> int:
+    """The GPU's memory in use, every process's: the engine runs in a process of its own."""
+    return int(subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True, check=True).stdout.splitlines()[0])
+
+
+def vllm_manifest(commit: str | None) -> dict:
+    """bench-v2's manifest fields for this venv; vLLM ships its own flash-attention."""
+    import platform
+    import torch
+    import triton
+    import vllm
+    driver = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                            capture_output=True, text=True).stdout.strip()
+    return {"gpu": torch.cuda.get_device_name(0), "driver": driver, "torch": torch.__version__, "cuda": torch.version.cuda,
+            "vllm": vllm.__version__, "triton": triton.__version__, "python": platform.python_version(), "commit": commit}
+
+
 def run_line(line: str, concurrency: int, repeats: int, prompts: list[list[int]], protocol: dict,
-             models_root: str, max_tokens: int, warmup: bool, supplement: bool = False, seed: int | None = None) -> dict:
+             models_root: str, max_tokens: int, warmup: bool, supplement: bool = False, seed: int | None = None,
+             warmup_prompts: list[list[int]] | None = None, prefix_cache: bool = False, commit: str | None = None) -> dict:
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1" if LINES[line].runner == "v2" else "0"
     os.environ["VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN"] = str(
         protocol["external"]["vllm"]["adaptive_profile_context_len"])
     os.environ["HF_HUB_OFFLINE"] = "1"
+    sys.path.insert(0, str(ROOT))
+    from bench_spec import gpu_state, installed_packages    # subprocess and importlib only, no nanovllm
     import torch
     import vllm
     from vllm import LLM, SamplingParams
 
-    kwargs = engine_kwargs(line, concurrency, protocol, models_root, seed)
+    state_start = gpu_state()
+    kwargs = engine_kwargs(line, concurrency, protocol, models_root, seed, prefix_cache)
     llm = LLM(**kwargs)
     requests = [dict(prompt_token_ids=prompt) for prompt in prompts]
     if warmup:
-        llm.generate(requests[:concurrency],
-                     SamplingParams(**sampling_kwargs(protocol, protocol["warmup"]["max_tokens"], supplement)), use_tqdm=False)
+        warm = requests[:concurrency] if warmup_prompts is None else [dict(prompt_token_ids=prompt) for prompt in warmup_prompts]
+        llm.generate(warm, SamplingParams(**sampling_kwargs(protocol, protocol["warmup"]["max_tokens"], supplement)),
+                     use_tqdm=False)
+    # The engine sends a step's outputs before its post-step work, and this process cannot synchronize the engine's GPU:
+    # v2.7 lets the warm-up's last milliseconds finish before the clock starts
+    time.sleep(protocol["external"]["vllm"].get("settle_seconds", 0))
+    params = SamplingParams(**sampling_kwargs(protocol, max_tokens, supplement))
     runs = []
     for repeat in range(repeats):
-        before = counter_totals(llm.get_metrics())
+        metrics = llm.get_metrics()
+        before, histograms_before = counter_totals(metrics), histogram_totals(metrics)
         start = time.perf_counter()
-        outputs = llm.generate(requests, SamplingParams(**sampling_kwargs(protocol, max_tokens, supplement)), use_tqdm=False)
+        outputs = llm.generate(requests, params, use_tqdm=False)
         seconds = time.perf_counter() - start
-        after = counter_totals(llm.get_metrics())
+        memory_used = gpu_memory_used_mib()
+        metrics = llm.get_metrics()
+        after, histograms_after = counter_totals(metrics), histogram_totals(metrics)
         delta = {name: after[name] - before.get(name, 0) for name in after}
+        histograms = {name: dict(count=count - histograms_before.get(name, (0, 0.0))[0],
+                                 sum=total - histograms_before.get(name, (0, 0.0))[1])
+                      for name, (count, total) in histograms_after.items()}
         spec = {name: delta.get(f"vllm:spec_decode_{name}", 0) for name in SPEC_COUNTERS}
         tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+        records = [dict(prompt_len=len(request["prompt_token_ids"]), cached_tokens=output.num_cached_tokens,
+                        token_ids=list(output.outputs[0].token_ids), finish_reason=output.outputs[0].finish_reason)
+                   for request, output in zip(requests, outputs)]
         runs.append(dict(repeat=repeat, requests=len(requests), seconds=seconds, output_tokens=tokens,
-                         tokens_per_second=tokens / seconds, preemptions=delta.get("vllm:num_preemptions", 0),
+                         tokens_per_second=tokens / seconds, preemptions=delta.get("vllm:num_preemptions"),
                          tokens_per_round=1 + spec["num_accepted_tokens"] / spec["num_drafts"] if spec["num_drafts"] else None,
-                         **spec))
-    return dict(line=line, concurrency=concurrency, runner=LINES[line].runner,
+                         gpu_memory_used_mib=memory_used, counters=delta, histograms=histograms,
+                         request_records=records, **spec))
+    packages, packages_sha256 = installed_packages()
+    return dict(line=line, concurrency=concurrency, runner=LINES[line].runner, prefix_cache=prefix_cache,
                 supplement=supplement, sampling_kwargs=sampling_kwargs(protocol, max_tokens, supplement), engine=kwargs,
+                engine_cache=engine_cache(llm),
                 env={name: os.environ[name] for name in ("VLLM_USE_V2_MODEL_RUNNER",
                                                          "VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN")},
                 vllm=vllm.__version__, torch=torch.__version__, gpu=torch.cuda.get_device_name(0),
-                node=os.uname().nodename, source_id=os.environ.get("SOURCE_ID"), runs=runs)
+                node=os.uname().nodename, source_id=os.environ.get("SOURCE_ID"),
+                manifest={**vllm_manifest(commit), "node": state_start["node"], "packages_sha256": packages_sha256},
+                gpu_state_start=state_start, gpu_state_end=gpu_state(), runs=runs)
 
 
 def child(out: Path, args: list[str]) -> bool:
@@ -198,15 +290,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup", action="store_true")
     parser.add_argument("--supplement", action="store_true", help="sample with the protocol's supplement settings")
     parser.add_argument("--seed", type=int, help="the engine's seed (run); default the protocol's external seed")
+    parser.add_argument("--panel-name", help="a panel of the protocol, in place of --panel (run): its take rule and its "
+                                             "own warm-up panel, as bench_spec.py")
+    parser.add_argument("--prefix-cache", action="store_true", help="turn vLLM's prefix caching on (run)")
+    parser.add_argument("--commit", help="the source tree's short hash, recorded with the result (run)")
+    parser.add_argument("--group-repeat", type=int, default=1, help="2 for a group's second pass, the timing repeat (run)")
     args = parser.parse_args(argv)
-    protocol = json.loads(args.protocol.read_text())
+    protocol_bytes = args.protocol.read_bytes()
+    protocol = json.loads(protocol_bytes)
     common = ["--protocol", str(args.protocol), "--panel", str(args.panel), "--models-root", args.models_root]
 
     if args.command == "run":
-        prompts = panel_prompts(json.loads(args.panel.read_text()), args.concurrency)[:args.prompts]
+        warmup_prompts, panel_record = None, {}
+        if args.panel_name is None:
+            prompts = panel_prompts(json.loads(args.panel.read_text()), args.concurrency)[:args.prompts]
+        else:
+            prompts, warmup_prompts = protocol_panel_prompts(protocol, args.panel_name, args.concurrency, args.prefix_cache)
+            prompts = prompts[:args.prompts]
+            spec = protocol["panels"][args.panel_name]
+            warmup_file = protocol["panels"][spec["warmup"]]["file"] if "warmup" in spec else None
+            panel_record = dict(panel=args.panel_name,
+                                panel_sha256=hashlib.sha256((ROOT / spec["file"]).read_bytes()).hexdigest(),
+                                warmup_panel_sha256=(hashlib.sha256((ROOT / warmup_file).read_bytes()).hexdigest()
+                                                     if warmup_file else None))
         result = run_line(args.line, args.concurrency, args.repeats, prompts, protocol, args.models_root,
-                          args.max_tokens, args.warmup, args.supplement, args.seed)
-        args.out.write_text(json.dumps(result, indent=2) + "\n")
+                          args.max_tokens, args.warmup, args.supplement, args.seed, warmup_prompts, args.prefix_cache,
+                          args.commit)
+        result.update(panel_record, protocol_sha256=hashlib.sha256(protocol_bytes).hexdigest(), commit=args.commit,
+                      group_repeat=args.group_repeat)
+        args.out.write_text(json.dumps(result) + "\n")    # compact: a run now carries every request's tokens
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
     if args.command == "probe":
