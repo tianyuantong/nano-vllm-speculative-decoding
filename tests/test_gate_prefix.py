@@ -119,3 +119,32 @@ def test_the_five_arms_run_and_every_hit_is_as_designed(drafting):
     if drafting:
         assert draft.context_reads > 0 and not draft.bad_reads, draft.bad_reads[:3]
     assert not llm.scheduler.running and not llm.scheduler.waiting
+
+
+class FakeTimedEvent:
+    clock = 0.0
+
+    def __init__(self):
+        FakeTimedEvent.clock += 1.0
+        self.at = FakeTimedEvent.clock
+
+    def elapsed_time(self, other):
+        return other.at - self.at
+
+
+@pytest.mark.parametrize("drafting", [True, False])
+def test_the_shared_block_bench_runs_both_layouts(drafting, monkeypatch):
+    import shared_kv_bench
+    llm, _ = make_llm(drafting)
+    if drafting:
+        monkeypatch.setattr(llm.speculative.drafter, "_forward_graph", llm.speculative.drafter._forward_eager)
+    monkeypatch.setattr(shared_kv_bench, "event", FakeTimedEvent)
+    monkeypatch.setattr(shared_kv_bench.torch.cuda, "synchronize", lambda: None)
+    prompts = [entry["prompt_token_ids"] for entry in panel()[:3]]
+    donor = [right(p) for p in range(SHARED)] + [14, 13, 12, 11, 10]
+    spec = {"warmup": 1, "iters": 3}
+    private = shared_kv_bench.measure(llm, prompts, donor, "private", spec)
+    shared = shared_kv_bench.measure(llm, prompts, donor, "shared", spec)
+    assert private["hits"] == [0] and shared["hits"] == [SHARED]
+    assert set(private["median_ms"]) == ({"propose", "verify", "ctx_store"} if drafting else {"decode"})
+    assert not llm.scheduler.running and not llm.scheduler.waiting
