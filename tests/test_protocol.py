@@ -16,7 +16,7 @@ TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1
 TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
 PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
            "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.4.json": "protocol-v2.3.json",
-           "protocol-v2.5.json": "protocol-v2.4.json"}
+           "protocol-v2.5.json": "protocol-v2.4.json", "protocol-v2.6.json": "protocol-v2.5.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -187,3 +187,19 @@ def test_v2_5_shared_prefix_panels_fill_whole_blocks_and_fit():
     assert sorted(line for pair in V25["main"]["pairs"] for line in pair) == sorted(V25["main"]["lines"])
     assert all(V25["lines"][on].get("prefix_cache") and not V25["lines"][off].get("prefix_cache")
                for off, on in V25["main"]["pairs"])
+
+
+# ---------------------------------------------------------------- v2.6: v2.5 with the author's revision of G_prefix
+V26 = json.loads((BENCHMARKS / "protocol-v2.6.json").read_text())
+
+
+def test_v2_6_is_v2_5_but_for_the_prefix_gate_rule():
+    keep = set(V25) - {"version", "derived_from", "changes_from_v2_4", "gates"}
+    assert set(V26) == keep | {"version", "derived_from", "changes_from_v2_5", "gates"}
+    assert all(V26[key] == V25[key] for key in keep)
+    assert {name: gate for name, gate in V26["gates"].items() if name != "G_prefix"} == \
+        {name: gate for name, gate in V25["gates"].items() if name != "G_prefix"}
+    new, old = V26["gates"]["G_prefix"], V25["gates"]["G_prefix"]
+    assert {key for key in set(new) | set(old) if new.get(key) != old.get(key)} == {"argmax_kinds", "revised", "rule",
+                                                                                     "verdict_by"}
+    assert new["argmax_kinds"] == ["target"] and V26["frozen"] is True

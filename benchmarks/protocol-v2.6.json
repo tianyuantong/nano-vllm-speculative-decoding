@@ -1,0 +1,544 @@
+{
+ "version": "2.6",
+ "frozen": true,
+ "derived_from": {
+  "file": "benchmarks/protocol-v2.5.json",
+  "sha256": "ff8413c09fb386ff67c71d92664ceaf31dd6c0bc05de47e6840b5ce523ed3976"
+ },
+ "changes_from_v2_5": [
+  "gates.G_prefix: the argmax check covers the target's logits only; the draft's and the confidence logits are judged by the magnitude bound alone. Decided by the author on 2026-11-08 after v2.5's gate job, whose G_prefix failed on that check alone (docs/audit/2026-11-08-M6-闸门诊断.md); v2.5's verdict stands as failed, the gate runs again under this protocol. Everything else is v2.5's"
+ ],
+ "gpu": {
+  "runtime": "colab new --gpu G4",
+  "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "power_limit_w": 600
+ },
+ "models": {
+  "target": "Qwen3-8B",
+  "dtype": "bfloat16",
+  "drafts": {
+   "model_0p6b": "Qwen3-0.6B",
+   "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
+   "dspark": "dspark_qwen3_8b_block7-03326e504381"
+  }
+ },
+ "sampling": {
+  "temperature": 0.7,
+  "top_k": 20,
+  "top_p": 0.8,
+  "max_tokens": 512,
+  "ignore_eos": false
+ },
+ "trees": {
+  "main": {
+   "branch": "exp/m6-prefix-cache",
+   "rule": "a clean clone of one commit from a git bundle of the local branch, which stays off the public repository; every line's --commit"
+  }
+ },
+ "lines": {
+  "k0": {
+   "tree": "main",
+   "drafter": null,
+   "k": 0,
+   "k0_line": "k0"
+  },
+  "k0_pc": {
+   "tree": "main",
+   "drafter": null,
+   "k": 0,
+   "k0_line": "k0_pc",
+   "prefix_cache": true
+  },
+  "dflash_k7": {
+   "tree": "main",
+   "drafter": "dflash",
+   "k": 7,
+   "k0_line": "k0"
+  },
+  "dflash_k7_pc": {
+   "tree": "main",
+   "drafter": "dflash",
+   "k": 7,
+   "k0_line": "k0_pc",
+   "prefix_cache": true
+  },
+  "dspark_k7": {
+   "tree": "main",
+   "drafter": "dspark",
+   "k": 7,
+   "k0_line": "k0"
+  },
+  "dspark_k7_pc": {
+   "tree": "main",
+   "drafter": "dspark",
+   "k": 7,
+   "k0_line": "k0_pc",
+   "prefix_cache": true
+  },
+  "dspark_var": {
+   "tree": "main",
+   "drafter": "dspark",
+   "k": 7,
+   "variable_length": true,
+   "k0_line": "k0"
+  },
+  "dspark_var_pc": {
+   "tree": "main",
+   "drafter": "dspark",
+   "k": 7,
+   "variable_length": true,
+   "k0_line": "k0_pc",
+   "prefix_cache": true
+  }
+ },
+ "max_model_len": 4096,
+ "max_num_batched_tokens": 16384,
+ "concurrency": [
+  1,
+  2,
+  4,
+  8,
+  16,
+  32,
+  64
+ ],
+ "seeds": {
+  "dev": [
+   17011,
+   110017,
+   130031,
+   170041,
+   210011
+  ],
+  "confirm": [
+   17011,
+   110017,
+   130031
+  ],
+  "gate_g5": [
+   17011,
+   110017
+  ],
+  "external": [
+   17011
+  ]
+ },
+ "order": "all lines of one (panel, C, seed) run back to back in one job, by pairs: main.pairs rotated so the i-th seed (0-based) of the dev seeds starts with the (i mod 4)-th pair; the pair in place j (0-based) runs its line with the cache off first when j is even, on first when it is odd, so each pair alternates over the seeds; the second pass of a timing-noise group runs every pair the other way round",
+ "panels": {
+  "D48": {
+   "file": "benchmarks/inputs/panel-48.json",
+   "sha256": "071befa6898b31870770b653656e9e54465530d4d553f79b84a1aa8ec4958235",
+   "take": "full_cycles"
+  },
+  "K128": {
+   "file": "benchmarks/inputs/panel-K128.json",
+   "sha256": "44f6fb6b4922c3d85feb7f8e9eb6610c50a2865e106777bb1440d6a5cca70140",
+   "take": "prefix",
+   "salt": "bench-v2-confirm:",
+   "quotas": {
+    "code_completion": 40,
+    "NIAH": 43,
+    "open_books": 37,
+    "creative_writing": 8
+   },
+   "max_formatted_tokens": 2816
+  },
+  "K128b": {
+   "file": "benchmarks/inputs/panel-K128b.json",
+   "sha256": "cfd53af26e0cdcc2e5aee8680440ff0d35d78277d66795107c163158628ba710",
+   "take": "prefix",
+   "salt": "bench-v2.1-confirm:",
+   "quotas": {
+    "code_completion": 40,
+    "NIAH": 43,
+    "open_books": 37,
+    "creative_writing": 8
+   },
+   "max_formatted_tokens": 2816,
+   "interleave": "proportional"
+  },
+  "S0": {
+   "file": "benchmarks/inputs/panel-S0.json",
+   "sha256": "94babc90f9e81183f57f1419ef4813b7d7aa0c8db3c22f3594e9824c3b60a314",
+   "take": "prefix",
+   "warmup": "S0w",
+   "shared_tokens": 0
+  },
+  "S0w": {
+   "file": "benchmarks/inputs/panel-S0w.json",
+   "sha256": "248fec2d7f0055de75d197569ca402abedcc76dba6afffa4857861613ce97e29",
+   "role": "warm-up only",
+   "shared_tokens": 0
+  },
+  "S512": {
+   "file": "benchmarks/inputs/panel-S512.json",
+   "sha256": "bf1c70a2bc1216ef3f63cb840613c4a65e69d9319b08c2426b2b2e0797d9694d",
+   "take": "prefix",
+   "warmup": "S512w",
+   "shared_tokens": 512
+  },
+  "S512w": {
+   "file": "benchmarks/inputs/panel-S512w.json",
+   "sha256": "ce4ac0fd63c4734ac1697d344e0477560329f4ac524531c0d7be55f7abedc5b9",
+   "role": "warm-up only",
+   "shared_tokens": 512
+  },
+  "S1024": {
+   "file": "benchmarks/inputs/panel-S1024.json",
+   "sha256": "1b3666f631be49bf5652eeca773aaf365028945093e104272175c0856d80c016",
+   "take": "prefix",
+   "warmup": "S1024w",
+   "shared_tokens": 1024
+  },
+  "S1024w": {
+   "file": "benchmarks/inputs/panel-S1024w.json",
+   "sha256": "bde3dc80bce1612e3b8d0207f51263d908629295f09517736738e7902a70880e",
+   "role": "warm-up only",
+   "shared_tokens": 1024
+  },
+  "S2048": {
+   "file": "benchmarks/inputs/panel-S2048.json",
+   "sha256": "042b887c08b9b4098d1587406dd47fb73b75ee5c86496a5935156bd5dbe5e163",
+   "take": "prefix",
+   "warmup": "S2048w",
+   "shared_tokens": 2048
+  },
+  "S2048w": {
+   "file": "benchmarks/inputs/panel-S2048w.json",
+   "sha256": "2310deffac34b78bddaccedce18c7a9abff14c278345df59e9a88bbb3fffe710",
+   "role": "warm-up only",
+   "shared_tokens": 2048
+  }
+ },
+ "kv_budget": "C * ceil((max_prompt_len + max_tokens + 7) / 256) target blocks for every line, max_prompt_len over the measured panel and its warm-up panel; a block draft's cache mirrors the target's blocks",
+ "warmup": {
+  "requests": "first C of the panel, cycled; for a panel that names a warm-up panel, that panel's first C",
+  "max_tokens": 64,
+  "seed": "after a warm-up panel of its own, the engine's generator is seeded again with the run's seed, so the measurement draws as a fresh engine would whatever the warm-up drew"
+ },
+ "metrics": {
+  "primary": "Q_steady",
+  "secondary": "Q_full"
+ },
+ "timing_noise": {
+  "lines": "every line of main.lines",
+  "concurrency": [
+   8,
+   32,
+   64
+  ],
+  "seed": 17011,
+  "repeats": 2,
+  "runs_in": "every main job on its own panel: at the seed and each concurrency the whole group runs a second time right after it; the two runs of a line must be token-identical. N_t is the largest |a/b - 1| of Q_steady over the job's 24 pairs, N_rho the largest |rho_1/rho_2 - 1| over its 9 (C, drafting line), both from valid runs only; without all 24 and all 9, the job's gain and rho verdicts are not given. The 9 share their k0 runs and one seed: an engineering threshold, not independent repeats or a bound"
+ },
+ "decision": {
+  "faster": "all seeds R > 1 + 2*N_t",
+  "a_beats_b": "all paired gains same sign and abs(median) > 2*N_t",
+  "report": "median (min-max), two decimals; range only if max-min > 0.05. The README's headline, total table and figures are the exception: only the median of the 3 seeds, marked as such; the ranges go in RESULTS",
+  "crossover": "smallest C with median R < 1",
+  "revised": "2026-11-02: the README rule of report decided by the author; the verdicts are unchanged"
+ },
+ "invalid_if": [
+  "gpu name mismatch",
+  "preemption > 0, the scheduler's direct count",
+  "non-finite value or assertion failure",
+  "a step other than a prefill > 3 x the median of its kind",
+  "lines of one (C, seed) split across jobs: one job is one directory, protocol and panel, each line at the commit of its tree",
+  "timing-noise repeats differ in tokens"
+ ],
+ "verify_schedule": {
+  "file": "benchmarks/inputs/verify-schedule-g4.json",
+  "sha256": "10017b48c9ea36dca41eb6482491d9fd829e62cdcafb53d72f87e70834d0c1c6",
+  "made_by": "job A on a G4 runtime at 5bf4cbc: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 5.15 x its median). The first rerun ran on kernels compiled under TORCH_LOGS=recompiles, which changes the kernels and the outputs, so it is not job A's command and does not count; a clean rerun passed with byte-identical confidences; reviewed by the author before this protocol is frozen",
+  "cost_curve": {
+   "line": "dspark_var",
+   "batch": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64
+   ],
+   "query_len": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+   ],
+   "context_len": 2048,
+   "warmup": 25,
+   "iters": 100,
+   "statistic": "median",
+   "report": [
+    "median",
+    "p95"
+   ],
+   "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
+   "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"
+  },
+  "calibration": {
+   "line": "dspark_k7",
+   "panel": "D48",
+   "concurrency": 64,
+   "seeds": "dev",
+   "record": "every round, each row's 7 confidence logits and its accepted count; all 8 positions are verified, so 'the first i drafts all accepted' is observed for every i",
+   "method": "STS: for i = 1..7 in turn, T_i on the grid minimizing the binary cross-entropy of the survival prod_{j<=i} sigmoid(z_j / T_j) against 'the first i drafts all accepted', T_1..T_{i-1} fixed",
+   "grid": {
+    "low": 0.1,
+    "high": 10.0,
+    "points": 401,
+    "spacing": "geometric"
+   },
+   "report_only": [
+    "ECE over 10 equal-width bins, per position and pooled, raw and after STS",
+    "AUROC of the survival pooled over positions, raw and after STS"
+   ]
+  },
+  "replay": {
+   "concurrency": 64,
+   "rounds": "the calibration runs' rounds of C rows",
+   "rule": "a row with n of its 7 drafts accepted accepts min(n, L - 1) when it verifies L positions; a round's time is the cost table's at its token count, the fixed-length round's at 8 per row",
+   "stop_if_gain_below": 0.0252,
+   "source": "2 x N_t, N_t = 1.26% in the cluster's job 236550, kept until the G4's own is measured"
+  }
+ },
+ "dev": {
+  "panel": "D48",
+  "lines": [
+   "k0",
+   "dspark_k7",
+   "dspark_var"
+  ]
+ },
+ "confirm": {
+  "panel": "K128b",
+  "concurrency": [
+   1,
+   8,
+   32,
+   64
+  ],
+  "versions": [
+   "k0",
+   "dspark_k7",
+   "dspark_var"
+  ],
+  "runs_in": "nowhere: M6 runs no confirmation set; the identity job only reads this concurrency"
+ },
+ "gates": {
+  "equivalence": {
+   "protocol": "benchmarks/protocol-v2.1.json",
+   "lines": [
+    "dspark_k7",
+    "dflash_k7"
+   ],
+   "panel": "K128b",
+   "concurrency": [
+    1,
+    8
+   ],
+   "seed": 17011,
+   "reference": "repeat 1 of the cluster reproduction, job 236550",
+   "rule": "token-identical"
+  },
+  "G_prefix": {
+   "lines": [
+    "k0",
+    "dflash_k7",
+    "dspark_k7",
+    "dspark_var"
+   ],
+   "panels": [
+    "S1024",
+    "S2048"
+   ],
+   "per_category": 2,
+   "rounds": 4,
+   "floor_batch": 3,
+   "floor_multiple": 2,
+   "margin": 0.5,
+   "sampling": "greedy",
+   "prompts": "the first per_category entries of each category, with the first entry's private part alone, which must hit nothing, second in the list so the first floor_batch of them mix hits and the miss; then the next two entries of the panel, cut to a length of 0 and of 254 mod 256",
+   "donor": "the first prompt of the panel's warm-up panel, prefilled and run 2 rounds (k0: decode steps) on a hash table that holds nothing else, run one more round once half the arm's prompts hit, and kept until the arm ends",
+   "arms": {
+    "reference": "hashing off: each prompt prefilled alone in one step, then `rounds` of the line's own greedy rounds (k0: decode steps), each the draft's block forward, the target's verification, after_verify and the commit",
+    "floor": "hashing off: floor_batch prompts at a time, prefilled and run as one batch (a batch short of a graph size pads)",
+    "chunked": "hashing off: each prompt alone, prefilled in two steps split at its shared tokens (its first block when it has none), the second through the paged path over its own first chunk",
+    "hit": "hashing on, with the donor: each prompt alone, which must hit exactly its shared tokens",
+    "hit_batch": "hashing on, with a fresh donor: floor_batch prompts at a time, the private part alone among them"
+   },
+   "forced": "every arm but the reference takes the reference's first token, drafts, verified lengths and commits; a variable-length line verifies (prompt index + round) mod (k + 1) + 1 positions per round in every arm",
+   "compared": {
+    "target": "the prefill's last-position logits, then every verification's (k0: decode step's) logits",
+    "draft": "every round's block-forward logits, and for DSpark the logits it samples from: the Markov bias of the forced previous token added in the model's dtype, as the engine adds it",
+    "confidence": "a variable-length line's confidence logits every round; no argmax over them"
+   },
+   "rule": "per line and panel and for each compared kind: the largest |arm - reference| of chunked, hit and hit_batch at most floor_multiple x the largest |floor - reference|; for the kinds of argmax_kinds, the argmax agrees wherever the reference's top-2 margin exceeds margin; and every hit as designed, and the writes as gates.G_prefix.writes has them. hit against chunked, which differ only in whose K/V the shared blocks hold, is reported",
+   "writes": "through every hit arm: the target's and the draft's K/V of the shared blocks bitwise as the donor left them; and after every step of hit_batch, the padding rows' slots in the graphs' slot buffers (verification, draft block, k0's decode) are -1, so they write nothing",
+   "scope": "a forced trajectory: the same forwards on the same tokens, not the equivalence of the sampling flow; chunked and hit differ in who computed the shared K/V and in what forward shape, not in K/V alone",
+   "argmax_kinds": [
+    "target"
+   ],
+   "revised": "2026-11-08, the author's decision after v2.5's gate job: the draft's logits flipped their argmax where the reference's top-2 margin was 0.62-1.25, in the chunked arm, which reuses no K/V, and in the floor arm, which changes only the batch, below the draft's own noise floor of 1.36-1.72; a margin of 0.5 decides nothing there. The draft's logits only change q, which speculative sampling corrects to the target's distribution, so they bear on speed; a wrong reuse of K/V moves them far past the floor, which the magnitude bound judges",
+   "verdict_by": "outputs/colab/m6-gate-check.py reads the tool's report under this rule; tools/gate_prefix.py, frozen with v2.5, still sets its own passed flag and exit by v2.5's rule, which is not this protocol's verdict"
+  }
+ },
+ "identity": {
+  "rule": "the tree at the job's commit against the reference's tokens, request by request, and the environment against job C's manifest: outputs/colab/m4-preflight.sh, m4-preflight-check.py. dev.lines on D48 at confirm.concurrency, seed 17011, against job C's repeat 1; gates.equivalence's dspark_k7 on K128b under protocol v2.1, against the cluster reproduction's repeat 1",
+  "why": "with the cache off, the lifted check, the hashing of prefill blocks only, the recorded hits and the warm-up panel must not change a token",
+  "also": "gates.equivalence's dflash_k7 at its concurrency on K128b under protocol v2.1, against the cluster reproduction's repeat 1",
+  "scope": "the panels, warm-up and generator of v2.4 with the cache off"
+ },
+ "prefix": {
+  "salt": "bench-v2.5-prefix:",
+  "exclude": [
+   "D48",
+   "K128",
+   "K128b"
+  ],
+  "quotas": {
+   "code_completion": 100,
+   "NIAH": 108,
+   "open_books": 92,
+   "creative_writing": 20
+  },
+  "measured": 256,
+  "max_formatted_tokens": 1529,
+  "tag": "[Request {id:.8}]",
+  "lengths": [
+   0,
+   512,
+   1024,
+   2048
+  ],
+  "document": {
+   "source": "throughput_8k",
+   "question_id": "33edb8cc083a53bf86474add64e57d8e",
+   "after": "The content of the book is given below.\n\n"
+  },
+  "system_intro": "You are a helpful assistant. Every conversation in this session shares the reference document below; it may be unrelated to the user's request.\n\n",
+  "dataset": {
+   "name": "nvidia/SPEED-Bench",
+   "throughput_1k": "the K128 panels' pool",
+   "throughput_8k": "the revision of long_context in v2.4: fa4e669bee2a4393c56aa8ed05a7c667897f9590"
+  },
+  "rule": "tools/build_panel_prefix.py: the private parts picked as K128b's are, the first `measured` measured and the rest warm-up only; panel S<P> is a system turn of exactly P tokens in front of each private part, so its shared part fills P / 256 whole blocks; P = 0 is the private parts alone"
+ },
+ "main": {
+  "panels": [
+   "S0",
+   "S2048",
+   "S1024",
+   "S512"
+  ],
+  "lines": [
+   "k0",
+   "k0_pc",
+   "dflash_k7",
+   "dflash_k7_pc",
+   "dspark_k7",
+   "dspark_k7_pc",
+   "dspark_var",
+   "dspark_var_pc"
+  ],
+  "concurrency": [
+   8,
+   32,
+   64
+  ],
+  "seeds": "dev",
+  "jobs": "one job per panel, in listed order; a job's report and its hits check before the next starts",
+  "definitions": {
+   "window": "the steady window of bench-v2: F the prefill steps' time in it, D the time of its steps that decode or verify C rows, I the rest of its time (the gaps between steps and the steps with fewer rows), O the tokens delivered in it by the requests' deliveries, N_pf the requests whose first delivery is on a prefill step in it, N_r its steps of C rows; T the window's time",
+   "G": "Q_steady(line_pc) / Q_steady(line) - 1, the same seed and C",
+   "R": "Q_steady(line) / Q_steady(k0_line of the line)",
+   "rho": "R(line_pc) / R(line)",
+   "p": "F / T, of the run with the cache off",
+   "h": "1 - t_pf(on) / t_pf(off), t_pf = F / N_pf",
+   "d": "1 - t_r(on) / t_r(off), t_r = D / N_r",
+   "kappa": "kappa_pf = (N_pf / O)(on) / (N_pf / O)(off), kappa_r = (N_r / O)(on) / (N_r / O)(off)",
+   "h_tok": "over the N_pf requests of the run with the cache on: the sum of cached_tokens over the sum of prompt_len",
+   "rho_hat_tok": "(1 - p_k0 h_tok_off,k0) / (1 - p h_tok_off): the direction note's formula on the runs with the cache off alone, a prediction conditional on them",
+   "rho_hat_0": "(1 - p_k0 h_k0) / (1 - p h): the measured prefill saving alone, an accounting",
+   "rho_hat_1": "(1 - p_k0 h_k0 - s_k0 d_k0) / (1 - p h - s d): the measured prefill and round, an accounting",
+   "premise": "rho_hat_0 and rho_hat_1 are the identity with kappa_pf = kappa_r = 1 and i unchanged; the report lists kappa and f, r, i so the gap between them and rho can be read",
+   "s": "D / T, of the run with the cache off",
+   "G identity": "1 + G = 1 / [p kappa_pf (1 - h) + s kappa_r (1 - d) + i(on) / tau(off)], tau = T / O; exact, the same as (f + r + i)(off) / (f + r + i)(on)",
+   "f, r, i": "F / O, D / O, I / O",
+   "h_tok_off": "shared_tokens x N_pf / (the sum of prompt_len of those N_pf requests), over the run with the cache off: the hit rate the panel's design gives the requests that run prefills inside its window"
+  },
+  "verdicts": {
+   "null": "on S0 every (line, C, seed) gives the same tokens with the cache on and off, request by request. Otherwise stop_if: the job stops at once, nothing is rerun, and no gain or rho verdict is given",
+   "hits": "with the cache on every measured request of a run has cached_tokens equal to the panel's shared_tokens, with it off every one 0; and the run's prefill_tokens over its measured steps equal its requests' prompt_len - cached_tokens. Otherwise stop_if, as null",
+   "gain": "per (panel, C, line) with all 5 seeds and the job's noise complete: faster when every seed's 1 + G > 1 + 2 * N_t, slower when every seed's 1 + G < 1 - 2 * N_t, else undecided",
+   "rho": "per (panel, C, drafting line) with all 5 seeds and the job's noise complete: decision.a_beats_b on the seeds' rho - 1 with N_rho in place of N_t",
+   "complete": "a (panel, C, line) without all 5 seeds is reported, not judged",
+   "formula": "report only: per (panel, C, drafting line) the seeds' rho - rho_hat_tok, rho - rho_hat_0 and rho - rho_hat_1, median (min-max), and kappa",
+   "report_only": [
+    "f, r, i, p, h, d, h_tok per line, and d of each round phase (propose, verify, ctx_store, the rest)",
+    "the mean context of the window's steps of C rows",
+    "TTFT p50 and p99 over every request, and over the requests submitted inside both windows of a pair, paired by request, with their counts",
+    "Q_full",
+    "tokens per round and the median output length, on and off",
+    "the share of requests whose tokens are the same on and off",
+    "shared_kv"
+   ]
+  },
+  "pairs": [
+   [
+    "k0",
+    "k0_pc"
+   ],
+   [
+    "dflash_k7",
+    "dflash_k7_pc"
+   ],
+   [
+    "dspark_k7",
+    "dspark_k7_pc"
+   ],
+   [
+    "dspark_var",
+    "dspark_var_pc"
+   ]
+  ]
+ },
+ "pilot": {
+  "report": "never: the pilot only sizes the main jobs",
+  "panel": "S2048",
+  "lines": "every line of main.lines",
+  "concurrency": [
+   64
+  ],
+  "seed": 17011
+ },
+ "stop_if": [
+  "identity finds a difference: no performance numbers from this tree; find the cause",
+  "G_prefix fails",
+  "main.verdicts.null or main.verdicts.hits fails: the job stops at once without a rerun",
+  "an invalid run: its whole (panel, C, seed) rerun once, per invalid_if; still invalid: stop"
+ ],
+ "shared_kv": {
+  "lines": [
+   "k0",
+   "dspark_k7"
+  ],
+  "panel": "S2048",
+  "concurrency": [
+   8,
+   32,
+   64
+  ],
+  "steps": 20,
+  "warmup": 5,
+  "repeats": 2,
+  "rule": "tools/shared_kv_bench.py: the first C prompts of the panel prefilled once with hashing on, after the warm-up panel's first prompt, so every row's shared blocks are one physical copy; then every row's shared blocks copied, target and draft K/V, into blocks of its own. The two layouts are the same state but for the block tables: the same values, tokens, positions and graphs. Each layout, alternating over the repeats, runs the same step at the same position warmup + steps times without committing: k0's decode forward; a drafting line's draft block forward and its verification of k fixed drafts. Reported only: per C and part the median of the timed steps, and d = 1 - shared / private. The draft block forward is not the whole propose: no logits, Markov or sampling"
+ },
+ "compile_caches": "every job archives /content/cache into its OUT when it ends, with the archive's sha256. A new VM restores job D's archive; one that replaces a lost VM restores the newest archive an M6 job left, copied to outputs/colab/ and named through PREP_CACHES and PREP_CACHES_SHA256, and the job records which. identity checks the old panels with the cache off, not the shapes the cache adds; within one job every comparison runs on one VM"
+}
