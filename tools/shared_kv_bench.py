@@ -13,6 +13,7 @@ and part the median of the timed steps per repeat, and d = 1 - shared / private 
   python tools/shared_kv_bench.py --line LINE --protocol FILE --models-root DIR --commit C --out FILE
 """
 import argparse
+import hashlib
 import json
 import statistics
 import sys
@@ -23,7 +24,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
-from bench_spec import engine_kwargs  # noqa: E402
+from bench_spec import assert_gpu, engine_kwargs, gpu_state, installed_packages, manifest  # noqa: E402
 from gate_prefix import force_first  # noqa: E402
 from nanovllm import LLM, SamplingParams  # noqa: E402
 from nanovllm.utils.context import reset_context  # noqa: E402
@@ -129,7 +130,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    protocol = json.loads(args.protocol.read_text())
+    protocol_text = args.protocol.read_text()
+    protocol = json.loads(protocol_text)
+    state_start = gpu_state()
+    assert_gpu(state_start, protocol["gpu"]["name"])
     spec = protocol["shared_kv"]
     line = protocol["lines"][args.line]
     panel_spec = protocol["panels"][spec["panel"]]
@@ -161,7 +165,15 @@ def main(argv: list[str] | None = None) -> int:
                       "d": {part: 1 - median["shared"][part] / median["private"][part] for part in parts}})
         print(json.dumps({"C": concurrency, "d": cells[-1]["d"], "median_ms": median}))
     llm.exit()
-    report = {"tool": "shared-kv-bench", "engine_commit": args.commit, "line": args.line, "panel": spec["panel"],
+    _, packages_sha256 = installed_packages()
+    files = [ROOT / panel_spec["file"], ROOT / protocol["panels"][panel_spec["warmup"]]["file"]]
+    report = {"tool": "shared-kv-bench", "protocol_sha256": hashlib.sha256(protocol_text.encode()).hexdigest(),
+              "manifest": {**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
+                           "panel_sha256": hashlib.sha256(files[0].read_bytes()).hexdigest(),
+                           "warmup_panel_sha256": hashlib.sha256(files[1].read_bytes()).hexdigest()},
+              "gpu_state_start": state_start, "gpu_state_end": gpu_state(), "line": args.line, "panel": spec["panel"],
+              "config": {key: kwargs.get(key) for key in ("max_model_len", "max_num_seqs", "kv_cache_memory_bytes",
+                                                          "draft_type", "num_speculative_tokens")},
               "cells": cells}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")

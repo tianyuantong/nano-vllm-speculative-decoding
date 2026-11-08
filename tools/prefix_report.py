@@ -19,7 +19,8 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_v2 import count_runs, final_runs, format_range, load_runs, timing_noise, verdict_a_beats_b  # noqa: E402
+from report_v2 import (count_runs, final_runs, format_range, load_runs, timing_noise, tokens_equal,  # noqa: E402
+                       verdict_a_beats_b)
 from summarize_bench import decode_rows, percentile, prefill_tokens, round_weighted_tokens, steady_window, ttft_ms  # noqa: E402
 
 
@@ -173,7 +174,14 @@ def analyse(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> d
             metrics[(concurrency, line, seed)] = run_metrics(result, summary)
             results[(concurrency, line, seed)] = result
     seeds = protocol["seeds"][main_spec["seeds"]]
-    table, null = {}, []
+    null = []
+    if shared == 0:    # main.verdicts.null reads every run, a timing-invalid one too
+        for (_, concurrency, line, seed, repeat), (_, result, _) in by_key.items():
+            twin = by_key.get((panel, concurrency, f"{line}_pc", seed, repeat))
+            if line in bases and twin is not None and not tokens_equal(result, twin[1]):
+                null.append(f"C={concurrency} {line} seed {seed} repeat {repeat}: "
+                            f"{tokens_equal_share(result, twin[1]):.4f} of the requests the same")
+    table = {}
     for concurrency in main_spec["concurrency"]:
         for line in bases:
             entries = []
@@ -189,8 +197,6 @@ def analyse(runs: list[tuple[str, dict, dict]], protocol: dict, panel: str) -> d
                 if line in drafting:
                     entry.update(rho_terms(k0_off, k0_on, off, on, shared))
                 entries.append(entry)
-                if shared == 0 and same < 1:
-                    null.append(f"C={concurrency} {line} seed {seed}: {same:.4f} of the requests the same")
             table[(concurrency, line)] = entries
     null_failures = null if shared == 0 else None
     stopped = bool(null_failures) or any(reason.startswith("hits:") for reasons in invalid.values() for reason in reasons)

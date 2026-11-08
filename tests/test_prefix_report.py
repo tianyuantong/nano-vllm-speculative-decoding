@@ -150,3 +150,16 @@ def test_without_every_repeat_no_verdict_is_given():
     assert not analysis["noise_complete"] and analysis["pairs"] == 3 and analysis["rho_pairs"] == 0
     text = markdown(analysis)
     assert "NOT GIVEN" in text and "faster" not in text and "undecided" not in text
+
+
+def test_the_null_reads_a_run_that_is_invalid_for_timing():
+    protocol = {**PROTOCOL, "panels": {"S1024": {"shared_tokens": 0}}}
+    results = [closed_loop(line, seed, tokens_per_round=3 if "dspark" in line else 1) for seed in (1, 2, 3)
+               for line in LINES]
+    on = results[1]                                            # k0_pc of seed 1
+    on["requests"][0]["token_ids"] = on["requests"][0]["token_ids"][:-1] + [2]
+    slow = next(step for step in on["steps"] if step["kind"] == "decode")
+    slow["duration_ms"] *= 10                                  # and a slow step makes the run invalid
+    analysis = analyse(runs_of(results), protocol, "S1024")
+    assert analysis["null_failures"] and analysis["stopped"]
+    assert "NOT GIVEN" in markdown(analysis)

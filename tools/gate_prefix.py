@@ -304,14 +304,16 @@ def gate_panel(llm, panel: list[dict], donor: list[int], shared_tokens: int, k: 
     arms["hit"], hit_kept = with_donor(llm, donor, shared_tokens, k, hit_arm)
     arms["hit_batch"], hit_batch_kept = with_donor(llm, donor, shared_tokens, k, hit_batch_arm)
     hashing_off = reference + arms["floor"] + arms["chunked"]
+    finite = all(bool(torch.isfinite(tensor).all()) for arm in [reference, *arms.values()] for ob in arm
+                 for key in ("target", "draft", "confidence") for tensor in ob[key])    # max() would skip a NaN
     result = {"prompts": [prompt["id"] for prompt in prompts], "shared_tokens": shared_tokens,
               "hits": {arm: [ob["hit_tokens"] for ob in arms[arm]] for arm in ("hit", "hit_batch")},
               "hits_as_designed": all(ob["hit_tokens"] == prompt["shared"] for arm in ("hit", "hit_batch")
                                       for ob, prompt in zip(arms[arm], prompts)),
               "hashing_off_hits": sum(ob["hit_tokens"] for ob in hashing_off),
               "shared_blocks_kept": {"hit": hit_kept, "hit_batch": hit_batch_kept},
-              "padding_writes": sum(ob["padding_writes"] for arm in arms.values() for ob in arm)}
-    passed = (result["hits_as_designed"] and result["hashing_off_hits"] == 0 and hit_kept and hit_batch_kept
+              "padding_writes": sum(ob["padding_writes"] for arm in arms.values() for ob in arm), "finite": finite}
+    passed = (finite and result["hits_as_designed"] and result["hashing_off_hits"] == 0 and hit_kept and hit_batch_kept
               and result["padding_writes"] == 0)
     for key in ("target", "draft", "confidence"):    # confidences are 7 binary logits: no argmax over them
         if not reference[0][key]:
