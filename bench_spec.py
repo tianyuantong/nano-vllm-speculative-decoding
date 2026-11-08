@@ -51,6 +51,7 @@ class RequestRecord(TypedDict):
     deliveries: list[list[int]]       # [[step, n_tokens], ...] in step order
     finish_step: int                  # the step that finished the request
     token_ids: list[int]
+    cached_tokens: int                # prompt tokens the prefix cache held when the request was admitted; 0 with it off
 
 
 class OpenLoopRequestRecord(RequestRecord):
@@ -78,6 +79,24 @@ def load_panel(path: Path, concurrency: int, take: str | int) -> list[PanelEntry
     return [panel[index % len(panel)] for index in range(count)]
 
 
+def refuse_cycling(line: dict, count: int, panel_size: int) -> None:
+    """A line with the prefix cache on must not see a prompt twice: a repeat would hit its own earlier copy."""
+    if line.get("prefix_cache") and count > panel_size:
+        raise ValueError(f"{count} requests from a panel of {panel_size}: with the prefix cache on the panel must not cycle")
+
+
+def warmup_entries(protocol: dict, panel_name: str, panel: list[PanelEntry], concurrency: int) -> list[PanelEntry]:
+    """The warm-up's C prompts: the first C of the panel, cycled, unless the panel names a warm-up panel of its own,
+    whose prompts the measurement never sees (protocol v2.5); then its first C, which must be there."""
+    spec = protocol["panels"][panel_name]
+    if "warmup" not in spec:
+        return [panel[index % len(panel)] for index in range(concurrency)]
+    entries = json.loads((ROOT / protocol["panels"][spec["warmup"]]["file"]).read_text())
+    if len(entries) < concurrency:
+        raise ValueError(f"the warm-up panel {spec['warmup']} has {len(entries)} prompts, C is {concurrency}")
+    return entries[:concurrency]
+
+
 def kv_budget_bytes(panel: list[PanelEntry], concurrency: int, max_tokens: int, k: int,
                     block_bytes: int, block_size: int = 256) -> int:
     """C × ⌈(longest prompt + max_tokens + k) / block_size⌉ blocks: with C requests in flight nothing is preempted."""
@@ -101,7 +120,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
     budget_k = max(spec["k"] for spec in protocol["lines"].values())
     target = f"{models_root}/{protocol['models']['target']}"
     kwargs = dict(max_model_len=protocol["max_model_len"], max_num_seqs=concurrency,
-                  max_num_batched_tokens=protocol["max_num_batched_tokens"], enable_prefix_cache=False,
+                  max_num_batched_tokens=protocol["max_num_batched_tokens"],
+                  enable_prefix_cache=bool(line.get("prefix_cache", False)),
                   kv_cache_memory_bytes=kv_budget_bytes(panel, concurrency, max_tokens, budget_k, kv_block_bytes(target)),
                   seed=seed, record_step_timings=True)
     draft = None
@@ -126,6 +146,7 @@ def record_deliveries(in_flight: list[list], step: int, *stamp: float) -> list[l
         if seq.is_finished:
             record["finish_step"] = step
             record["token_ids"] = seq.completion_token_ids
+            record["cached_tokens"] = seq.prefix_hit_tokens
     return [item for item in in_flight if not item[1].is_finished]
 
 
@@ -138,7 +159,7 @@ def run_closed_loop(llm, panel: list[PanelEntry], params, concurrency: int) -> C
         while len(in_flight) < concurrency and next_entry < len(panel):
             entry = panel[next_entry]
             record = RequestRecord(id=entry["id"], category=entry["category"], prompt_len=len(entry["prompt_token_ids"]),
-                                   submit_step=llm.num_steps, deliveries=[], finish_step=-1, token_ids=[])
+                                   submit_step=llm.num_steps, deliveries=[], finish_step=-1, token_ids=[], cached_tokens=0)
             in_flight.append([record, llm.add_request(entry["prompt_token_ids"], params), 0])
             records.append(record)
             next_entry += 1
@@ -166,8 +187,8 @@ def run_open_loop(llm, panel: list[PanelEntry], params, arrivals: list[float], d
     point does not count, and a request unfinished by then keeps finish_step -1 and the tokens it has, one never
     submitted included. llm only needs add_request / step / num_steps, so the tests drive a fake engine."""
     records = [OpenLoopRequestRecord(id=entry["id"], category=entry["category"], prompt_len=len(entry["prompt_token_ids"]),
-                                     submit_step=-1, deliveries=[], finish_step=-1, token_ids=[], arrival_seconds=arrival,
-                                     submit_seconds=-1.0)
+                                     submit_step=-1, deliveries=[], finish_step=-1, token_ids=[], cached_tokens=0,
+                                     arrival_seconds=arrival, submit_seconds=-1.0)
                for entry, arrival in zip(panel, arrivals)]
     in_flight = []
     next_entry = 0
@@ -193,6 +214,7 @@ def run_open_loop(llm, panel: list[PanelEntry], params, arrivals: list[float], d
         in_flight = record_deliveries(in_flight, step, delivered_at)
     for record, seq, _ in in_flight:
         record["token_ids"] = seq.completion_token_ids
+        record["cached_tokens"] = seq.prefix_hit_tokens
     return OpenLoopRecord(requests=records)
 
 
@@ -260,13 +282,15 @@ def sampling_kwargs(protocol: dict) -> dict:
 
 
 def warmed_up_engine(protocol: dict, line: dict, panel: list[PanelEntry], args: argparse.Namespace, **overrides):
-    """The line's engine after the protocol's warm-up, with its target and draft directories and LLM keyword arguments."""
+    """The line's engine after the protocol's warm-up, with its target and draft directories and LLM keyword arguments.
+    A warm-up panel of its own counts in the KV budget, so its prompts fit as the measured ones do."""
     from nanovllm import LLM, SamplingParams
 
-    target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
+    warmup = warmup_entries(protocol, args.panel, panel, args.concurrency)
+    budget_panel = panel if "warmup" not in protocol["panels"][args.panel] else panel + warmup
+    target, draft, kwargs = engine_kwargs(protocol, line, budget_panel, args.concurrency, args.seed, args.models_root)
     kwargs.update(overrides)
     llm = LLM(target, **kwargs)
-    warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
     run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **sampling_kwargs(protocol)),
                     args.concurrency)
     return llm, target, draft, kwargs
@@ -316,6 +340,7 @@ def closed_loop(args: argparse.Namespace) -> None:
     panel_path = ROOT / panel_spec["file"]
     panel = load_panel(panel_path, args.concurrency, panel_spec["take"])
     line = protocol["lines"][args.line]
+    refuse_cycling(line, len(panel), len(json.loads(panel_path.read_text())))
     overrides = {"record_confidences": True} if args.record_confidences else {}
     if args.max_model_len is not None:
         overrides["max_model_len"] = args.max_model_len
@@ -351,6 +376,7 @@ def open_loop(args: argparse.Namespace) -> None:
     entries = json.loads(panel_path.read_text())
     panel = [entries[index % len(entries)] for index in range(args.requests)]
     line = protocol["lines"][args.line]
+    refuse_cycling(line, len(panel), len(entries))
     llm, target, draft, kwargs = warmed_up_engine(protocol, line, panel, args, record_phase_timings=False)
     params = SamplingParams(max_tokens=protocol["sampling"]["max_tokens"], **sampling_kwargs(protocol))
     arrivals = poisson_arrivals(args.requests, args.rate, args.seed)

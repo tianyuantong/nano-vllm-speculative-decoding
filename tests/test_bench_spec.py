@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from bench_spec import (ROOT, RESULT_KEYS, assert_gpu, build_result, engine_kwargs, gpu_state, installed_packages,
-                        kv_budget_bytes, load_panel, poisson_arrivals, run_closed_loop, run_open_loop)
+                        kv_budget_bytes, load_panel, poisson_arrivals, refuse_cycling, run_closed_loop, run_open_loop,
+                        warmup_entries)
 
 TARGET_BLOCK, DRAFT_BLOCK = 37_748_736, 29_360_128
 
@@ -51,6 +52,7 @@ class FakeSequence:
         self.target_len = target_len
         self.num_completion_tokens = 0
         self.is_finished = False
+        self.prefix_hit_tokens = 0
 
     @property
     def completion_token_ids(self):
@@ -251,3 +253,42 @@ def test_engine_kwargs_turn_on_round_robin_for_its_arms_only(tmp_path):
     kwargs = kwargs_of_every_line("protocol-v2.4.json", tmp_path)
     assert kwargs["dspark_var_rr"]["round_robin_prefill"] is True and kwargs["k0_rr"]["round_robin_prefill"] is True
     assert "round_robin_prefill" not in kwargs["dspark_var"]
+
+
+def test_the_warm_up_takes_the_panel_unless_the_panel_names_its_own(tmp_path):
+    panel = [{"id": f"p{index}", "category": "NIAH", "prompt_token_ids": [index]} for index in range(4)]
+    own = tmp_path / "warmup.json"
+    own.write_text(json.dumps([{"id": f"w{index}", "category": "NIAH", "prompt_token_ids": [100 + index]}
+                               for index in range(8)]))
+    protocol = {"panels": {"D48": {"file": "x"}, "S": {"file": "y", "warmup": "Sw"}, "Sw": {"file": str(own)}}}
+    assert [entry["id"] for entry in warmup_entries(protocol, "D48", panel, 6)] == ["p0", "p1", "p2", "p3", "p0", "p1"]
+    assert [entry["id"] for entry in warmup_entries(protocol, "S", panel, 3)] == ["w0", "w1", "w2"]
+    with pytest.raises(ValueError):
+        warmup_entries(protocol, "S", panel, 9)
+
+
+def test_a_prefix_cache_line_refuses_a_cycled_panel():
+    refuse_cycling({"prefix_cache": True}, 256, 256)
+    refuse_cycling({}, 288, 48)
+    with pytest.raises(ValueError):
+        refuse_cycling({"prefix_cache": True}, 257, 256)
+
+
+def test_a_finished_request_records_its_cached_tokens():
+    engine = FakeEngine()
+    original = engine.add_request
+
+    def add_request(prompt_token_ids, params):
+        sequence = original(prompt_token_ids, params)
+        sequence.prefix_hit_tokens = 256 * len(engine.waiting + engine.running)    # stands in for the allocation
+        return sequence
+    engine.add_request = add_request
+    record = run_closed_loop(engine, panel_of([3, 2]), None, 2)
+    assert [request["cached_tokens"] for request in record["requests"]] == [256, 512]
+
+
+def test_engine_kwargs_turn_on_the_prefix_cache_for_its_arms_only(tmp_path):
+    kwargs = kwargs_of_every_line("protocol-v2.5.json", tmp_path)
+    assert all(kwargs[f"{name}_pc"]["enable_prefix_cache"] is True and kwargs[name]["enable_prefix_cache"] is False
+               for name in ("k0", "dflash_k7", "dspark_k7", "dspark_var"))
+    assert len({value["kv_cache_memory_bytes"] for value in kwargs.values()}) == 1
