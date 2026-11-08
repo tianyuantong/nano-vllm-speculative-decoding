@@ -238,6 +238,10 @@ def installed_packages(distributions=importlib.metadata.distributions) -> tuple[
     return text, hashlib.sha256(text.encode()).hexdigest()
 
 
+def protocol_panels(protocol_text: str) -> dict:
+    return json.loads(protocol_text)["panels"]
+
+
 def build_result(schema: str = SCHEMA, **parts) -> dict:
     return {"schema": schema, **{key: parts[key] for key in RESULT_KEYS[1:]}}
 
@@ -293,6 +297,10 @@ def warmed_up_engine(protocol: dict, line: dict, panel: list[PanelEntry], args: 
     llm = LLM(target, **kwargs)
     run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **sampling_kwargs(protocol)),
                     args.concurrency)
+    if "warmup" in protocol["panels"][args.panel]:
+        # The measurement draws from where a fresh engine of this seed would: with the cache on the warm-up's outputs,
+        # and so what it drew, can differ from the cache off.
+        llm.model_runner.generator.manual_seed(args.seed)
     return llm, target, draft, kwargs
 
 
@@ -304,7 +312,8 @@ def base_config(args: argparse.Namespace, mode: str, protocol: dict, line: dict,
             "sampling": {**sampling_kwargs(protocol), "max_tokens": protocol["sampling"]["max_tokens"]},
             "target": target, "draft": draft,
             **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                "draft_type", "variable_length", "record_confidences")}}
+                                                "draft_type", "variable_length", "record_confidences",
+                                                "enable_prefix_cache")}}
 
 
 def write_result(args: argparse.Namespace, llm, schema: str, protocol_text: str, panel_path: Path, kwargs: dict, config: dict,
@@ -315,12 +324,15 @@ def write_result(args: argparse.Namespace, llm, schema: str, protocol_text: str,
     packages, packages_sha256 = installed_packages()
     schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
                        if "verify_schedule" in kwargs else None)
+    warmup = protocol_panels(protocol_text).get(args.panel, {}).get("warmup")
+    warmup_sha256 = (hashlib.sha256((ROOT / protocol_panels(protocol_text)[warmup]["file"]).read_bytes()).hexdigest()
+                     if warmup else None)
     result = build_result(
         schema=schema,
         protocol_sha256=hashlib.sha256(protocol_text.encode()).hexdigest(),
         manifest={**manifest(args.commit), "node": state_start["node"], "packages_sha256": packages_sha256,
                   "panel_sha256": hashlib.sha256(panel_path.read_bytes()).hexdigest(),
-                  "verify_schedule_sha256": schedule_sha256},
+                  "verify_schedule_sha256": schedule_sha256, "warmup_panel_sha256": warmup_sha256},
         gpu_state_start=state_start, gpu_state_end=state_end, config=config, wall_seconds=wall_seconds,
         steps=steps, phases=phases, requests=record["requests"], speculative_stats=speculative_stats,
         preemptions=llm.scheduler.num_preemptions)

@@ -11,9 +11,10 @@ from summarize_bench import summarize_v2  # noqa: E402
 GPU = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 LINES = {"k0": {"k": 0, "k0_line": "k0"}, "k0_pc": {"k": 0, "k0_line": "k0_pc", "prefix_cache": True},
          "dspark_k7": {"k": 7, "k0_line": "k0"}, "dspark_k7_pc": {"k": 7, "k0_line": "k0_pc", "prefix_cache": True}}
-PROTOCOL = {"gpu": {"name": GPU}, "lines": LINES, "seeds": {"dev": [1, 2, 3]},
+PROTOCOL = {"gpu": {"name": GPU}, "lines": LINES, "seeds": {"dev": [1, 2, 3]}, "timing_noise": {"seed": 1},
             "panels": {"S1024": {"shared_tokens": 1024}},
-            "main": {"lines": list(LINES), "concurrency": [8], "seeds": "dev"}}
+            "main": {"lines": list(LINES), "concurrency": [8], "seeds": "dev",
+                     "pairs": [["k0", "k0_pc"], ["dspark_k7", "dspark_k7_pc"]]}}
 
 
 def closed_loop(line, seed, concurrency=8, requests=48, output=60, tokens_per_round=1, round_ms=10.0, prefill_ms=40.0,
@@ -79,13 +80,17 @@ def matrix(h=0.5, d=0.2, spec_d=0.1):
                     closed_loop("dspark_k7_pc", seed, tokens_per_round=3, round_ms=20 * (1 - spec_d),
                                 prefill_ms=40 * (1 - h), cached=1024)]
     results += [closed_loop("k0", 1, repeat=2), closed_loop("k0_pc", 1, repeat=2, prefill_ms=40 * (1 - h),
-                                                            round_ms=10 * (1 - d), cached=1024)]
+                                                            round_ms=10 * (1 - d), cached=1024),
+                closed_loop("dspark_k7", 1, repeat=2, tokens_per_round=3, round_ms=20.0),
+                closed_loop("dspark_k7_pc", 1, repeat=2, tokens_per_round=3, round_ms=20 * (1 - spec_d),
+                            prefill_ms=40 * (1 - h), cached=1024)]
     return runs_of(results)
 
 
 def test_h_d_and_the_predictions_come_out_of_the_step_times():
     analysis = analyse(matrix(), PROTOCOL, "S1024")
-    assert not analysis["invalid"] and analysis["noise"] == 0 and analysis["pairs"] == 2
+    assert not analysis["invalid"] and analysis["noise"] == 0 and analysis["pairs"] == 4
+    assert analysis["noise_rho"] == 0 and analysis["rho_pairs"] == 1
     k0 = analysis["table"][(8, "k0")]
     spec = analysis["table"][(8, "dspark_k7")]
     assert len(k0) == len(spec) == 3
@@ -98,16 +103,19 @@ def test_h_d_and_the_predictions_come_out_of_the_step_times():
         # the simulation is the model the prediction with d assumes, up to the window's edges
         assert entry["rho"] == pytest.approx(entry["rho_hat_1"], rel=0.02)
         assert abs(entry["rho"] - entry["rho_hat_0"]) > abs(entry["rho"] - entry["rho_hat_1"])
+        assert entry["G"] == pytest.approx(sum(entry["G_split"].values()))           # the split is exact
+        assert entry["kappa_pf"] == pytest.approx(1, abs=0.05) and entry["kappa_r"] == pytest.approx(1, abs=0.05)
     assert "dspark_k7" in markdown(analysis)
 
 
 def test_the_hits_check():
     off, on = closed_loop("k0", 1), closed_loop("k0_pc", 1, cached=1024)
     assert hits_check(off, 1024, False) == [] and hits_check(on, 1024, True) == []
-    assert hits_check(closed_loop("k0_pc", 1, cached=768), 1024, True) == ["a request hit fewer than 1024 tokens"]
+    assert hits_check(closed_loop("k0_pc", 1, cached=768), 1024, True) == ["a request hit other than 1024 tokens"]
     on["requests"][0]["cached_tokens"] = 1280               # the steps still prefilled prompt_len - 1024
-    assert hits_check(on, 1024, True) == ["prefilled tokens differ from prompt_len - cached_tokens"]
-    assert hits_check(closed_loop("k0", 1, cached=256), 0, False)[0] == "a request hit with the cache off"
+    assert hits_check(on, 1024, True) == ["a request hit other than 1024 tokens",
+                                          "prefilled tokens differ from prompt_len - cached_tokens"]
+    assert hits_check(closed_loop("k0", 1, cached=256), 0, False)[0] == "a request hit other than 0 tokens"
 
 
 def test_a_failed_hits_check_voids_the_run():
@@ -117,6 +125,17 @@ def test_a_failed_hits_check_voids_the_run():
     analysis = analyse(runs, PROTOCOL, "S1024")
     assert any("hits:" in reason for reason in analysis["invalid"][name])
     assert [entry["seed"] for entry in analysis["table"][(8, "k0")]] == [2, 3]
+    assert "| 8 | k0 | 2 |" in markdown(analysis) and "| - |" in markdown(analysis)    # 2 of 3 seeds: not judged
+
+
+def test_the_null_on_a_panel_without_a_shared_part():
+    protocol = {**PROTOCOL, "panels": {"S1024": {"shared_tokens": 0}}}
+    results = [closed_loop(line, seed, tokens_per_round=3 if "dspark" in line else 1) for seed in (1, 2, 3)
+               for line in LINES]
+    analysis = analyse(runs_of(results), protocol, "S1024")
+    assert analysis["null_failures"] == []
+    results[1]["requests"][0]["token_ids"] = results[1]["requests"][0]["token_ids"][:-1] + [2]
+    assert analyse(runs_of(results), protocol, "S1024")["null_failures"]
 
 
 def test_gain_verdict():

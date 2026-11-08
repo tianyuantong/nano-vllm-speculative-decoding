@@ -184,4 +184,6 @@ def test_v2_5_shared_prefix_panels_fill_whole_blocks_and_fit():
         assert length + prefix["max_formatted_tokens"] + V25["sampling"]["max_tokens"] + 7 <= V25["max_model_len"]
     assert sorted(V25["main"]["panels"]) == sorted(f"S{length}" for length in prefix["lengths"])
     assert 4 * max(V25["main"]["concurrency"]) <= prefix["measured"]    # C = 64 takes 256 prompts: no cycling
-    assert set(V25["timing_noise"]["lines"]) <= set(V25["main"]["lines"])
+    assert sorted(line for pair in V25["main"]["pairs"] for line in pair) == sorted(V25["main"]["lines"])
+    assert all(V25["lines"][on].get("prefix_cache") and not V25["lines"][off].get("prefix_cache")
+               for off, on in V25["main"]["pairs"])

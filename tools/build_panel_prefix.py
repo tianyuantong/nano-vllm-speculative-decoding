@@ -2,8 +2,9 @@
 
 Private parts: candidates of SPEED-Bench throughput_1k picked as K128b's are (build_panel_k128.py: salt, quotas,
 proportional interleave, D48's formatting, the upstream recipes for first turns that must be fetched), excluding the
-question ids, (source, src_id) pairs and prompts of the panels the protocol lists. The first `measured` of them are
-measured, the rest only warm up.
+question ids, (source, src_id) pairs and prompts of the panels the protocol lists. Each first turn starts with the
+protocol's tag of its question id, so no two private parts share a whole block: NIAH's recipe template would otherwise
+share its first one. The first `measured` of them are measured, the rest only warm up.
 
 Shared part: P tokens in front of every private part, a system turn of Qwen3's template,
   <|im_start|>system\\n  intro + a fixed document, cut to fit  <|im_end|>\\n
@@ -12,7 +13,7 @@ P is a multiple of the block size, so the shared part fills P / 256 whole blocks
 The document is the first turn of one throughput_8k row after the protocol's marker, line ends as \\n.
 
 Each panel records, per entry, its shared and private lengths, and how many whole blocks of its private part equal
-another private part's (NIAH's recipe template shares its first block), an upper bound of what it can hit past P.
+another private part's, which must be none, so with the cache on a request hits exactly P tokens.
 
 Runs outside the engine's venv, like build_panel_k128.py:
   ~/.venvs/k128/bin/python tools/build_panel_prefix.py --speed-dir SPEED_DIR --long-dir LONG_DIR \\
@@ -118,7 +119,7 @@ def main() -> None:
 
     def fits(candidate: dict) -> bool:
         prompt, recipe = first_turn(candidate, recipes, stackselect, bamboo)
-        encoded[candidate["question_id"]] = (recipe, encode(prompt))
+        encoded[candidate["question_id"]] = (recipe, encode(spec["tag"].format(id=candidate["question_id"]) + prompt))
         token_ids = encoded[candidate["question_id"]][1]
         return len(token_ids) <= spec["max_formatted_tokens"] and tuple(token_ids) not in excluded_prompts
 
@@ -128,6 +129,8 @@ def main() -> None:
     if len({tuple(tokens) for tokens in private}) != len(private):
         raise SystemExit("two private parts are the same prompt")
     shared_blocks = shared_private_blocks(private)
+    if any(shared_blocks):
+        raise SystemExit(f"{sum(map(bool, shared_blocks))} private parts share a whole block with another one")
 
     tokenizer = tokenizers.Tokenizer.from_file(str(directory / "qwen-tokenizer" / "tokenizer.json"))
 

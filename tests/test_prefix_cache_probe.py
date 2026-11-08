@@ -148,3 +148,28 @@ def test_an_evicted_block_is_not_a_hit():
     assert all(manager.blocks[block_id].hash == h for h, block_id in manager.hash_to_block_id.items())
     manager.deallocate(other)
     assert manager.can_allocate(seq_of(12)) == 0              # A's blocks were reused, so no stale hit
+
+
+def test_a_k0_decode_after_a_hit_writes_its_own_block_only():
+    from nanovllm.engine.batch_metadata import decode_metadata
+    manager = BlockManager(num_blocks=64, block_size=BLOCK_SIZE, enable_prefix_cache=True)
+    seqs = []
+    for length in (12, 13, 16, 17):                          # whole blocks shared; the last block full or not
+        seq = seq_of(length)
+        manager.allocate(seq, manager.can_allocate(seq))
+        seq.num_scheduled_tokens = len(seq) - seq.num_cached_tokens
+        manager.hash_blocks(seq)
+        seq.num_cached_tokens += seq.num_scheduled_tokens
+        seq.append_token(right(len(seq)))
+        seqs.append(seq)
+    assert any(seq.prefix_hit_tokens for seq in seqs)
+    for _ in range(6):                                       # k0's decode steps: one slot per row, position len - 1
+        for seq in seqs:
+            manager.reserve(seq, len(seq))
+        before = protected(manager)
+        slots = decode_metadata(seqs, BLOCK_SIZE).slot_mapping
+        assert not {slot // BLOCK_SIZE for slot in slots} & before
+        assert len(set(slots)) == len(slots)
+        for seq in seqs:
+            seq.num_cached_tokens = len(seq)
+            seq.append_token(right(len(seq)))
