@@ -142,6 +142,20 @@ def vllm_invalid(result: dict, protocol: dict, panel: str, cache: str, base: str
     return reasons
 
 
+def nano_invalid(result: dict, panel: str, cache: str, concurrency: int, seed: int, repeat: int) -> list[str]:
+    """invalid_if.both for one nano run beyond report_v2's count_runs: the run its name says, its cache, its request
+    count and a positive throughput."""
+    config, reasons = result["config"], []
+    if (config["panel"], config["concurrency"], config["seed"], config["repeat"], bool(config.get("enable_prefix_cache"))) \
+            != (panel, concurrency, seed, repeat, cache == "on"):
+        reasons.append("not the run its name says")
+    if len(result["requests"]) != requests_of(concurrency):
+        reasons.append(f"{len(result['requests'])} requests, not {requests_of(concurrency)}")
+    if not (result["wall_seconds"] > 0 and math.isfinite(nano_q(result)) and nano_q(result) > 0):
+        reasons.append("non-finite value or assertion failure")
+    return reasons
+
+
 def vllm_hits(result: dict, protocol: dict, panel: str, cache: str) -> list[str]:
     """hits.vllm for one valid vLLM run: what stops the job."""
     block_size = result["engine_cache"]["block_size"]
@@ -228,24 +242,42 @@ def analyse(protocol: dict, panel: str, runs: list[tuple[str, dict, dict]], vllm
         rounds[(concurrency, seed)].add(round_of(name))
     split = {key for key, found in rounds.items() if len(found) > 1}
 
+    # check_order: a group counts only whole and valid, both sides and both repeats; only then identity and hits
     problems, stops, valid = [], [], {}
-    for key, (name, result) in chosen.items():
-        side, cache, base, concurrency, seed, repeat = key
-        if side == "nano":
-            reasons = [reason for reason in invalid[name] if not (originals and reason == SLOW_STEP)]
-        else:
-            vllm_base = dict(spec["pairs"])[base]
-            reasons = vllm_invalid(result, protocol, panel, cache, vllm_base, concurrency, seed, repeat)
-        if (concurrency, seed) in split:
-            reasons.append("lines of one (C, seed) split across rounds of the job")
-        problems += [f"{side} {Path(name).name}: {reason}" for reason in reasons]
-        if reasons:
-            continue
-        found = (nano_identity_and_hits(result, protocol, panel, cache, reference) if side == "nano"
-                 else vllm_hits(result, protocol, panel, cache))
-        stops += [f"{side} {Path(name).name}: {stop}" for stop in found]
-        if not found:
-            valid[key] = result
+    for concurrency in spec["concurrency"]:
+        for seed in seeds:
+            nano_names, vllm_names = expected_runs(protocol, panel, concurrency, seed)
+            keys = [("nano", *key[:2], concurrency, seed, key[2]) for key in nano_names] + \
+                   [("vllm", key[0], pair_of[key[1]], concurrency, seed, key[2]) for key in vllm_names]
+            group_bad = False
+            for key in keys:
+                side, cache, base, _, _, repeat = key
+                if key not in chosen:
+                    problems.append(f"{side} {cache} {base} C={concurrency} seed {seed} repeat {repeat}: missing")
+                    group_bad = True
+                    continue
+                name, result = chosen[key]
+                if side == "nano":
+                    reasons = [reason for reason in invalid[name] if not (originals and reason == SLOW_STEP)]
+                    reasons += nano_invalid(result, panel, cache, concurrency, seed, repeat)
+                else:
+                    reasons = vllm_invalid(result, protocol, panel, cache, dict(spec["pairs"])[base], concurrency, seed,
+                                           repeat)
+                if (concurrency, seed) in split:
+                    reasons.append("lines of one (C, seed) split across rounds of the job")
+                problems += [f"{side} {Path(name).name}: {reason}" for reason in reasons]
+                group_bad |= bool(reasons)
+            if group_bad:
+                continue
+            group = {}
+            for key in keys:
+                name, result = chosen[key]
+                found = (nano_identity_and_hits(result, protocol, panel, key[1], reference) if key[0] == "nano"
+                         else vllm_hits(result, protocol, panel, key[1]))
+                stops += [f"{key[0]} {Path(name).name}: {stop}" for stop in found]
+                group[key] = None if found else result
+            if all(result is not None for result in group.values()):
+                valid.update(group)
 
     def q_of(side: str, result: dict) -> float:
         return nano_q(result) if side == "nano" else result["runs"][0]["tokens_per_second"]
@@ -340,8 +372,10 @@ def analyse(protocol: dict, panel: str, runs: list[tuple[str, dict, dict]], vllm
                 screening.append(dict(run=Path(name).name, q_voided=nano_q(result), q_rerun=nano_q(valid[key])))
 
     packages = sorted({result["manifest"]["packages_sha256"] for (side, *_), result in valid.items() if side == "nano"})
+    nodes = sorted({result["manifest"]["node"] for (side, *_), result in valid.items() if side == "nano"} |
+                   {result["manifest"]["node"] for (side, *_), result in valid.items() if side == "vllm"})
     return dict(panel=panel, caches=job["cache"], seeds=seeds, n1=n1, n2=n2, repeat_pairs=repeat_pairs, b_pairs=b_pairs,
-                gamma_pairs=gamma_pairs, gaps=gaps,
+                gamma_pairs=gamma_pairs, nodes=nodes, gaps=gaps,
                 gains=gains, screening=screening, stops=stops, invalid=problems, nano_packages_sha256=packages,
                 reference_packages_sha256=sorted({run.get("packages_sha256") for run in reference["runs"].values()} - {None}))
 
@@ -420,7 +454,7 @@ def markdown(analysis: dict) -> str:
     out += ["", "Repeat pairs (seed 17011): |Q1 / Q2 - 1| %, and whether the two gave the same tokens.", "",
             "| side | cache | line | C | difference | same tokens |", "|---|---|---|---:|---:|---|"]
     for pair in analysis["repeat_pairs"]:
-        difference = f"{abs(pair['q1'] / pair['q2'] - 1) * 100:.2f}" if pair["q2"] else "-"
+        difference = f"{abs(pair['q1'] / pair['q2'] - 1) * 100:.2f}" if pair["q1"] and pair["q2"] else "-"
         out.append(f"| {pair['side']} | {pair['cache']} | {pair['line']} | {pair['concurrency']} | {difference} | {pair['same_tokens']} |")
     deviation = [row["reproduction"] for gap in analysis["gaps"] for row in gap["nano_extra"].values()]
     vllm_rows = [row for gap in analysis["gaps"] for row in gap["vllm_extra"].values()]
@@ -462,6 +496,7 @@ def combine(protocol: dict, reports: list[dict]) -> str:
     {[B(S2048, on) / B(S2048, off)] / [B(S0, on) / B(S0, off)]}, the longer prefix with the cache off and the change of
     the cache's effect on B. Report only."""
     by_panel = {report["panel"]: report for report in reports}
+    nodes = {panel: report["nodes"] for panel, report in by_panel.items()}
     b = {(panel, gap["cache"], gap["nano_line"].removesuffix("_pc"), gap["concurrency"]): gap["ratio"]
          for panel, report in by_panel.items() for gap in report["gaps"]}
     shared = {panel: protocol["panels"][panel]["shared_tokens"] for panel in by_panel}
@@ -479,6 +514,9 @@ def combine(protocol: dict, reports: list[dict]) -> str:
             effect = ratio_of(ratio_of(at("S2048", "on"), at("S2048", "off")), ratio_of(at("S0", "on"), at("S0", "off")))
             out.append(f"| {base} | {concurrency} | " + " | ".join(f"{cell:.3f}" if cell else "-" for cell in cells) +
                        f" | {fmt(ends)} | {fmt(longer)} | {fmt(effect)} |")
+    machines = {tuple(found) for found in nodes.values()}
+    out += ["", "Nodes: " + "; ".join(f"{panel} {', '.join(found)}" for panel, found in sorted(nodes.items())) +
+            (". The panels ran on different machines: V3 compares across VMs." if len(machines) > 1 else ". One machine.")]
     return "\n".join(out)
 
 

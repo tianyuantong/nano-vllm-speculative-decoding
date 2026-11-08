@@ -30,8 +30,9 @@ def nano_run(line, seed, wall, repeat=1, directory="OUT/main/nano", spike=1.0, p
             [{"kind": kind, "duration_ms": 10.0, "prefill_tokens": 0}] * 5 + \
             [{"kind": kind, "duration_ms": 10.0 * spike, "prefill_tokens": 0}]
     result = {"gpu_state_start": {"name": GPU}, "steps": steps, "wall_seconds": wall, "speculative_stats": None,
-              "requests": requests, "protocol_sha256": "p", "manifest": {"commit": "a", "panel_sha256": panel, "packages_sha256": "pk"},
-              "config": {"panel": panel, "concurrency": 8, "line": line, "seed": seed, "repeat": repeat}}
+              "requests": requests, "protocol_sha256": "p", "manifest": {"commit": "a", "panel_sha256": panel, "packages_sha256": "pk", "node": "vm1"},
+              "config": {"panel": panel, "concurrency": 8, "line": line, "seed": seed, "repeat": repeat,
+                         "enable_prefix_cache": on}}
     return f"{directory}/{line}-C8-s{seed}-r{repeat}.json", result, {"preemptions": 0, "q_steady": 1.0, "q_full": 1.0}
 
 
@@ -43,7 +44,7 @@ def vllm_run(line, seed, q, on, repeat=1, directory="OUT/main/vllm", hit=None, p
                 "finish_reason": "length"}] * 48
     result = {"line": line, "concurrency": 8, "prefix_cache": on, "panel": panel, "gpu": GPU, "group_repeat": repeat,
               "engine": {"seed": seed, **({"speculative_config": {"method": "dspark"}} if drafting else {})},
-              "engine_cache": {"block_size": 16, "kv_cache_size_tokens": 306_888},
+              "engine_cache": {"block_size": 16, "kv_cache_size_tokens": 306_888}, "manifest": {"node": "vm1"},
               "runs": [{"requests": 48, "tokens_per_second": q, "preemptions": preemptions, "output_tokens": 480,
                         "seconds": 480 / q, "tokens_per_round": 2.8 if drafting else None, "gpu_memory_used_mib": 70_000,
                         "request_records": records}]}
@@ -182,3 +183,21 @@ def test_the_screening_effect_puts_the_original_runs_back():
     k0 = next(gap for gap in original["gaps"] if gap["nano_line"] == "k0_pc")
     assert not original["invalid"] and abs(k0["nano"][2] - 96 / 10.02) < 1e-12
     assert without_screening(final, original)["changed"] == []
+
+
+def test_one_invalid_run_takes_its_whole_group_out():
+    nano, vllm = job()
+    vllm = [run if not run[0].endswith("k0_v2_pc-C8-s3-r1.json") else vllm_run("k0_v2", 3, 100.3, True, preemptions=1)
+            for run in vllm]
+    analysis = analyse(PROTOCOL, "S2048", nano, vllm, reference_of(nano))
+    assert analysis["invalid"] == ["vllm k0_v2_pc-C8-s3-r1.json: preemption > 0"]
+    assert all(3 not in gap["nano"] and 3 not in gap["vllm"] for gap in analysis["gaps"])
+    assert {gap["verdict"] for gap in analysis["gaps"]} == {"incomplete"}
+
+
+def test_a_nano_run_with_the_wrong_cache_flag_is_invalid():
+    nano, vllm = job(panel="S0")
+    name, result, summary = next(run for run in nano if run[0].endswith("k0_pc-C8-s4-r1.json"))
+    result["config"]["enable_prefix_cache"] = False
+    analysis = analyse(PROTOCOL, "S0", nano, vllm, reference_of(nano))
+    assert analysis["invalid"] == ["nano k0_pc-C8-s4-r1.json: not the run its name says"]
