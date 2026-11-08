@@ -109,8 +109,11 @@ class Scheduler:
         return (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+        """Only a prefill hashes its blocks, as a speculative round's commit never does: the prefix cache holds prompt
+        blocks on every line."""
         for seq, token_id in zip(seqs, token_ids):
-            self.block_manager.hash_blocks(seq)
+            if is_prefill:
+                self.block_manager.hash_blocks(seq)
             seq.num_cached_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:

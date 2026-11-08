@@ -75,7 +75,5 @@ class Config:
             raise ValueError("speculative decoding supports tensor_parallel_size=1 only")
         if self.max_num_seqs > MAX_SPECULATIVE_BATCH_SIZE:
             raise ValueError(f"speculative decoding captures verification graphs for at most {MAX_SPECULATIVE_BATCH_SIZE} sequences")
-        if self.enable_prefix_cache:
-            raise ValueError("speculative decoding requires enable_prefix_cache=False")
         if self.kv_cache_memory_bytes is None:
             raise ValueError("speculative decoding requires an explicit kv_cache_memory_bytes")

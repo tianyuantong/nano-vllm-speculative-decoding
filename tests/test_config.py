@@ -22,11 +22,10 @@ def test_defaults_have_no_draft(model_dir):
     assert config.draft_model is None and config.num_speculative_tokens == 0
 
 
-def test_draft_requires_prefix_cache_off_a_budget_and_one_gpu(model_dir, dflash_dir):
+def test_draft_takes_the_prefix_cache_and_requires_a_budget_and_one_gpu(model_dir, dflash_dir):
     kwargs = dict(draft_model=dflash_dir, enable_prefix_cache=False, kv_cache_memory_bytes=1 << 20, enforce_eager=True)
     Config(model_dir, **kwargs)
-    with pytest.raises(ValueError):
-        Config(model_dir, **{**kwargs, "enable_prefix_cache": True})
+    assert Config(model_dir, **{**kwargs, "enable_prefix_cache": True}).enable_prefix_cache
     with pytest.raises(ValueError):
         Config(model_dir, **{**kwargs, "kv_cache_memory_bytes": None})
     with pytest.raises(ValueError):

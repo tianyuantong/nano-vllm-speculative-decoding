@@ -40,6 +40,7 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
         self.first_token_step = -1
         self.finish_step = -1
+        self.prefix_hit_tokens = 0    # prompt tokens the prefix cache held when its blocks were last allocated
 
     # The upstream engine addresses the target KV state through these names.
     @property

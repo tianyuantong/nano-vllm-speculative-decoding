@@ -96,6 +96,7 @@ class BlockManager:
         for i in range(num_cached_blocks, seq.num_blocks):
             kv.block_table.append(self._allocate_block())
         kv.num_cached_tokens = num_cached_blocks * self.block_size
+        seq.prefix_hit_tokens = kv.num_cached_tokens
 
     def deallocate(self, seq: Sequence):
         kv = seq.target_kv
