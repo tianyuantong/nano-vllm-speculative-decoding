@@ -15,7 +15,8 @@ TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1
                                                "hypotheses", "report_only", "stop_if"}
 TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
 PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
-           "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.4.json": "protocol-v2.3.json"}
+           "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.4.json": "protocol-v2.3.json",
+           "protocol-v2.5.json": "protocol-v2.4.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -147,3 +148,40 @@ def test_v2_4_every_long_bucket_has_a_panel_and_fits_the_long_max_model_len():
         assert SHA256.fullmatch(V24["panels"][bucket["name"]]["sha256"])
         longest = bucket["tokens"] * (1 + long_context["window_fraction"])
         assert longest + V24["sampling"]["max_tokens"] + 7 <= pilot["max_model_len"]
+
+
+# ---------------------------------------------------------------- v2.5: M6, the prefix cache measured
+V25 = json.loads((BENCHMARKS / "protocol-v2.5.json").read_text())
+
+
+def test_v2_5_keeps_what_the_measurements_are_compared_with():
+    for key in ("gpu", "models", "sampling", "max_model_len", "max_num_batched_tokens", "concurrency", "metrics",
+                "decision", "verify_schedule", "dev", "seeds"):
+        assert V25[key] == V24[key]
+    assert {name: V25["panels"][name] for name in ("D48", "K128", "K128b")} == \
+        {name: V24["panels"][name] for name in ("D48", "K128", "K128b")}
+    assert V25["gates"]["equivalence"] == V24["gates"]["equivalence"]
+    assert V25["warmup"]["max_tokens"] == V24["warmup"]["max_tokens"]
+
+
+def test_v2_5_cache_arms_differ_from_their_base_only_by_the_flag():
+    lines = V25["lines"]
+    for name in ("k0", "dflash_k7", "dspark_k7", "dspark_var"):
+        assert lines[name] == V24["lines"][name]
+        arm = dict(lines[f"{name}_pc"])
+        assert arm.pop("prefix_cache") is True and arm.pop("k0_line") == "k0_pc"
+        assert {**arm, "k0_line": None} == {**lines[name], "k0_line": None}
+    assert V25["main"]["lines"] == list(lines)
+
+
+def test_v2_5_shared_prefix_panels_fill_whole_blocks_and_fit():
+    prefix = V25["prefix"]
+    for length in prefix["lengths"]:
+        measured, warmup = V25["panels"][f"S{length}"], V25["panels"][f"S{length}w"]
+        assert measured["shared_tokens"] == warmup["shared_tokens"] == length and length % 256 == 0
+        assert measured["warmup"] == f"S{length}w" and measured["take"] == "prefix"
+        assert SHA256.fullmatch(measured["sha256"]) and SHA256.fullmatch(warmup["sha256"])
+        assert length + prefix["max_formatted_tokens"] + V25["sampling"]["max_tokens"] + 7 <= V25["max_model_len"]
+    assert sorted(V25["main"]["panels"]) == sorted(f"S{length}" for length in prefix["lengths"])
+    assert 4 * max(V25["main"]["concurrency"]) <= prefix["measured"]    # C = 64 takes 256 prompts: no cycling
+    assert set(V25["timing_noise"]["lines"]) <= set(V25["main"]["lines"])
