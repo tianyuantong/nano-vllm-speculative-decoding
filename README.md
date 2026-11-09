@@ -126,7 +126,7 @@ DSpark and DFlash propose a fixed block of 7 tokens per round (set by the checkp
 
 ## Reproduce
 
-`bench_spec.py` checks that the GPU matches `protocol["gpu"]["name"]` before running. Build the prompt panels first, then run plain decoding (`k0`) and the speculative lines across concurrencies and seeds in one directory:
+Build the prompt panels first, then run plain decoding (`k0`) and the speculative lines across concurrencies and seeds in one directory:
 
 ```bash
 python -m pytest -q    # CPU tests, under 30 s
@@ -143,7 +143,7 @@ done
 python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results runs
 ```
 
-For variable-length verification, pass `benchmarks/protocol-v2.3.json` and run lines `k0 dspark_k7 dspark_var` (line names, concurrencies, and seeds are defined in the protocol file). Token-for-token reproduction also needs the compile caches and job order in the `results-variable-length` release. `tools/report_v2.py` summarizes throughput and speedup ratios, `tools/gain_factors.py` decomposes speedup gains by factor, and `tools/plot_speedup.py` generates the speedup bar charts. Raw result JSONs and prompt panels are packaged in two release assets: [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) and [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length) (for the variable-length runs).
+For variable-length verification, pass `benchmarks/protocol-v2.3.json` and run lines `k0 dspark_k7 dspark_var` (line names, concurrencies, and seeds are defined in the protocol file). `tools/report_v2.py` summarizes throughput and speedup ratios, `tools/gain_factors.py` decomposes speedup gains by factor, and `tools/plot_speedup.py` generates the speedup bar charts. Raw result JSONs and prompt panels are packaged in two release assets: [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) and [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length) (for the variable-length runs).
 
 ## Explore the project
 

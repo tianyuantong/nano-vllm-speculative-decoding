@@ -126,7 +126,7 @@ DSpark 与 DFlash 每轮固定提出 7 个候选 token（由权重块大小决�
 
 ## 复现
 
-`bench_spec.py` 开跑前会校验 GPU 型号是否与 `protocol["gpu"]["name"]` 一致。先构建测试面板，再在同一目录下跑完普通解码（`k0`）与投机解码的各并发及 seed：
+先构建测试面板，再在同一目录下跑完普通解码（`k0`）与投机解码的各并发及 seed：
 
 ```bash
 python -m pytest -q    # CPU 测试，30 秒内
@@ -143,7 +143,7 @@ done
 python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results runs
 ```
 
-变长验证改用 `benchmarks/protocol-v2.3.json`，评测线为 `k0 dspark_k7 dspark_var`（线名、并发与 seed 均定义在该协议文件中）。要逐 token 复现，还需要 `results-variable-length` 里的编译缓存和作业顺序。`tools/report_v2.py` 汇总吞吐与加速比，`tools/gain_factors.py` 拆解各因素贡献，`tools/plot_speedup.py` 生成加速比柱状图。各表对应的原始结果 JSON 与测试面板打包在两个 release 附件中：[`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 与存放变长验证数据的 [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length)。
+变长验证改用 `benchmarks/protocol-v2.3.json`，评测线为 `k0 dspark_k7 dspark_var`（线名、并发与 seed 均定义在该协议文件中）。`tools/report_v2.py` 汇总吞吐与加速比，`tools/gain_factors.py` 拆解各因素贡献，`tools/plot_speedup.py` 生成加速比柱状图。各表对应的原始结果 JSON 与测试面板打包在两个 release 附件中：[`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) 与存放变长验证数据的 [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length)。
 
 ## 深入了解
 

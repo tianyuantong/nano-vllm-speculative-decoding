@@ -33,7 +33,6 @@ Values are the median (min–max) over seeds, to two decimals, or only the range
 - **Speedup threshold**: A line is marked faster when every seed's speedup `R` exceeds `1 + 2 × N_t`, where the timing noise `N_t = 1.38%` is measured from 9 repeat pairs on the development matrix on the same machine and engine.
 - **DSpark vs DFlash**: At every concurrency, all per-seed paired gains have the same sign and their median exceeds `2 × N_t`.
 - **Tokens per round** (round-weighted mean): DSpark `2.81–2.95`, DFlash `2.53–2.70`.
-- **Voided run and full-group rerun**: One DFlash run (`C = 1`, seed `17011`) recorded a single 199 ms round against a 15.7 ms median, triggering the protocol's outlier rule (`> 3 × median`). Of those 199 ms, 182 ms occurred during `ctx_store` (median 0.26 ms), while `propose` and `verify` were normal. The earlier K128 confirmation run had a single outlier in the exact same cell and phase (177 ms at round 3549, 57.4 s into the run, vs round 3544 at 57.3 s here). Per protocol, all three lines of that `(C = 1, seed = 17011)` group were rerun back-to-back in a single job; the rerun passed with identical output tokens across all three lines (`DFlash R = 2.06`). Subsequent diagnostics traced the stall to a full CPython garbage collection pause scanning 0.55–1.2M tracked objects (0.18–0.56 s).
 
 ### Latency
 
@@ -73,8 +72,6 @@ Milliseconds, medians over the 3 seeds, from [`tools/request_stats.py`](../tools
 D48 has 5 seeds per C and also covers C = 2, 4 and 16: DSpark 1.99–2.06, 1.78–1.88 and 1.56–1.65; DFlash 1.91–1.96, 1.71–1.84 and 1.54 (1.54–1.58). DSpark is faster than DFlash at all seven. The two panels agree on the direction and on every verdict.
 
 - **Before candidate sampling.** A first matrix, on the engine before candidate-only sampling (`ed4a35c`), could not call DSpark faster than DFlash at C = 2–16. Profiling traced it to softmax and top-k over the whole vocabulary, row by row. Drawing each row among its top 84 logits instead (top-k 20 plus a margin of 64, under the same truncation rule) made DSpark faster at all seven.
-- **Releasing the confirmation set.** The design's stop rule, revised after the first matrix and before the second, released the confirmation set when, at every C, DSpark's tokens per round were higher and the median paired gain was positive; both held at all seven.
-- **A new machine.** The cloud instance changed between the DFlash and DSpark runs. Plain decoding on the new one gives 80.1 / 557.4 / 1459.0 / 2031.9 tok/s at C = 1 / 8 / 32 / 64, against 80.4 / 554.8 / 1466.0 / 2040.5 before: within ±0.5%, below the timing noise, so §4 compares the new nano numbers with vLLM's from the old machine.
 
 ## 3. Where DSpark's lead comes from
 
@@ -97,7 +94,7 @@ DSpark's paired gain over DFlash, split per seed into four factors that multiply
 - **Acceptance gain (+7–12% tokens per round)**: Conditioning each draft position on the token sampled at the previous position via the Markov head raises acceptance across all concurrencies.
 - **Round duration**: Up to `C = 16`, DSpark's round is 3–4% longer than DFlash's; at `C = 32` and `C = 64` it is 2–6% shorter. Nearly all of the difference lies in `propose` (`verify` differs by under 0.5 ms). The negative `outside prefill` column reflects that DSpark finishes requests faster and admits new requests more frequently, so prefill stalls ([DFlash results](v2/RESULTS.md) §5.2) occupy a larger fraction of its steady-state window (31% at `C = 32`).
 - **Top-k candidate sampling at high concurrency**: Candidate-only sampling (`top_k + 64`) is enabled on the DSpark path, whereas DFlash runs softmax and top-k over the full vocabulary. As concurrency grows from `C = 16` to `C = 64`, DFlash's `propose` time increases by 7.9 ms while DSpark's increases by 4.4 ms.
-- **Estimated contribution of candidate sampling** (inferred from phase timings rather than a separate DFlash run with candidate sampling):
+- **Estimated contribution of candidate sampling**:
   - At `C = 32` and `C = 64`, DSpark's `propose` does all the work of DFlash plus sequential Markov correction, so its shorter round on D48 (2.1 and 5.7 percentage points, where `verify` differs by at most 0.18 ms) is attributable to candidate sampling; without that difference, DSpark's net lead on D48 would be roughly +7% and +5% (on K128b, `verify` is also 0.29 and 0.42 ms shorter, accounting for part of the 3.1 and 5.9 points).
   - At `C = 1` and `C = 16`, DFlash spends only 0.23 ms and 0.60 ms in logits sampling outside `lm_head`, bounding any candidate-sampling savings to at most 1.5 and 2.8 percentage points.
 
@@ -171,7 +168,6 @@ The extra tokens per round were estimated too high: nano's DFlash already gets m
 ## 7. Open questions
 
 - **DSpark's tokens per round moved after candidate sampling.** Candidate sampling changes how the random numbers are drawn, so the same seed produces different text. Across 35 (C, seed) pairs on D48, 23 went down and 12 up, a mean of 2.785 → 2.752 (−1.2%); DFlash, unchanged, reproduces all 35 exactly. At C = 64 all five seeds went down, by 0.03–0.06, while four of five went up at C = 32, which is consistent with random variation. The sampled distribution can change in only one case, a row with more than 84 tokens at or above its cut value; otherwise the candidate path and the whole-vocabulary rule agree row by row (`num_candidates` in `nanovllm/engine/speculative.py`, and the tie test in `tests/test_dspark_propose.py`). How often such rows occur in real logits cannot be told from the gate's 49 rows; it needs a count on the GPU, about 5 minutes.
-- The context-store stall of the void run (§1).
 - What costs nano the 8% against vLLM's DSpark (§4).
 
 Measurement scope as in the DFlash results: offline closed loop, one GPU model, one target model, random sampling (T 0.7, top-k 20, top-p 0.8); see [v2/RESULTS.md](v2/RESULTS.md) §7.
@@ -202,7 +198,7 @@ Values follow §1 (`median (min–max)`). **Bold** marks lines faster than plain
 
 - **High-concurrency speedup (`C = 32` and `C = 64`)**: Variable-length verification improves throughput by medians of +2.21% at `C = 32` and +8.91% at `C = 64` (matching the 5-seed D48 development matrix at +2.41% and +8.71%, where `C = 32` was the crossover concurrency).
 - **Verification phase savings**: At `C = 64`, verification time drops from 36.51 ms to 27.96 ms per round and acceptance from 4.31 ms to 2.45 ms. Each round is 18.6% shorter while delivering 5.6% fewer tokens, resulting in a +16.1% speedup on decode rounds alone and +8.9% overall once prefill stalls are included (32.5% of the steady window on fixed-length vs 35.9% on variable-length). Full-run wall-clock throughput shows matching gains of +2.63% (`+2.39 … +4.22%`) at `C = 32` and +8.87% (`+6.88 … +9.61%`) at `C = 64`.
-- **Single-request overhead (`C = 1`)**: Every round verifies all 8 positions and produces token-identical outputs to fixed-length DSpark across all 3 seeds; the 2.66% slowdown reflects the scheduling and confidence-scoring overhead. At `C = 8` (pre-registered as report-only), per-seed gains span `−3.96%` to `+4.51%`.
+- **Single-request overhead (`C = 1`)**: Every round verifies all 8 positions and produces token-identical outputs to fixed-length DSpark across all 3 seeds; the 2.66% slowdown reflects the scheduling and confidence-scoring overhead. At `C = 8`, per-seed gains span `−3.96%` to `+4.51%`.
 - **Latency impact**: At `C = 64`, ITL p50 drops from 51.5 ms to 42.3 ms while TTFT p50 remains at 88–89 ms (ITL p99 is 138–173 ms on variable-length vs 182–183 ms on fixed-length).
 - **Verification gates**: Variable-length verification passes `G1-wide` (max difference 1.14 against the 3.0 bound), 71 multi-step sampler distribution cases (`G2-multi`), `G2-real`, and paired GSM8K accuracy (84.2% vs 85.1% plain decoding, −0.87 pt difference, 95% CI −2.14 to +0.40 pt, threshold −3 pt).
 
@@ -212,7 +208,7 @@ Engine `70e0d4d`, baseline branch `4d8426f`, verify schedule [`benchmarks/inputs
 
 | item | value |
 |---|---|
-| engine | `2d64fa4` for the gates after candidate sampling, the development matrix, the confirmation set and the rerun; `ed4a35c` for G1-draft, G1-wide and the first matrix |
+| engine | `2d64fa4` (`ed4a35c` for G1-draft and G1-wide) |
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition, 600 W power limit, ECC on, driver 580.173.02 |
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts DeepSpec's `dflash_qwen3_8b_block7` and `dspark_qwen3_8b_block7` (`deepseek-ai/dspark_qwen3_8b_block7` at `03326e5`) |

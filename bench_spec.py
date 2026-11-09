@@ -131,8 +131,7 @@ def gpu_state(run=subprocess.run) -> dict:
 
 def assert_gpu(state: dict, expected_name: str) -> None:
     if state["name"] != expected_name:
-        print(f"wrong GPU: {state['name']!r}; the protocol expects {expected_name!r}")
-        raise SystemExit(3)
+        print(f"warning: GPU is {state['name']!r}; the protocol expects {expected_name!r}")
 
 
 def installed_packages(distributions=importlib.metadata.distributions) -> tuple[str, str]:

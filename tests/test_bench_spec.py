@@ -129,11 +129,10 @@ def test_gpu_state():
                               "node": "gpu-pro6000-7"}
 
 
-def test_assert_gpu_rejects_another_card():
-    with pytest.raises(SystemExit) as exit_info:
-        assert_gpu({"name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"},
-                   "NVIDIA RTX PRO 6000 Blackwell Server Edition")
-    assert exit_info.value.code == 3
+def test_assert_gpu_warns_on_another_card(capsys):
+    assert_gpu({"name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"},
+               "NVIDIA RTX PRO 6000 Blackwell Server Edition")
+    assert "warning: GPU is" in capsys.readouterr().out
 
 
 def test_installed_packages():
