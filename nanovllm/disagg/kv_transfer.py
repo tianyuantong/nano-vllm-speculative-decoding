@@ -20,9 +20,10 @@ class KVCacheTransfer:
     Stream Ordering (Three-Stage Pipeline without CPU blocking):
     1. `transfer_stream.wait_event(prefill_done_event)` ensures P has finished writing `p_blocks`.
     2. `transfer_stream.wait_event(d_alloc_event)` ensures D's previous decode step is no longer reading `d_blocks`.
-    3. `copy_(non_blocking=True)` copies `p_blocks -> d_blocks` via the GPU Copy Engine (PCIe P2P / NVLink / D2D).
-    4. `copy_done_event` is recorded on `transfer_stream`:
-       - D's `d_stream.wait_event(copy_done_event)` waits on the GPU before decoding `seq`.
+    3. `copy_(non_blocking=True)` copies `p_blocks -> d_blocks`. One block of the cache is not a contiguous slice,
+       so PyTorch copies it with a kernel on P's device (through peer access when the cards differ), not a memcpy.
+    4. `copy_done_event` is recorded on the destination's transfer stream:
+       - D admits `seq` into its running batch once `copy_done_event.query()` succeeds; no round waits for a copy.
        - P's `p_blocks` are held in `_in_flight` and returned to `p_bm` once `copy_done_event.query()` succeeds.
     """
 

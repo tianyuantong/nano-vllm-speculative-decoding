@@ -207,13 +207,16 @@ class DisaggLLM:
         return transferred
 
     def decode_step(self) -> int:
-        """Admit ready handoffs into D and run one decode / speculative round on D."""
+        """Admit the handoffs whose KV copy has finished into D and run one decode / speculative round on D."""
         self._flush_handoffs()
         d_sched = self.decode_engine.scheduler
+        # A sequence joins D only once its copy is done. Making `d_stream` wait on `copy_done` instead would hold
+        # this round, and every sequence already running in it, for the whole copy.
         while self._ready_for_decode and len(d_sched.running) < d_sched.max_num_seqs:
-            seq, copy_done = self._ready_for_decode.popleft()
-            if self.d_stream is not None:
-                self.d_stream.wait_event(copy_done)
+            seq, copy_done = self._ready_for_decode[0]
+            if not copy_done.query():
+                break
+            self._ready_for_decode.popleft()
             seq.status = SequenceStatus.RUNNING
             d_sched.running.append(seq)
         if d_sched.waiting:
