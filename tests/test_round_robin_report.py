@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from round_robin_report import load_finite_runs, spread, standing_groups, table  # noqa: E402
+from round_robin_report import LATER_RATIOS, LATER_VALUES, load_finite_runs, measures, spread, standing_groups, table  # noqa: E402
 
 LINES = ["k0", "k0_rr"]
 PROTOCOL = {"gpu": {"name": "G4"}, "lines": {line: {"tree": "main", "k": 0, "k0_line": line} for line in LINES},
@@ -52,8 +52,8 @@ def test_a_result_file_with_a_non_finite_value_is_not_read(tmp_path):
 
 
 def one_line(itl_p99, q_steady=100.0):
-    return {"q_steady": q_steady, "q_full": 90.0, "itl_p50": 20.0, "itl_p99": itl_p99, "prefill_gaps": 0.25,
-            "ttft_p50": 50.0, "ttft_p99": 400.0}
+    return {"q_steady": q_steady, "q_full": 90.0, "itl_p50": 20.0, "itl_p99": itl_p99, "itl_max": 300.0,
+            "prefill_gaps": 0.25, "ttft_p50": 50.0, "ttft_p99": 400.0}
 
 
 def test_spread_is_the_median_and_the_range():
@@ -69,4 +69,32 @@ def test_table_pairs_each_seed_before_taking_the_median():
     assert cells[3] == "0.99 (0.98–1.00)"               # Q_steady: 98/100 and 100/100
     assert cells[5] == "0.65 (0.60–0.70)"               # ITL p99: 70/100 and 120/200, not 95/150
     assert cells[9] == "150.0 → 95.0"                   # the medians of each line's own milliseconds
-    assert cells[12] == "400 → 400"                     # TTFT p99, both lines'
+    assert cells[13] == "400 → 400"                     # TTFT p99, both lines'
+
+
+def test_measures_take_the_later_requests_and_the_longest_gap():
+    durations = [("prefill", 600.0), ("decode", 20.0), ("prefill", 50.0), ("decode", 20.0), ("prefill", 100.0),
+                 ("decode", 20.0)]
+    steps, start = [], 0.0
+    for index, (kind, duration) in enumerate(durations):
+        steps.append({"step": index, "kind": kind, "batch_size": 1, "start_ms": start, "duration_ms": duration})
+        start += duration
+    requests = [{"submit_step": 0, "deliveries": [[0, 1], [1, 1], [3, 1], [5, 1]], "token_ids": [1, 2, 3, 4]},
+                {"submit_step": 1, "deliveries": [[2, 1], [3, 1]], "token_ids": [1, 2]},      # 670 - 600
+                {"submit_step": 2, "deliveries": [[2, 1]], "token_ids": [1]},                 # 670 - 620
+                {"submit_step": 2, "deliveries": [[4, 1]], "token_ids": [1]}]                 # 790 - 620
+    result = {"steps": steps, "requests": requests, "config": {"concurrency": 1}}
+    values = measures(result, {"q_steady": 1.0, "q_full": 1.0, "ttft_ms": {"p50": 70.0, "p99": 600.0}})
+    assert values["later_ttft_p50"] == 70.0      # of 50, 70 and 170: the request of the start, at 600, is left out
+    assert values["later_ttft_p99"] > 160.0
+    assert values["ttft_p99"] == 600.0           # the protocol's, over every request, is kept
+    assert values["itl_max"] == 120.0            # the first request, across the 100 ms prefill step: 810 - 690
+
+
+def test_table_takes_other_columns():
+    groups = {(32, 1): {"k0": {"later_ttft_p50": 50.0, "later_ttft_p99": 100.0},
+                        "k0_rr": {"later_ttft_p50": 50.0, "later_ttft_p99": 250.0}}}
+    row = table(groups, {"k0": "k0_rr"}, [32], LATER_RATIOS, LATER_VALUES)[2]
+    cells = [cell.strip() for cell in row.strip("|").split("|")]
+    assert cells[3] == "2.50 (2.50–2.50)"
+    assert cells[4:] == ["50 → 50", "100 → 250"]
