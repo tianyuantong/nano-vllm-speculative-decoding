@@ -204,6 +204,30 @@ Values follow §1 (`median (min–max)`). **Bold** marks lines faster than plain
 
 Engine `70e0d4d`, baseline branch `4d8426f`, verify schedule [`benchmarks/inputs/verify-schedule-g4.json`](../benchmarks/inputs/verify-schedule-g4.json), driver 580.82.07; raw run JSONs and gates are archived in release [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length).
 
+## 9. Round-robin prefill
+
+A prefill step does no decoding in this engine, and the default scheduler prefills every waiting request before it decodes again (§1, Latency). With `round_robin_prefill=True`, a step admits one request and a decode step follows each prefill step ([usage](DECODING.md#round-robin-prefill)). On the D48 development panel, closed loop, 3 seeds, each line run with and without the option back to back:
+
+| Concurrent requests | line | ITL p99, ms | ITL p99 ratio, per seed | Throughput ratio | TTFT p50, ms | Gaps with a prefill step |
+|---:|---|---|---|---|---|---|
+| 8 | plain decoding | 61.0 → 61.0 | 1.00 (0.98–1.00) | 1.00 (0.99–1.00) | 50 → 49 | 2% → 2% |
+| 8 | DSpark, fixed length | 71.5 → 71.5 | 1.00 (1.00–1.00) | 0.99 (0.99–1.00) | 52 → 50 | 6% → 6% |
+| 8 | DSpark, variable length | 71.7 → 71.6 | 1.00 (1.00–1.00) | 1.00 (0.96–1.01) | 52 → 50 | 6% → 6% |
+| 32 | plain decoding | 73.6 → 68.0 | 0.92 (0.91–1.00) | 1.00 (0.99–1.00) | 51 → 51 | 8% → 9% |
+| 32 | DSpark, fixed length | 124.6 → 89.2 | **0.72 (0.70–0.72)** | 1.00 (1.00–1.00) | 52 → 52 | 23% → 25% |
+| 32 | DSpark, variable length | 128.4 → 87.2 | **0.68 (0.67–0.71)** | 1.00 (0.99–1.01) | 59 → 52 | 21% → 25% |
+| 64 | plain decoding | 109.5 → 76.4 | **0.70 (0.68–0.70)** | 0.98 (0.98–0.99) | 57 → 51 | 14% → 18% |
+| 64 | DSpark, fixed length | 184.6 → 111.8 | **0.61 (0.60–0.61)** | 0.98 (0.98–1.00) | 89 → 151 | 40% → 52% |
+| 64 | DSpark, variable length | 176.2 → 102.8 | **0.58 (0.56–0.58)** | 0.98 (0.97–1.00) | 89 → 142 | 38% → 49% |
+
+Milliseconds are medians over the 3 seeds, default → round-robin; ratios are round-robin ÷ default per seed, `median (min–max)`. ITL is taken over the steady window; the throughput ratio is of `Q_steady`.
+
+- **Tail latency.** At 32 and 64 concurrent requests DSpark's ITL p99 falls to 0.58–0.72 of the default scheduler's, and plain decoding's to 0.92 and 0.70. Nothing changes at 8, where a gap rarely holds more than one prompt's prefill.
+- **Throughput.** Steady-state throughput stays at 0.98–1.00 of the default's: the same prefills run, one at a time.
+- **Cost at 64 concurrent requests.** An arriving request waits one decode step for each request ahead of it, and DSpark's TTFT p50 rises from 89 ms to 142–151 ms. With fixed-length DSpark, 52% of the gaps in the steady window then hold one prefill step (40% under the default), so the median gap moves from 53 ms to 101 ms; with variable length the share stays under half and the median stays at 44 ms.
+
+Engine `9a97b6f`, [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json) for the lines, sampling and panel, `bench_spec.py --round-robin-prefill` for the option; [`tools/itl_stats.py`](../tools/itl_stats.py) and [`tools/summarize_bench.py`](../tools/summarize_bench.py) give the columns. Not run on K128b.
+
 ## Appendix: environment and data
 
 | item | value |
