@@ -1,6 +1,6 @@
 {
   "version": "2.9",
-  "frozen": false,
+  "frozen": true,
   "derived_from": {
     "file": "benchmarks/protocol-v2.3.json",
     "sha256": "f93739d1fedad94fd4105b5860a67ee349823fb3fd172da7d6f3f3b5a0c9330f"
