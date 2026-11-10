@@ -29,6 +29,7 @@ class Config:
                                               # variable-length round must be given them
     record_confidences: bool = False          # keep every round's DSpark confidence logits and accepted counts
     seed: int | None = None                 # seed of the engine's sampling generator
+    round_robin_prefill: bool = False         # past the initial group, a step admits one request and a decode follows it
     record_step_timings: bool = False         # record a pair of CUDA events per engine step
 
     def __post_init__(self):

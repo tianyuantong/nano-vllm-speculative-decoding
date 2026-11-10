@@ -71,10 +71,11 @@ class LLMEngine:
         self.scheduler.add(seq)
         return seq
 
-    def start_measurement(self) -> None:
+    def start_measurement(self, initial_group: int = 0) -> None:
         """Forget earlier step timings, round phases, acceptance counts and recorded confidences, and restart the step
-        count."""
+        count. Under round-robin prefill the next initial_group requests are still admitted together."""
         self.step_timer.reset()
+        self.scheduler.initial_requests_left = initial_group
         if self.speculative is not None:
             self.speculative.reset_phase_timings()
             self.speculative.stats.clear()

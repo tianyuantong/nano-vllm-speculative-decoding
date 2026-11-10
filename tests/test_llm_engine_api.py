@@ -56,6 +56,13 @@ def test_start_measurement_clears_timings_stats_and_steps():
     engine.start_measurement()
     assert engine.step_timer.timings() == []
     assert engine.num_steps == 0 and not speculative.stats and not speculative.confidence_log and len(resets) == 1
+    assert engine.scheduler.initial_requests_left == 0
+
+
+def test_start_measurement_sets_the_initial_group():
+    engine = make_engine()
+    engine.start_measurement(initial_group=8)
+    assert engine.scheduler.initial_requests_left == 8
 
 
 def test_start_measurement_without_a_draft():
