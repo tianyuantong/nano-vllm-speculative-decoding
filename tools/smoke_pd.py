@@ -37,6 +37,40 @@ def first_diff(left: list[int], right: list[int]) -> int | None:
     return None if len(left) == len(right) else min(len(left), len(right))
 
 
+class _HeldCopy:
+    """A copy-done event that reports done only once D has reached the step `release_step`."""
+
+    def __init__(self, event, decode_engine, release_step: int):
+        self.event = event
+        self.decode_engine = decode_engine
+        self.release_step = release_step
+
+    def query(self) -> bool:
+        # An idle D never reaches `release_step`: let the sequence in rather than hang.
+        is_released = self.decode_engine.num_steps >= self.release_step or not self.decode_engine.scheduler.running
+        return is_released and self.event.query()
+
+    def synchronize(self) -> None:
+        self.event.synchronize()
+
+
+def replay_rounds(disagg: DisaggLLM, prompts: list[str], params: SamplingParams, rounds: list[int]) -> list[dict]:
+    """Serial pass whose request `i` joins decode in round `rounds[i]`, the rounds a two-thread pass reported."""
+    first_step = disagg.decode_engine.num_steps
+    release_steps = iter(first_step + round_index for round_index in rounds)
+    handoff = disagg.transfer.handoff
+
+    def held_handoff(seq, prefill_done_event=None, d_alloc_event=None):
+        copy_done = handoff(seq, prefill_done_event, d_alloc_event)
+        return _HeldCopy(copy_done, disagg.decode_engine, next(release_steps))
+
+    disagg.transfer.handoff = held_handoff
+    try:
+        return disagg.generate(prompts, params, threaded=False)
+    finally:
+        del disagg.transfer.handoff
+
+
 def check_line(
     label: str,
     model_dir: str,
@@ -77,6 +111,8 @@ def check_line(
         d_total_blocks = len(disagg.decode_engine.scheduler.block_manager.blocks)
         serial_out = disagg.generate(PROMPTS, params, threaded=False)
         threaded_out = disagg.generate(PROMPTS, params, threaded=True)
+        threaded_rounds = first_decode_rounds(threaded_out)
+        replay_out = replay_rounds(disagg, PROMPTS, params, threaded_rounds)
         p_free_after = len(disagg.prefill_engine.scheduler.block_manager.free_block_ids)
         d_free_after = len(disagg.decode_engine.scheduler.block_manager.free_block_ids)
     finally:
@@ -91,22 +127,22 @@ def check_line(
     ref_ids = [r["token_ids"] for r in ref_out]
     serial_ids = [r["token_ids"] for r in serial_out]
     threaded_ids = [r["token_ids"] for r in threaded_out]
+    replay_ids = [r["token_ids"] for r in replay_out]
     # The serial pass waits for every hand-off copy, so its sequences join decode in the same round, as in the
-    # reference. The worker threads admit each sequence when its own copy lands: across two cards the first one can
-    # decode a round alone, and a round at another batch size can flip a near-tie under greedy decoding.
+    # reference. The worker threads admit each sequence when its own copy lands, so across two cards the first ones
+    # decode some rounds before the others join, and a round at another batch size can flip a near-tie under greedy
+    # decoding. The two-thread pass is therefore checked against a serial pass that repeats its decode rounds.
     assert serial_ids == ref_ids, f"{label}: DisaggLLM vs reference LLM mismatch"
-    threaded_rounds = first_decode_rounds(threaded_out)
-    has_same_rounds = threaded_rounds == first_decode_rounds(serial_out)
-    assert not has_same_rounds or threaded_ids == serial_ids, f"{label}: serial vs threaded mismatch on the same rounds"
+    assert threaded_ids == replay_ids, f"{label}: two-thread pass vs serial pass on the same decode rounds mismatch"
 
     ttft_ms = [round(r["ttft_ms"], 2) for r in threaded_out]
     itl_p50_ms = [round(sorted(r["itl_ms"])[len(r["itl_ms"]) // 2], 2) for r in threaded_out if r["itl_ms"]]
     return {
         "line": label,
         "exact_match_ref": True,
-        "exact_match_serial_vs_threaded": threaded_ids == serial_ids,
+        "exact_match_threaded_vs_replay": True,
         "threaded_first_decode_round": threaded_rounds,
-        "threaded_first_diff": [first_diff(t, s) for t, s in zip(threaded_ids, serial_ids)],
+        "threaded_first_diff_vs_ref": [first_diff(t, r) for t, r in zip(threaded_ids, ref_ids)],
         "p_blocks_reclaimed": f"{p_free_after}/{p_total_blocks}",
         "d_blocks_reclaimed": f"{d_free_after}/{d_total_blocks}",
         "ttft_ms": ttft_ms,
