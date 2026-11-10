@@ -90,6 +90,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
         kwargs.update(draft_model=draft, num_speculative_tokens=line["k"], draft_type=line["drafter"])
         if line.get("variable_length"):
             kwargs.update(variable_length=True, verify_schedule=str(ROOT / protocol["verify_schedule"]["file"]))
+    if line.get("round_robin_prefill"):
+        kwargs["round_robin_prefill"] = True
     return target, draft, kwargs
 
 
@@ -165,8 +167,6 @@ def parse_closed_loop_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True, help="git commit of the synced tree (the sync step refuses a dirty tree)")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--round-robin-prefill", action="store_true",
-                        help="past the first C requests, a step admits one request and a decode follows each prefill step")
     parser.add_argument("--record-confidences", action="store_true",
                         help="keep every round's DSpark confidence logits and accepted counts in <output>.confidences.json "
                              "(job A's calibration; the extra copy each round makes it no timing run)")
@@ -188,8 +188,6 @@ def closed_loop(args: argparse.Namespace) -> None:
     target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
     if args.record_confidences:
         kwargs["record_confidences"] = True
-    if args.round_robin_prefill:
-        kwargs["round_robin_prefill"] = True
     llm = LLM(target, **kwargs)
     rec = dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
                ignore_eos=sampling["ignore_eos"])

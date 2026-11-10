@@ -175,3 +175,10 @@ def test_engine_kwargs_give_the_variable_length_line_the_frozen_schedule(tmp_pat
     assert kwargs["dspark_var"]["variable_length"] is True
     assert kwargs["dspark_var"]["verify_schedule"] == str(ROOT / "benchmarks" / "inputs" / schedule)
     assert "variable_length" not in kwargs["dspark_k7"] and "draft_model" not in kwargs["k0_base"]
+
+
+def test_engine_kwargs_turn_on_round_robin_for_its_lines_only(tmp_path):
+    kwargs = kwargs_of_every_line("protocol-v2.9.json", tmp_path)
+    assert all(kwargs[line]["round_robin_prefill"] is True for line in ("k0_rr", "dspark_k7_rr", "dspark_var_rr"))
+    assert all("round_robin_prefill" not in kwargs[line] for line in ("k0", "dspark_k7", "dspark_var"))
+    assert kwargs["dspark_var_rr"]["variable_length"] is True
