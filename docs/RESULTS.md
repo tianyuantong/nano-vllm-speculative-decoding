@@ -262,4 +262,22 @@ Engine `c28b1f9`, driver 580.82.07; 66 runs, 0 void. The runs without the option
 
 Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run. Every run's file and log, the gates' outputs, the job scripts and the panels are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark), whose README gives the commands that regenerate these tables.
 
+### Commits named in the result files
+
+Result files and frozen protocols name the commit a job ran from. The jobs behind releases `results-dflash-dspark` and `results-variable-length` ran before the repository's history was rewritten, so the commits they name are not in it. Each has a public commit with the same content:
+
+| Named | Where | Public commit | Relation |
+|---|---|---|---|
+| `1f78eca` | release `results-dflash-dspark`, 114 files | `c21aea4` | same tree |
+| `10b38b4` | release `results-dflash-dspark`, 39 files | `a01aadd` | same tree |
+| `3dc0dba` | release `results-dflash-dspark`, 118 files | `ed4a35c` | same tree |
+| `f30ed0a` | release `results-dflash-dspark`, 155 files | `2d64fa4` | same tree |
+| `ad87956` | protocols v2.2 and v2.3; 2 reference runs in release `results-round-robin-prefill` | `bafe536` | same tree |
+| `9316ab3` | protocol v2.2 | `a28d721` | same tree |
+| `97fdd3c` | release `results-variable-length`, 177 files | `70e0d4d` | same tree |
+| `5bf4cbc` | release `results-variable-length`, 6 files; protocol v2.3 | `70e0d4d` | same `nanovllm/` and `bench_spec.py` |
+| `66f99b6` | release `results-variable-length`, 30 files | `4d8426f` | same `nanovllm/` and `bench_spec.py` |
+
+`dee9fbd`, named in protocol v2.9 and by one reference run in release `results-round-robin-prefill`, is on the development branch the round-robin scheduler was first written on, which was not published; §9's engine, `c28b1f9`, reproduces that run token for token.
+
 The DFlash results on K128 are in [v2/RESULTS.md](v2/RESULTS.md), and the September results of the 0.6B draft in [v1/RESULTS.md](v1/RESULTS.md).
