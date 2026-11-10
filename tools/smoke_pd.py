@@ -132,6 +132,9 @@ def check_line(
     # reference. The worker threads admit each sequence when its own copy lands, so across two cards the first ones
     # decode some rounds before the others join, and a round at another batch size can flip a near-tie under greedy
     # decoding. The two-thread pass is therefore checked against a serial pass that repeats its decode rounds.
+    print(label, "two-thread first decode rounds", threaded_rounds,
+          "| first diff vs reference", [first_diff(t, r) for t, r in zip(threaded_ids, ref_ids)],
+          "| first diff vs replay", [first_diff(t, r) for t, r in zip(threaded_ids, replay_ids)], flush=True)
     assert serial_ids == ref_ids, f"{label}: DisaggLLM vs reference LLM mismatch"
     assert threaded_ids == replay_ids, f"{label}: two-thread pass vs serial pass on the same decode rounds mismatch"
 
