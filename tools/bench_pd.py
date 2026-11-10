@@ -150,7 +150,8 @@ def run_closed_loop_with_wall(llm, panel: list[dict], params: SamplingParams, co
     return records, ttfts_ms, itls_ms
 
 
-def run_colocated(target: str, kwargs: dict, panel: list[dict], sampling: dict, concurrency: int) -> dict:
+def run_colocated(target: str, kwargs: dict, panel: list[dict], sampling: dict, concurrency: int) -> tuple[dict, dict]:
+    """One co-located run: its summary row and the raw records the row was computed from."""
     from nanovllm import LLM
     warmup_params = SamplingParams(
         temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
@@ -185,9 +186,11 @@ def run_colocated(target: str, kwargs: dict, panel: list[dict], sampling: dict, 
     summary = summarize_v2(fake_result)
     gaps = colocated_itl(fake_result, concurrency)
     total_tokens = sum(len(r["token_ids"]) for r in requests)
+    raw = {"steps": steps, "requests": requests, "ttft_wall_ms": wall_ttfts, "itl_wall_ms": wall_itls}
     return {
         "mode": "colocated",
         "concurrency": concurrency,
+        "cards": 1,
         "steady_window_reached": True,
         "q_steady_tok_s": round(summary["q_steady"], 1),
         "q_wall_tok_s": round(total_tokens / wall_s, 1),
@@ -204,7 +207,7 @@ def run_colocated(target: str, kwargs: dict, panel: list[dict], sampling: dict, 
         "round_p50_ms": round(summary["round_ms"]["p50"], 2),
         "round_p99_ms": round(summary["round_ms"]["p99"], 2),
         "slow_steps": count_slow_steps(steps),
-    }
+    }, raw
 
 
 def run_disagg(
@@ -216,7 +219,12 @@ def run_disagg(
     p_device: int,
     d_device: int,
     prefetch: int,
-) -> dict:
+) -> tuple[dict, dict]:
+    """One PD run: its summary row and the raw records the row was computed from.
+
+    `itl_wall_*` covers every interval between deliveries on the host clock, the handoff gap (P's first token to
+    D's first round) included, like the co-located row's. `itl_decode_cuda_*` covers D's rounds only.
+    """
     from nanovllm.disagg import DisaggLLM
     warmup_params = SamplingParams(
         temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
@@ -253,6 +261,7 @@ def run_disagg(
 
     cuda_gaps = disagg_cuda_itl(d_steps, outputs, concurrency)
     wall_itls = [gap for out in outputs for gap in out["itl_ms"]]
+    handoff_gaps = [out["itl_ms"][0] for out in outputs if out["itl_ms"]]
     ttfts = [out["ttft_ms"] for out in outputs if out["ttft_ms"] is not None]
     total_tokens = sum(len(out["token_ids"]) for out in outputs)
     q_steady_val, q_steady_decode_val = disagg_q_steady(d_steps, outputs, concurrency)
@@ -260,20 +269,27 @@ def run_disagg(
     if q_steady_val is None:
         q_steady_val = round(total_tokens / wall_s, 1)
 
+    raw = {
+        "p_steps": p_steps,
+        "d_steps": d_steps,
+        "requests": [{key: out[key] for key in ("token_ids", "ttft_ms", "itl_ms", "d_deliveries")} for out in outputs],
+    }
     return {
         "mode": f"disagg_p{p_device}_d{d_device}_pf{prefetch}",
         "concurrency": concurrency,
+        "cards": 1 if p_device == d_device else 2,
         "steady_window_reached": steady_reached,
         "q_steady_tok_s": q_steady_val,
         "q_steady_decode_only_tok_s": q_steady_decode_val,
         "q_wall_tok_s": round(total_tokens / wall_s, 1),
         "ttft_wall_p50_ms": round(percentile(ttfts, 50), 2),
         "ttft_wall_p99_ms": round(percentile(ttfts, 99), 2),
-        "itl_cuda_p50_ms": cuda_gaps["p50"],
-        "itl_cuda_p99_ms": cuda_gaps["p99"],
+        "itl_decode_cuda_p50_ms": cuda_gaps["p50"],
+        "itl_decode_cuda_p99_ms": cuda_gaps["p99"],
         "itl_wall_p50_ms": round(percentile(wall_itls, 50), 2) if wall_itls else 0.0,
         "itl_wall_p99_ms": round(percentile(wall_itls, 99), 2) if wall_itls else 0.0,
-        "prefill_stalled_intervals_pct": 0.0,
+        "handoff_gap_wall_p50_ms": round(percentile(handoff_gaps, 50), 2) if handoff_gaps else 0.0,
+        "handoff_gap_wall_p99_ms": round(percentile(handoff_gaps, 99), 2) if handoff_gaps else 0.0,
         "round_p50_ms": cuda_gaps["round_p50"],
         "round_p99_ms": cuda_gaps["round_p99"],
         "p_steps": len(p_steps),
@@ -282,7 +298,7 @@ def run_disagg(
         "d_active_ms": round(sum(s["duration_ms"] for s in d_steps), 1),
         "slow_steps_p": count_slow_steps(p_steps),
         "slow_steps_d": count_slow_steps(d_steps),
-    }
+    }, raw
 
 
 def main() -> int:
@@ -294,7 +310,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=17011)
     parser.add_argument("--prefill-device", type=int, default=0)
     parser.add_argument("--decode-device", type=int, default=0)
-    parser.add_argument("--prefetch", type=int, default=2)
+    parser.add_argument("--prefetch", type=int, default=0,
+                        help="requests PD keeps in flight beyond C; 0 holds as many as the co-located run")
     parser.add_argument("--prefetches", nargs="+", type=int, default=None)
     parser.add_argument("--models-root", type=str, default="/content/models")
     parser.add_argument("--commit", type=str, default=None)
@@ -315,14 +332,14 @@ def main() -> int:
         panel = load_panel(panel_path, c, panel_spec["take"])
         target, _, kwargs = engine_kwargs(protocol, line, panel, c, args.seed, args.models_root)
         if args.worker_mode == "colocated":
-            row = run_colocated(target, kwargs, panel, sampling, c)
+            row, raw = run_colocated(target, kwargs, panel, sampling, c)
         else:
-            row = run_disagg(
+            row, raw = run_disagg(
                 target, kwargs, panel, sampling, c, args.prefill_device, args.decode_device, args.prefetch
             )
         row["line"] = line_name
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(row, indent=2) + "\n")
+        args.output.write_text(json.dumps({"row": row, "raw": raw}) + "\n")
         return 0
 
     commit = args.commit or subprocess.run(
@@ -337,7 +354,7 @@ def main() -> int:
             runs = [("colocated", 0)] + [("disagg", pf) for pf in prefetches]
             for mode, pf in runs:
                 tag = mode if mode == "colocated" else f"disagg_pf{pf}"
-                tmp_out = args.output.with_suffix(f".{line_name}.c{c}.{tag}.json")
+                run_out = args.output.with_suffix(f".{line_name}.c{c}.{tag}.json")    # kept: the run's raw records
                 cmd = [
                     sys.executable, str(Path(__file__).resolve()),
                     "--protocol", str(args.protocol),
@@ -350,11 +367,11 @@ def main() -> int:
                     "--prefetch", str(pf),
                     "--models-root", args.models_root,
                     "--worker-mode", mode,
-                    "--output", str(tmp_out),
+                    "--output", str(run_out),
                 ]
                 subprocess.run(cmd, check=True)
-                row = json.loads(tmp_out.read_text())
-                tmp_out.unlink(missing_ok=True)
+                row = json.loads(run_out.read_text())["row"]
+                row["raw_file"] = run_out.name
                 rows.append(row)
                 pair[tag] = row
             print(json.dumps({"line": line_name, "c": c, **pair}, indent=2), flush=True)
