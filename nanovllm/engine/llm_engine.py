@@ -3,6 +3,7 @@ from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoTokenizer
+import torch
 import torch.multiprocessing as mp
 
 from nanovllm.config import Config
@@ -43,12 +44,15 @@ class LLMEngine:
             if not config.enforce_eager:
                 self.speculative.capture_graphs()
             if config.record_step_timings:
-                self.speculative.enable_phase_timings()
+                self.speculative.enable_phase_timings(synchronize=self._synchronize)
         self.scheduler = Scheduler(config)
-        self.step_timer = StepTimer(config.record_step_timings)
+        self.step_timer = StepTimer(config.record_step_timings, synchronize=self._synchronize)
         self.num_steps = 0
         self._exited = False
         atexit.register(self.exit)
+
+    def _synchronize(self) -> None:
+        torch.cuda.synchronize(self.model_runner.device)
 
     def exit(self):
         if self._exited:

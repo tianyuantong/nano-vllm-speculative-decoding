@@ -100,6 +100,7 @@ class DFlashDrafter:
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self.sampling_graphs: dict[tuple[int, bool, bool] | None, dict[int, torch.cuda.CUDAGraph]] = {}
         self.sampling_noise: dict[tuple[int, bool, bool], torch.Tensor] = {}
+        self.freeze_sampling_graphs: bool = False
         self.graph_vars: dict[str, torch.Tensor] = {}
 
     @torch.inference_mode()
@@ -185,7 +186,9 @@ class DFlashDrafter:
 
     def _has_sampling_graphs(self, sampling: SamplingTensors) -> bool:
         """Whether this batch's sampling key has its sampling graphs, or may still capture them."""
-        return sampling_graph_key(sampling) in self.sampling_graphs or len(self.sampling_graphs) < MAX_SAMPLING_KEYS
+        return sampling_graph_key(sampling) in self.sampling_graphs or (
+            not self.freeze_sampling_graphs and len(self.sampling_graphs) < MAX_SAMPLING_KEYS
+        )
 
     def _sample_markov_graph(self, batch_size: int,
                              sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -259,10 +262,10 @@ class DFlashDrafter:
             for batch_size in reversed(decoder.graph_batch_sizes):
                 graph = torch.cuda.CUDAGraph()
                 self._sampling_forward(batch_size, key)    # warm-up
-                with torch.cuda.graph(graph, decoder.target.graph_pool):
+                with torch.cuda.graph(graph, decoder.target.graph_pool, stream=decoder.target.capture_stream):
                     self._sampling_forward(batch_size, key)
                 graphs[batch_size] = graph
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(decoder.device)
         self.sampling_graphs[key] = graphs
 
     def _forward_eager(self, seqs: list[Sequence]) -> torch.Tensor:
@@ -317,10 +320,10 @@ class DFlashDrafter:
                             context_lens=buffers["context_lens"][:batch_size],
                             block_tables=buffers["block_tables"][:batch_size], query_len_per_seq=k, causal=False)
                 buffers["outputs"][:rows] = self.model(buffers["input_ids"][:rows], buffers["positions"][:rows])    # warm-up
-                with torch.cuda.graph(graph, decoder.target.graph_pool):
+                with torch.cuda.graph(graph, decoder.target.graph_pool, stream=decoder.target.capture_stream):
                     buffers["outputs"][:rows] = self.model(buffers["input_ids"][:rows], buffers["positions"][:rows])
                 self.graphs[batch_size] = graph
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(decoder.device)
                 reset_context()
 
     @torch.inference_mode()
@@ -564,10 +567,10 @@ class SpeculativeDecoder:
                 graph = torch.cuda.CUDAGraph()
                 self._set_graph_context(num_rows, num_tokens)
                 self.graph_vars["outputs"][:num_tokens] = self._graph_forward(num_tokens)    # warm-up
-                with torch.cuda.graph(graph, self.target.graph_pool):
+                with torch.cuda.graph(graph, self.target.graph_pool, stream=self.target.capture_stream):
                     self.graph_vars["outputs"][:num_tokens] = self._graph_forward(num_tokens)
                 self.graphs[num_tokens] = graph
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 reset_context()
         self.drafter.capture_graphs()
 

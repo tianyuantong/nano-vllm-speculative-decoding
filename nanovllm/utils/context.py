@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 import torch
 
@@ -15,17 +16,22 @@ class Context:
     query_len_per_seq: int = 1    # decode queries per sequence; a DFlash draft block passes its block size
     causal: bool = True           # a DFlash draft block attends to its whole block: False
 
-_CONTEXT = Context()
 
-def get_context():
-    return _CONTEXT
+_TLS = threading.local()
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None,
-                query_len_per_seq=1, causal=True):
-    global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables,
-                       query_len_per_seq, causal)
+
+def get_context() -> Context:
+    ctx = getattr(_TLS, "context", None)
+    if ctx is None:
+        ctx = _TLS.context = Context()
+    return ctx
+
+
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None,
+                context_lens=None, block_tables=None, query_len_per_seq=1, causal=True):
+    _TLS.context = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping,
+                           context_lens, block_tables, query_len_per_seq, causal)
+
 
 def reset_context():
-    global _CONTEXT
-    _CONTEXT = Context()
+    _TLS.context = Context()

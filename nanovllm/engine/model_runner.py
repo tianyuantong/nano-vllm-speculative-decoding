@@ -8,6 +8,7 @@ from nanovllm.config import Config
 from nanovllm.engine.batch_metadata import decode_metadata, padded_block_tables, prefill_metadata
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.spec_sampler import sampling_tensors
 from nanovllm.utils.context import set_context, get_context, reset_context
@@ -43,9 +44,16 @@ class ModelRunner:
         self.has_pad_block = config.num_speculative_tokens > 0
         self.pad_block_id = -1
 
-        torch.cuda.set_device(rank)
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
-        self.device = torch.device("cuda", torch.cuda.current_device())
+        device_id = config.device_id if self.world_size == 1 else rank
+        torch.cuda.set_device(device_id)
+        self._owns_process_group = not dist.is_initialized()
+        if self._owns_process_group:
+            if self.world_size == 1:
+                dist.init_process_group("nccl", store=dist.HashStore(), world_size=1, rank=0)
+            else:
+                dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        self.device = torch.device("cuda", device_id)
+        self.capture_stream = torch.cuda.Stream(self.device)    # torch.cuda.graph's default stream is one per process
         self.generator = torch.Generator(device=self.device)
         if config.seed is not None:
             self.generator.manual_seed(config.seed)
@@ -53,7 +61,8 @@ class ModelRunner:
         default_device = torch.get_default_device()
         try:
             torch.set_default_dtype(hf_config.dtype)
-            torch.set_default_device("cuda")
+            torch.set_default_device(self.device)
+            get_rope.cache_clear()  # lru_cache would otherwise reuse cos_sin_cache from another device
             self.model = Qwen3ForCausalLM(hf_config)
             load_model(self.model, config.model)
             self.sampler = Sampler()
@@ -76,7 +85,7 @@ class ModelRunner:
         default_device = torch.get_default_device()
         try:
             torch.set_default_dtype(self.config.hf_config.dtype)
-            torch.set_default_device("cuda")
+            torch.set_default_device(self.device)
             self.warmup_model()
             self.allocate_kv_cache()
             if not self.enforce_eager:
@@ -94,8 +103,10 @@ class ModelRunner:
                 self.shm.unlink()
         if not self.enforce_eager:
             del self.graphs, self.graph_pool
-        torch.cuda.synchronize()
-        dist.destroy_process_group()
+        torch.cuda.synchronize(self.device)
+        if self._owns_process_group and dist.is_initialized():
+            dist.destroy_process_group()
+            self._owns_process_group = False
 
     def loop(self):
         while True:
@@ -142,10 +153,11 @@ class ModelRunner:
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
-        free, total = torch.cuda.mem_get_info()
+        free, total = torch.cuda.mem_get_info(self.device)
         used = total - free
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        stats = torch.cuda.memory_stats(self.device)
+        peak = stats["allocated_bytes.all.peak"]
+        current = stats["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
@@ -169,7 +181,7 @@ class ModelRunner:
                 layer_id += 1
 
     def _device_tensor(self, values: list, dtype: torch.dtype) -> torch.Tensor:
-        return torch.tensor(values, dtype=dtype, pin_memory=True).cuda(non_blocking=True)
+        return torch.tensor(values, dtype=dtype, pin_memory=True).to(self.device, non_blocking=True)
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         return self._device_tensor(padded_block_tables(seqs), torch.int32)
@@ -246,12 +258,12 @@ class ModelRunner:
             graph = torch.cuda.CUDAGraph()
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
-            with torch.cuda.graph(graph, self.graph_pool):
+            with torch.cuda.graph(graph, self.graph_pool, stream=self.capture_stream):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             reset_context()
 
         self.graph_vars = dict(
