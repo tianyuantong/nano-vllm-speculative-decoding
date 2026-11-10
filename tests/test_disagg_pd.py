@@ -191,6 +191,66 @@ def test_disagg_llm_end_to_end_single_and_multi_threaded(monkeypatch):
         assert s["ttft_ms"] > 0
 
 
+class _SlowStream:
+    """Stands for one CUDA stream: its events complete in recorded order, one per `POLLS_PER_EVENT` queries, and
+    `synchronize()` on an event completes it and every earlier one."""
+
+    POLLS_PER_EVENT = 3
+
+    def __init__(self):
+        self.num_recorded = 0
+        self.num_done = 0
+        self.num_polls = 0
+
+    def new_event(self):
+        stream = self
+
+        class _Event:
+            def record(self, _stream=None) -> None:
+                stream.num_recorded += 1
+                self.index = stream.num_recorded
+
+            def query(self) -> bool:
+                if self.index > stream.num_done:
+                    stream.num_polls += 1
+                    if stream.num_polls % stream.POLLS_PER_EVENT == 0:
+                        stream.num_done += 1
+                return self.index <= stream.num_done
+
+            def synchronize(self) -> None:
+                stream.num_done = max(stream.num_done, self.index)
+
+        return _Event()
+
+
+def test_disagg_llm_serial_step_waits_for_slow_copies(monkeypatch):
+    """In single-thread mode the sequences of one prefill batch start decoding in the same round, however slow the copies."""
+    monkeypatch.setattr(Sequence, "block_size", 4)
+
+    class _RecordingEngine(_FakeEngine):
+        def __init__(self, model: str, **kwargs):
+            super().__init__(model, **kwargs)
+            self.batch_sizes: list[int] = []
+
+        def step(self):
+            self.batch_sizes.append(len(self.scheduler.running))
+            return super().step()
+
+    prompts = [[1, 2, 3, 4], [1, 2, 3, 4, 5], [10, 20], [7, 8, 9, 10, 11, 12]]
+    disagg = DisaggLLM(
+        "dummy",
+        prefill_engine_cls=_FakeEngine,
+        decode_engine_cls=_RecordingEngine,
+        use_cuda_streams=False,
+        event_factory=_SlowStream().new_event,
+    )
+    out = disagg.generate(prompts, SamplingParams(temperature=0.0, max_tokens=4), threaded=False)
+    disagg.exit()
+
+    assert disagg.decode_engine.batch_sizes[0] == len(prompts)
+    assert all(len(o["token_ids"]) == 4 for o in out)
+
+
 def test_disagg_llm_chunked_prefill_makes_progress(monkeypatch):
     """A chunked prefill sequence that already holds >50% of P's blocks must continue prefilling without livelocking."""
     monkeypatch.setattr(Sequence, "block_size", 4)

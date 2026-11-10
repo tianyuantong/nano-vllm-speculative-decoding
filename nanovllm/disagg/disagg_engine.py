@@ -275,8 +275,15 @@ class DisaggLLM:
                 spec.drafter._capture_sampling_graphs(key)
 
     def step(self) -> tuple[int, int]:
-        """Single-threaded step (runs one prefill step if available, then one decode step). Useful for deterministic tests."""
+        """Single-threaded step: one prefill step, then one decode step once the pending hand-off copies have landed.
+
+        Waiting here makes the decode rounds independent of how fast a copy is, so a test sees the same rounds on one
+        card and on two. The worker threads never wait: `decode_step` admits each sequence when its own copy is done.
+        """
         p_tokens = self.prefill_step()
+        self._flush_handoffs()
+        if self._ready_for_decode:
+            self._ready_for_decode[-1][1].synchronize()    # copies run in order on one stream: the last one ends last
         d_tokens = self.decode_step()
         return p_tokens, d_tokens
 
