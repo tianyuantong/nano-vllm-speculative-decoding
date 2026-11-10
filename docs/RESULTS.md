@@ -206,27 +206,47 @@ Engine `70e0d4d`, baseline branch `4d8426f`, verify schedule [`benchmarks/inputs
 
 ## 9. Round-robin prefill
 
-A prefill step does no decoding in this engine, and the default scheduler prefills every waiting request before it decodes again (§1, Latency). With `round_robin_prefill=True`, a step admits one request and a decode step follows each prefill step ([usage](DECODING.md#round-robin-prefill)). On the D48 development panel, closed loop, 3 seeds, each line run with and without the option back to back:
+A prefill step does no decoding in this engine, and the default scheduler prefills every waiting request before it decodes again (§1, Latency). With `round_robin_prefill=True`, a step admits one request and a decode step follows each prefill step ([usage](DECODING.md#round-robin-prefill)). On the K128b confirmation panel, closed loop, 3 seeds, each line ran with and without the option back to back in one job under [`protocol-v2.9.json`](../benchmarks/protocol-v2.9.json).
 
-| Concurrent requests | line | ITL p99, ms | ITL p99 ratio, per seed | Throughput ratio | TTFT p50, ms | Gaps with a prefill step |
+Requests being decoded, by the gaps between their deliveries in the steady window:
+
+| C | Line | ITL p50, ms | ITL p99, ms | ITL p99 ratio | Longest gap, ms | Gaps with a prefill step | Throughput ratio |
+|---:|---|---|---|---|---|---|---|
+| 8 | plain decoding | 12.9 → 12.9 | 63.0 → 63.0 | 1.00 (1.00–1.00) | 141 → 70 | 2% → 2% | 1.00 (1.00–1.00) |
+| 8 | DSpark, fixed length | 19.4 → 19.4 | 71.3 → 71.3 | 1.00 (1.00–1.00) | 111 → 78 | 5% → 6% | 1.00 (1.00–1.04) |
+| 8 | DSpark, variable length | 19.4 → 19.3 | 71.2 → 71.1 | 1.00 (1.00–1.00) | 107 → 78 | 6% → 6% | 0.99–1.05 |
+| 32 | plain decoding | 16.7 → 16.7 | 67.2 → 67.0 | 1.00 (1.00–1.00) | 480 → 74 | 7% → 8% | 0.99 (0.99–1.00) |
+| 32 | DSpark, fixed length | 30.3 → 30.3 | 122.0 → 82.6 | 0.68 (0.68–0.68) | 127 → 89 | 22% → 26% | 0.98 (0.97–1.00) |
+| 32 | DSpark, variable length | 27.8 → 27.9 | 119.5 → 80.4 | 0.67 (0.66–0.69) | 121 → 86 | 22% → 24% | 0.99 (0.99–1.00) |
+| 64 | plain decoding | 21.1 → 21.1 | 106.7 → 71.7 | 0.67–0.92 | 1113 → 79 | 13% → 16% | 0.99 (0.98–0.99) |
+| 64 | DSpark, fixed length | 51.3 → 99.0 | 181.6 → 108.7 | 0.60 (0.60–0.60) | 220 → 110 | 39% → 51% | 0.98 (0.98–1.00) |
+| 64 | DSpark, variable length | 42.1 → 42.3 | 138.9 → 99.7 | 0.58–0.73 | 211 → 100 | 38% → 47% | 0.99 (0.99–1.00) |
+
+Time to first token, over every request and over the requests that arrive after the start:
+
+| C | Line | TTFT p50, ms | TTFT p99, ms | After the start: p50, ms | After the start: p99, ms | After the start: p99 ratio |
 |---:|---|---|---|---|---|---|
-| 8 | plain decoding | 61.0 → 61.0 | 1.00 (0.98–1.00) | 1.00 (0.99–1.00) | 50 → 49 | 2% → 2% |
-| 8 | DSpark, fixed length | 71.5 → 71.5 | 1.00 (1.00–1.00) | 0.99 (0.99–1.00) | 52 → 50 | 6% → 6% |
-| 8 | DSpark, variable length | 71.7 → 71.6 | 1.00 (1.00–1.00) | 1.00 (0.96–1.01) | 52 → 50 | 6% → 6% |
-| 32 | plain decoding | 73.6 → 68.0 | 0.92 (0.91–1.00) | 1.00 (0.99–1.00) | 51 → 51 | 8% → 9% |
-| 32 | DSpark, fixed length | 124.6 → 89.2 | **0.72 (0.70–0.72)** | 1.00 (1.00–1.00) | 52 → 52 | 23% → 25% |
-| 32 | DSpark, variable length | 128.4 → 87.2 | **0.68 (0.67–0.71)** | 1.00 (0.99–1.01) | 59 → 52 | 21% → 25% |
-| 64 | plain decoding | 109.5 → 76.4 | **0.70 (0.68–0.70)** | 0.98 (0.98–0.99) | 57 → 51 | 14% → 18% |
-| 64 | DSpark, fixed length | 184.6 → 111.8 | **0.61 (0.60–0.61)** | 0.98 (0.98–1.00) | 89 → 151 | 40% → 52% |
-| 64 | DSpark, variable length | 176.2 → 102.8 | **0.58 (0.56–0.58)** | 0.98 (0.97–1.00) | 89 → 142 | 38% → 49% |
+| 8 | plain decoding | 50 → 50 | 335 → 334 | 50 → 50 | 128 → 171 | 1.28–1.34 |
+| 8 | DSpark, fixed length | 51 → 52 | 341 → 341 | 51 → 51 | 92 → 121 | 1.00–1.32 |
+| 8 | DSpark, variable length | 52 → 52 | 342 → 342 | 51 → 51 | 88 → 129 | 1.00–1.47 |
+| 32 | plain decoding | 50 → 50 | 1339 → 1338 | 50 → 50 | 463 → 643 | 1.39–1.52 |
+| 32 | DSpark, fixed length | 52 → 52 | 1365 → 1366 | 51 → 51 | 97 → 134 | 1.03–1.44 |
+| 32 | DSpark, variable length | 52 → 51 | 1365 → 1364 | 51 → 51 | 93 → 208 | 2.15–2.25 |
+| 64 | plain decoding | 51 → 50 | 2693 → 2688 | 50 → 50 | 1092 → 1627 | 1.43–1.56 |
+| 64 | DSpark, fixed length | 88 → 149 | 2738 → 2743 | 52 → 51 | 169 → 349 | 1.55–2.68 |
+| 64 | DSpark, variable length | 88 → 141 | 2743 → 2742 | 52 → 52 | 169 → 413 | 1.93–3.79 |
 
-Milliseconds are medians over the 3 seeds, default → round-robin; ratios are round-robin ÷ default per seed, `median (min–max)`. ITL is taken over the steady window; the throughput ratio is of `Q_steady`.
+Milliseconds are medians over the 3 seeds, default → round-robin. Ratios are round-robin ÷ default per seed, `median (min–max)`, or the range alone where it spans more than 0.05. The throughput ratio is of `Q_steady`. The longest gap and the three columns of the requests that arrive after the start were added after the run; the other measures are the protocol's.
 
-- **Tail latency.** At 32 and 64 concurrent requests DSpark's ITL p99 falls to 0.58–0.72 of the default scheduler's, and plain decoding's to 0.92 and 0.70. Nothing changes at 8, where a gap rarely holds more than one prompt's prefill.
-- **Throughput.** Steady-state throughput stays at 0.98–1.00 of the default's: the same prefills run, one at a time.
-- **Cost at 64 concurrent requests.** An arriving request waits one decode step for each request ahead of it, and DSpark's TTFT p50 rises from 89 ms to 142–151 ms. With fixed-length DSpark, 52% of the gaps in the steady window then hold one prefill step (40% under the default), so the median gap moves from 53 ms to 101 ms; with variable length the share stays under half and the median stays at 44 ms.
+- **A stall is at most one prompt's prefill.** Under round-robin every gap of these runs holds at most one prompt's prefill and one decode step, and the longest gap of a run is 70–110 ms at every concurrency. Under the default scheduler a gap holds the prefill of every waiting prompt. With plain decoding, requests that started together and run to the 512-token limit finish together: 10–12 arrive at once at 32 and 23–26 at 64, and every request being decoded then stalls for 0.45–0.52 s and 1.07–1.11 s. With DSpark the default's longest gap is 120–220 ms at 32 and 64.
+- **ITL p99.** DSpark's falls to 0.58–0.73 of the default's at 32 and 64: from 116–122 ms to 80–83 ms at 32, and from 137–182 ms to 100–109 ms at 64. The default's p99 gap holds a prefill step of 2 or 3 prompts; round-robin's holds one prompt in every seed and varies by less than 1 ms across seeds. Plain decoding's p99 falls only at 64 (0.67–0.92): at 32 its p99 gap already holds a single prompt, and the bursts above make up less than 1% of the gaps.
+- **Arriving requests queue.** A request that arrives behind others waits one prefill step and one decode step for each of them; the default scheduler prefills them together. Half of the requests that arrive after the start see no change (p50 50–52 ms), and their p99 rises to 1.0–3.8 times the default's: at 64 from 130–170 ms to 261–497 ms with DSpark, and from 1.05–1.09 s to 1.56–1.70 s with plain decoding, behind the burst. Over every request, the p50 changes only at 64: DSpark's goes from 88 ms to 141–151 ms in two seeds and to 52–58 ms in the third, depending on whether more than a third of the later requests queue, and plain decoding's from 51–56 ms to 50 ms. The p99 (2.7 s at 64) belongs to the `C` requests of the start, admitted together on both lines.
+- **At 64 with fixed-length DSpark the median gap doubles.** 50–52% of the gaps then hold a prefill step (39–40% under the default), and ITL p50 moves from 51 ms to 99 ms. With variable-length verification the share is 46–47% and the median stays at 42 ms.
+- **Throughput.** `Q_steady` is 0.97–1.00 of the default's at 32 and 64: prompts prefilled one per step cost slightly more than prefilled together, and some decode steps run below `C` rows. Once the two schedules part, the lines sample different outputs, so a seed's ratio also carries that difference: at 8, where the schedules rarely part, it spans 0.99–1.05. Timing noise is far smaller (`N_t = 0.09%` from 12 repeat pairs).
 
-Engine `9a97b6f`, where the option was a switch of `bench_spec.py`; lines, sampling and panel from [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json). Not run on K128b.
+In this closed-loop workload the option bounds the stall of the requests being decoded and lowers DSpark's ITL p99 at 32 and 64 concurrent requests. It raises the TTFT p99 of the requests that arrive after the start, and at 64 with fixed-length DSpark the ITL p50. It stays off by default.
+
+Engine `c28b1f9`, driver 580.82.07; 66 runs, 0 void. The runs without the option are token-identical to §8's runs of the same lines (33 runs), and at one concurrent request DSpark with the option is token-identical to DSpark without it. Both tables come from [`tools/round_robin_report.py`](../tools/round_robin_report.py); raw run JSONs are archived in release [`results-round-robin-prefill`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-round-robin-prefill).
 
 ## Appendix: environment and data
 

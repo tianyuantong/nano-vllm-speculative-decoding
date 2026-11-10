@@ -68,7 +68,7 @@ See [RESULTS.md](RESULTS.md#8-variable-length-verification) for benchmark result
 
 ## Round-robin prefill
 
-A prefill step runs no decoding in this engine, so each arriving request stalls the requests being decoded, and several arrivals stall them for several steps in a row. With `round_robin_prefill=True`, a step admits at most one waiting request, and a decode step follows each prefill step while requests are being decoded:
+A prefill step runs no decoding in this engine, so each arriving request stalls the requests being decoded. Requests that arrive together are prefilled together, in one long step, or in several when they exceed a step's token budget. With `round_robin_prefill=True`, a step admits at most one waiting request, and a decode step follows each prefill step while requests are being decoded:
 
 ```python
 llm = LLM(
@@ -82,11 +82,11 @@ llm = LLM(
 )
 ```
 
-Between two of its deliveries a stream then waits for one prompt's prefill instead of every queued prompt's. The cost falls on arrivals: a request that arrives behind others waits one decode step for each request ahead of it.
+Between two of its deliveries a stream then waits for one prompt's prefill instead of every queued prompt's. The cost falls on arrivals: a request that arrives behind others waits one prefill step and one decode step for each request ahead of it.
 
 The option is for requests that arrive over time (`add_request` / `step`). `generate()` has all its prompts up front and would admit them one at a time, so leave it off there. A decode step that would need a preemption is skipped: a half-prefilled request may hold the KV blocks it needs, and finishes first. `start_measurement(admit_together=True)` holds the option back until the waiting queue has emptied; the closed-loop benchmark uses it for the `C` requests it starts with.
 
-See [RESULTS.md](RESULTS.md#9-round-robin-prefill) for its effect on inter-token latency.
+See [RESULTS.md](RESULTS.md#9-round-robin-prefill) for its effect on inter-token latency and on time to first token.
 
 ## Execution flow of a speculative round
 
