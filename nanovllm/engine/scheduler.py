@@ -17,7 +17,7 @@ class Scheduler:
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
         self.round_robin_prefill = config.round_robin_prefill
-        self.initial_requests_left = config.max_num_seqs    # admitted together; start_measurement sets it again
+        self.admits_together = True    # until the waiting queue first empties; start_measurement sets it again
         self.last_step_prefilled = False
 
     def is_finished(self):
@@ -27,11 +27,14 @@ class Scheduler:
         self.waiting.append(seq)
 
     def _prefill_limit(self) -> int:
-        """Requests this step may prefill: every one that fits, or with round-robin prefill, past the initial group, one
-        at a time, and none right after a prefill step while requests wait to decode."""
-        if not self.round_robin_prefill or self.initial_requests_left > 0:
+        """Requests this step may prefill: every one that fits, or with round-robin prefill, once the waiting queue has
+        emptied, one at a time, and none right after a prefill step while requests wait to decode. That decode is skipped
+        when it would need a preemption: a half-prefilled request may hold the blocks it needs, and finishes first."""
+        if not self.round_robin_prefill or self.admits_together:
             return self.max_num_seqs
-        return 0 if self.last_step_prefilled and self.running else 1
+        decodes_next = (self.last_step_prefilled and self.running
+                        and self.block_manager.can_reserve_all(self.running, self.num_speculative_tokens))
+        return 0 if decodes_next else 1
 
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
@@ -55,7 +58,6 @@ class Scheduler:
                 break
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
-                self.initial_requests_left = max(self.initial_requests_left - 1, 0)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
@@ -64,6 +66,8 @@ class Scheduler:
                 self.running.append(seq)
             scheduled_seqs.append(seq)
 
+        if not self.waiting:
+            self.admits_together = False
         self.last_step_prefilled = bool(scheduled_seqs)
         if scheduled_seqs:
             return scheduled_seqs, True

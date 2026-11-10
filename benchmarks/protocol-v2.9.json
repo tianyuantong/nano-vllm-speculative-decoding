@@ -7,10 +7,12 @@
   },
   "changes_from_v2_3": [
     "lines: k0_rr, dspark_k7_rr and dspark_var_rr join: k0, dspark_k7 and dspark_var with round-robin prefill (Config.round_robin_prefill), each against k0_rr, plain decoding under the same scheduler. The baseline tree's lines leave: this protocol does not run them",
-    "round_robin: new. What is run, what is reported, and the token checks. Effect sizes, no verdict",
+    "round_robin: new. What is reported and the token checks. Effect sizes, no verdict",
+    "confirm: the six lines on K128b at C = 8, 32 and 64; v2.3's cross-tree rule leaves with the baseline tree",
     "trees: only main, on feat/round-robin-prefill",
     "gates: only equivalence stays, and none of v2.3's others is rerun. With the option off the engine is main's, which round_robin.identity checks token by token against job D's runs; with it on only the scheduler's admission differs, no forward and no sampler code",
-    "dev, hypotheses, report_only, stop_if and confirm leave: they were the variable-length lines' and their job is done; round_robin holds this protocol's",
+    "dev, hypotheses, report_only and stop_if leave: they were the variable-length lines' and their job is done",
+    "verify_schedule: the file and its hash only; how it was made is in v2.3",
     "order, timing_noise and kv_budget: reworded for this protocol's six lines; timing_noise at C = 8 and 32"
   ],
   "gpu": {
@@ -108,7 +110,7 @@
       130031
     ]
   },
-  "order": "all lines of one (C, seed) run back to back in one job; the i-th seed (0-based) starts with the (i mod 6)-th of k0, k0_rr, dspark_k7, dspark_k7_rr, dspark_var, dspark_var_rr and continues in that order",
+  "order": "all of confirm.versions at one (C, seed) run back to back in one job; the i-th seed (0-based) starts with the (i mod 6)-th of them and continues in listed order; timing_noise's repeat 2 follows in the same group",
   "panels": {
     "D48": {
       "file": "benchmarks/inputs/panel-48.json",
@@ -178,96 +180,50 @@
   "verify_schedule": {
     "file": "benchmarks/inputs/verify-schedule-g4.json",
     "sha256": "10017b48c9ea36dca41eb6482491d9fd829e62cdcafb53d72f87e70834d0c1c6",
-    "made_by": "job A on a G4 runtime at 5bf4cbc: tools/profile_verify_cost.py, then tools/fit_confidence_sts.py; seed 17011's calibration run was invalid (a round 5.15 x its median). The first rerun ran on kernels compiled under TORCH_LOGS=recompiles, which changes the kernels and the outputs, so it is not job A's command and does not count; a clean rerun passed with byte-identical confidences; reviewed by the author before this protocol is frozen",
-    "cost_curve": {
-      "line": "dspark_var",
-      "batch": [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64
-      ],
-      "query_len": [
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8
-      ],
-      "context_len": 2048,
-      "warmup": 25,
-      "iters": 100,
-      "statistic": "median",
-      "report": [
-        "median",
-        "p95"
-      ],
-      "round": "one round's phase timings summed, propose through commit_copy, on CUDA events; every row verifies query_len positions through the variable-length path, the confidence copy included; fresh requests of context_len random tokens for every (batch, query_len)",
-      "revised": "2026-11-02 from v2.1's external.cost_curve, which timed the verify forward alone: the schedule weighs a whole round"
-    },
-    "calibration": {
-      "line": "dspark_k7",
-      "panel": "D48",
-      "concurrency": 64,
-      "seeds": "dev",
-      "record": "every round, each row's 7 confidence logits and its accepted count; all 8 positions are verified, so 'the first i drafts all accepted' is observed for every i",
-      "method": "STS: for i = 1..7 in turn, T_i on the grid minimizing the binary cross-entropy of the survival prod_{j<=i} sigmoid(z_j / T_j) against 'the first i drafts all accepted', T_1..T_{i-1} fixed",
-      "grid": {
-        "low": 0.1,
-        "high": 10.0,
-        "points": 401,
-        "spacing": "geometric"
-      },
-      "report_only": [
-        "ECE over 10 equal-width bins, per position and pooled, raw and after STS",
-        "AUROC of the survival pooled over positions, raw and after STS"
-      ]
-    },
-    "replay": {
-      "concurrency": 64,
-      "rounds": "the calibration runs' rounds of C rows",
-      "rule": "a row with n of its 7 drafts accepted accepts min(n, L - 1) when it verifies L positions; a round's time is the cost table's at its token count, the fixed-length round's at 8 per row",
-      "stop_if_gain_below": 0.0252,
-      "source": "2 x N_t, N_t = 1.26% in the cluster's job 236550, kept until the G4's own is measured"
-    }
+    "made_by": "v2.3's job A; see protocol-v2.3.json"
   },
-  "round_robin": {
-    "rule": "after the first C requests of a closed loop are prefilled, a step admits at most one request, and a prefill step is followed by a round while requests are being decoded (Scheduler._prefill_limit)",
-    "pairs": {
-      "k0": "k0_rr",
-      "dspark_k7": "dspark_k7_rr",
-      "dspark_var": "dspark_var_rr"
-    },
+  "confirm": {
     "panel": "K128b",
     "concurrency": [
       8,
       32,
       64
     ],
-    "seeds": "confirm",
+    "versions": [
+      "k0",
+      "k0_rr",
+      "dspark_k7",
+      "dspark_k7_rr",
+      "dspark_var",
+      "dspark_var_rr"
+    ]
+  },
+  "round_robin": {
+    "rule": "once the waiting queue has emptied after the first C requests of a closed loop, a step admits at most one request, and a prefill step is followed by a decode step while requests are being decoded and that step needs no preemption (Scheduler._prefill_limit)",
+    "pairs": {
+      "k0": "k0_rr",
+      "dspark_k7": "dspark_k7_rr",
+      "dspark_var": "dspark_var_rr"
+    },
+    "runs": "confirm: its panel, concurrency and versions, at the confirm seeds",
     "metrics": {
       "itl": "tools/itl_stats.py: every gap between two deliveries of a request inside the steady window, on the CUDA timeline; p50, p99 and the share of gaps that hold a prefill step",
       "throughput": "Q_steady and Q_full",
       "ttft": "p50 and p99 over every request"
     },
-    "report": "for each pair, C and seed, round-robin / default of each metric; the README and RESULTS give the median (min-max) over the 3 seeds, and the lines' milliseconds",
+    "report": "tools/round_robin_report.py: for each pair, C and seed, round-robin / default of each metric, then the median (min-max) over the 3 seeds; and both lines' milliseconds, medians over the seeds. Every number of the round-robin table, default lines included, is this job's",
+    "default_lines_elsewhere": "the README's speedup tables and latency table keep job D's numbers for k0, dspark_k7 and dspark_var; this job's runs of them appear in the round-robin table only",
     "verdict": "none: these are effect sizes, and the option stays off by default whatever they are",
     "expect": "from D48 at 9a97b6f: ITL p99 ratio 1.00 at C = 8, 0.68-0.92 at C = 32 and 0.58-0.70 at C = 64; Q_steady ratio 0.98-1.00; TTFT p50 up to 1.7 times at C = 64",
     "identity": {
-      "equivalence": "gates.equivalence, run first: the job stops before the matrix if it fails",
-      "c1": "dspark_k7_rr at C = 1, seed 17011, is token-identical to dspark_k7: with one request in flight the two schedulers admit alike. Run with the equivalence gate",
-      "default_arm": "k0, dspark_k7 and dspark_var are token-identical to job D's runs of the same name (release results-variable-length), checked after the job"
+      "equivalence": "gates.equivalence, run before the matrix",
+      "c1": "dspark_k7_rr at C = 1, seed 17011, is token-identical to dspark_k7: with one request in flight the two schedulers admit alike. Run before the matrix",
+      "m5": "dspark_k7_rr on D48 at C = 32, seed 17011, is token-identical to M5's run of the same name (dee9fbd, the scheduler this one was rewritten from). Run before the matrix",
+      "default_lines": "every run of k0, dspark_k7 and dspark_var in the matrix is token-identical to job D's run of the same name (release results-variable-length). Checked on the results, before any number is reported"
     },
-    "default_arm_numbers": "the README keeps job D's numbers for k0, dspark_k7 and dspark_var; this job's runs of them are the ratios' denominators only",
     "stop_if": [
       "an identity check fails: no numbers; find the cause",
-      "an invalid run: its whole (C, seed) rerun once, per invalid_if"
+      "an invalid run: its whole (C, seed) rerun once, per invalid_if; if the rerun does not stand either, the job stops"
     ]
   },
   "gates": {

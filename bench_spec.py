@@ -193,7 +193,7 @@ def closed_loop(args: argparse.Namespace) -> None:
                ignore_eos=sampling["ignore_eos"])
     warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
     run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **rec), args.concurrency)
-    llm.start_measurement(initial_group=args.concurrency)
+    llm.start_measurement(admit_together=True)    # the first C requests arrive at once, on every line
     wall_start = time.perf_counter()
     record = run_closed_loop(llm, panel, SamplingParams(max_tokens=sampling["max_tokens"], **rec), args.concurrency)
     torch.cuda.synchronize()

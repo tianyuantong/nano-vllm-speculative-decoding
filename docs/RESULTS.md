@@ -226,7 +226,7 @@ Milliseconds are medians over the 3 seeds, default → round-robin; ratios are r
 - **Throughput.** Steady-state throughput stays at 0.98–1.00 of the default's: the same prefills run, one at a time.
 - **Cost at 64 concurrent requests.** An arriving request waits one decode step for each request ahead of it, and DSpark's TTFT p50 rises from 89 ms to 142–151 ms. With fixed-length DSpark, 52% of the gaps in the steady window then hold one prefill step (40% under the default), so the median gap moves from 53 ms to 101 ms; with variable length the share stays under half and the median stays at 44 ms.
 
-Engine `9a97b6f`, [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json) for the lines, sampling and panel, `bench_spec.py --round-robin-prefill` for the option; [`tools/itl_stats.py`](../tools/itl_stats.py) and [`tools/summarize_bench.py`](../tools/summarize_bench.py) give the columns. Not run on K128b.
+Engine `9a97b6f`, where the option was a switch of `bench_spec.py`; lines, sampling and panel from [`protocol-v2.3.json`](../benchmarks/protocol-v2.3.json). Not run on K128b.
 
 ## Appendix: environment and data
 
