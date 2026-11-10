@@ -165,6 +165,8 @@ def parse_closed_loop_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--models-root", default="/projects/nanovllm/models")
     parser.add_argument("--commit", required=True, help="git commit of the synced tree (the sync step refuses a dirty tree)")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--round-robin-prefill", action="store_true",
+                        help="past the first C requests, a step admits one request and a decode follows each prefill step")
     parser.add_argument("--record-confidences", action="store_true",
                         help="keep every round's DSpark confidence logits and accepted counts in <output>.confidences.json "
                              "(job A's calibration; the extra copy each round makes it no timing run)")
@@ -186,12 +188,14 @@ def closed_loop(args: argparse.Namespace) -> None:
     target, draft, kwargs = engine_kwargs(protocol, line, panel, args.concurrency, args.seed, args.models_root)
     if args.record_confidences:
         kwargs["record_confidences"] = True
+    if args.round_robin_prefill:
+        kwargs["round_robin_prefill"] = True
     llm = LLM(target, **kwargs)
     rec = dict(temperature=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"],
                ignore_eos=sampling["ignore_eos"])
     warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
     run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **rec), args.concurrency)
-    llm.start_measurement()
+    llm.start_measurement(initial_group=args.concurrency)
     wall_start = time.perf_counter()
     record = run_closed_loop(llm, panel, SamplingParams(max_tokens=sampling["max_tokens"], **rec), args.concurrency)
     torch.cuda.synchronize()
@@ -205,7 +209,8 @@ def closed_loop(args: argparse.Namespace) -> None:
               "repeat": args.repeat, "num_requests": len(panel), "sampling": {**rec, "max_tokens": sampling["max_tokens"]},
               "target": target, "draft": draft,
               **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                  "draft_type", "variable_length", "record_confidences")}}
+                                                  "draft_type", "variable_length", "record_confidences",
+                                                  "round_robin_prefill")}}
     schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
                        if "verify_schedule" in kwargs else None)
     result = build_result(
