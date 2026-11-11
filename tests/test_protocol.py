@@ -15,7 +15,7 @@ TOP_LEVEL_V22 = (TOP_LEVEL - {"external"}) | {"derived_from", "changes_from_v2_1
                                                "hypotheses", "report_only", "stop_if"}
 TOP_LEVEL_V23 = (TOP_LEVEL_V22 - {"changes_from_v2_1"}) | {"changes_from_v2_2"}    # v2.3 moves M4 to the G4 runtime
 PARENTS = {"protocol-v2.1.json": "protocol-v2.json", "protocol-v2.2.json": "protocol-v2.1.json",
-           "protocol-v2.3.json": "protocol-v2.2.json"}
+           "protocol-v2.3.json": "protocol-v2.2.json", "protocol-v2.9.json": "protocol-v2.3.json"}
 VLLM_LINES = ["k0_v1", "draft_model_k3", "k0_v2", "dflash_k7", "dspark_k7", "dspark_k7_triton", "dspark_k7_adaptive"]
 K_OF_DRAFTER = {None: 0, "model_0p6b": 3, "dflash": 7, "dspark": 7}
 SHA256 = re.compile(r"[0-9a-f]{64}")

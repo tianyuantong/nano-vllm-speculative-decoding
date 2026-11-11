@@ -16,6 +16,9 @@ class Scheduler:
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.enable_prefix_cache)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self.round_robin_prefill = config.round_robin_prefill
+        self.admits_together = True    # until the waiting queue first empties; start_measurement sets it again
+        self.last_step_prefilled = False
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -23,12 +26,23 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
+    def _prefill_limit(self) -> int:
+        """Requests this step may prefill: every one that fits, or with round-robin prefill, once the waiting queue has
+        emptied, one at a time, and none right after a prefill step while requests wait to decode. That decode is skipped
+        when it would need a preemption: a half-prefilled request may hold the blocks it needs, and finishes first."""
+        if not self.round_robin_prefill or self.admits_together:
+            return self.max_num_seqs
+        decodes_next = (self.last_step_prefilled and self.running
+                        and self.block_manager.can_reserve_all(self.running, self.num_speculative_tokens))
+        return 0 if decodes_next else 1
+
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
 
         # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+        prefill_limit = self._prefill_limit()
+        while self.waiting and len(scheduled_seqs) < prefill_limit:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
@@ -52,6 +66,9 @@ class Scheduler:
                 self.running.append(seq)
             scheduled_seqs.append(seq)
 
+        if not self.waiting:
+            self.admits_together = False
+        self.last_step_prefilled = bool(scheduled_seqs)
         if scheduled_seqs:
             return scheduled_seqs, True
 

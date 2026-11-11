@@ -113,6 +113,11 @@ class BlockManager:
     def can_reserve(self, seq: Sequence, num_tokens: int) -> bool:
         return len(self.free_block_ids) >= self._blocks_needed(seq, num_tokens)
 
+    def can_reserve_all(self, seqs, extra_tokens: int) -> bool:
+        """Whether every one of seqs can grow by extra_tokens positions at once, without a preemption."""
+        needed = sum(max(self._blocks_needed(seq, len(seq) + extra_tokens), 0) for seq in seqs)
+        return len(self.free_block_ids) >= needed
+
     def reserve(self, seq: Sequence, num_tokens: int):
         """Grow the block table until it covers `num_tokens` positions."""
         kv = seq.target_kv

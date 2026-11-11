@@ -2,9 +2,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import json  # noqa: E402
+
 import pytest  # noqa: E402
 
-from summarize_bench import (excess_prefill_tokens, full_batch_share, itl_ms, mbu, percentile,  # noqa: E402
+from summarize_bench import (excess_prefill_tokens, full_batch_share, itl_ms, main, mbu, percentile,  # noqa: E402
                              prefill_share, q_full, q_steady, request_latencies, round_ms, steady_window,
                              throughput, tokens_per_round, ttft_ms, verified_per_row)
 
@@ -82,3 +84,14 @@ def test_v2_mbu():
 def test_verified_per_row():
     assert verified_per_row({"rounds": 2, "accepted_0": 3, "accepted_5": 1, "verified_1": 2, "verified_8": 2}) == 4.5
     assert verified_per_row({"rounds": 2, "accepted_7": 4}) is None              # fixed length: no verified_ counts
+
+
+
+def test_command_line_prints_a_row_for_a_bench_v2_result(tmp_path, capsys):
+    result = {"schema": "bench-v2", "steps": v2_steps(), "requests": V2_REQUESTS, "wall_seconds": 0.032,
+              "speculative_stats": None, "config": {"line": "k0", "concurrency": 2, "seed": 7, "repeat": 1}}
+    path = tmp_path / "k0-C2-s7-r1.json"
+    path.write_text(json.dumps(result))
+    main([str(path)])
+    cells = [cell.strip() for cell in capsys.readouterr().out.splitlines()[2].strip("|").split("|")]
+    assert cells[:6] == ["k0", "2", "7", "k0-C2-s7-r1.json", "277.8", "250.0"]    # Q_steady 5 / 0.018 s, Q_full

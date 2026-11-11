@@ -18,10 +18,11 @@ def small_blocks():
     Sequence.block_size = previous
 
 
-def make_scheduler(num_speculative_tokens, num_blocks=16, max_num_seqs=4):
+def make_scheduler(num_speculative_tokens, num_blocks=16, max_num_seqs=4, round_robin_prefill=False):
     config = SimpleNamespace(max_num_seqs=max_num_seqs, max_num_batched_tokens=64, eos=EOS,
                              kvcache_block_size=BLOCK_SIZE, num_kvcache_blocks=num_blocks,
-                             enable_prefix_cache=False, num_speculative_tokens=num_speculative_tokens)
+                             enable_prefix_cache=False, num_speculative_tokens=num_speculative_tokens,
+                             round_robin_prefill=round_robin_prefill)
     return Scheduler(config)
 
 
@@ -113,3 +114,101 @@ def test_postprocess_speculative_ignore_eos_continues():
     scheduler.schedule()
     scheduler.postprocess_speculative([seq], [[EOS, 11]])
     assert seq.completion_token_ids == [9, EOS, 11] and not seq.is_finished
+
+
+def round_robin(max_num_seqs=4, num_blocks=32, num_speculative_tokens=3, admits_together=False):
+    scheduler = make_scheduler(num_speculative_tokens, num_blocks, max_num_seqs, round_robin_prefill=True)
+    scheduler.admits_together = admits_together
+    return scheduler
+
+
+def admit(scheduler, num_tokens=2):
+    seq = Sequence(list(range(1, num_tokens + 1)), SamplingParams(max_tokens=8))
+    scheduler.add(seq)
+    return seq
+
+
+def test_round_robin_admits_one_request_a_step_and_decodes_after_it():
+    scheduler = round_robin()
+    running = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    scheduler.last_step_prefilled = False
+    arrivals = [admit(scheduler) for _ in range(2)]
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == arrivals[:1]
+    scheduler.postprocess(seqs, [9], True)
+    seqs, is_prefill = scheduler.schedule()              # a decode between the two prefills, though the second waits
+    assert not is_prefill and seqs == [running, arrivals[0]]
+    scheduler.postprocess_speculative(seqs, [[5], [5]])
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == arrivals[1:]
+
+
+def test_round_robin_admits_together_until_the_queue_empties():
+    scheduler = round_robin(admits_together=True)
+    arrivals = [admit(scheduler) for _ in range(3)]
+    seqs, is_prefill = scheduler.schedule()              # a step takes every waiting request that fits
+    assert is_prefill and seqs == arrivals
+    assert not scheduler.admits_together
+
+
+def test_round_robin_admits_together_through_a_chunked_prefill():
+    scheduler = round_robin(admits_together=True)
+    scheduler.max_num_batched_tokens = 4
+    short, chunked = admit(scheduler), admit(scheduler, num_tokens=6)
+    steps = []
+    for _ in range(3):
+        seqs, is_prefill = scheduler.schedule()
+        steps.append((is_prefill, seqs, [seq.num_scheduled_tokens for seq in seqs]))
+        scheduler.postprocess(seqs, [9] * len(seqs), True)
+    assert steps == [(True, [short], [2]), (True, [chunked], [4]), (True, [chunked], [2])]    # no decode before the tail
+    assert not scheduler.admits_together
+
+
+def test_round_robin_finishes_a_prefill_that_holds_the_blocks_a_decode_needs():
+    scheduler = round_robin(num_blocks=4, num_speculative_tokens=0)
+    scheduler.max_num_batched_tokens = 4
+    running = prefilled(scheduler, [1, 2, 3, 4], first_token=9, max_tokens=64)
+    while len(running) < 9:                              # two blocks hold 8 positions; position 8 needs a third
+        seqs, _ = scheduler.schedule()
+        scheduler.postprocess(seqs, [9], False)
+    chunked = admit(scheduler, num_tokens=8)             # takes the other two blocks, half prefilled after one step
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 4
+    scheduler.postprocess(seqs, [9], True)
+    seqs, is_prefill = scheduler.schedule()              # a decode now would preempt `running` itself and schedule nothing
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 4
+
+
+def test_round_robin_prefills_again_when_nothing_waits_to_decode():
+    scheduler = round_robin()
+    only = admit(scheduler)
+    seqs, _ = scheduler.schedule()
+    scheduler.postprocess(seqs, [EOS], True)             # finished at its first token
+    assert only.is_finished
+    next_one = admit(scheduler)
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [next_one]
+
+
+def test_round_robin_alternates_the_chunks_of_a_long_prefill_with_decodes():
+    scheduler = round_robin(max_num_seqs=2)
+    scheduler.max_num_batched_tokens = 4
+    running = prefilled(scheduler, [1, 2], first_token=9, max_tokens=8)
+    scheduler.last_step_prefilled = False
+    chunked = admit(scheduler, num_tokens=6)
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 4
+    scheduler.postprocess(seqs, [9], True)
+    seqs, is_prefill = scheduler.schedule()
+    assert not is_prefill and seqs == [running]
+    scheduler.postprocess_speculative(seqs, [[5]])
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == [chunked] and chunked.num_scheduled_tokens == 2
+
+
+def test_without_round_robin_every_waiting_request_that_fits_is_admitted():
+    scheduler = make_scheduler(num_speculative_tokens=3, max_num_seqs=4, num_blocks=32)
+    scheduler.admits_together = False
+    arrivals = [admit(scheduler) for _ in range(3)]
+    seqs, is_prefill = scheduler.schedule()
+    assert is_prefill and seqs == arrivals

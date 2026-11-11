@@ -4,7 +4,7 @@
 
 基于 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 的块式投机解码：从 0.6B 独立小模型演进至 DFlash 并行草稿、DSpark 块内 Markov 修正与变长验证。
 
-**单请求 2.10× · 8 并发 1.78× · 32 并发 1.48× · 64 并发 1.25×**
+**单请求 2.02× · 8 并发 1.79× · 32 并发 1.48× · 64 并发 1.25×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
@@ -57,7 +57,11 @@
 - **块式草稿消除了串行自回归开销。** 独立 0.6B 模型每轮需串行跑 3 步 decode（耗时约 6 ms）并维护独立 KV cache，并发升至 32 时被验证成本反超（0.96×）；块式 draft 一次前向同时提出 7 个候选 token，大幅压低草稿耗时。
 - **DSpark 靠 Markov head 拉高接受率。** 每轮产出 token 数比 DFlash 高 7–12%。在 C=32–64 下，仅在 top-k 候选窗口内采样还省去了全词表 softmax 开销（阶段耗时拆解显示该项约占领先幅度的 2–6 个百分点）。
 - **高并发下收益收窄。** 并发升高后，target 验证步每行的计算成本上升；同时本引擎的 prefill 步会暂停 decode，在 C=32 时占了 DSpark 稳态窗口 31% 的时间。
-- **对比 vLLM**（48 条开发集，全流程挂钟吞吐，vLLM `372477d`）：跑 DSpark 时，C=1–32 下比 vLLM 慢 7.6–7.9%；关闭投机时，本引擎比 vLLM 快 1–5%。
+- **轮流 prefill 缩短停顿。** 打开 `round_robin_prefill=True`（默认关）后，一步只放进一条新请求，随后解码一步。在第二批 128 题测试集上，一条请求相邻两次交付的最长间隔是 70–110 ms，默认调度下最长 1.1 s；C=32–64 时 DSpark 的 ITL p99 降到默认调度的 0.58–0.73 倍，吞吐是 0.97–1.00 倍。代价由新到的请求承担：中途到达的请求，TTFT p99 升到 1.0–3.8 倍（[结果](docs/RESULTS.md#9-round-robin-prefill)）。
+- **双卡 Prefill-Decode 分离（1P+1D）。** 在单进程双线程 1P+1D 引擎（分支 [`disagg/dual-gpu-1p1d`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/disagg/dual-gpu-1p1d) 的 `DisaggLLM`，`cuda:0` 负责 prefill、`cuda:1` 负责 decode，经连续环形缓冲单次 P2P DMA 交接 KV，2 × RTX PRO 6000）上，C=32–64 时总稳态吞吐达单卡默认调度的 1.35–1.52 倍（单卡效率 0.68–0.76 倍），全程普通解码 ITL p99 降至 0.15–0.19 倍（13.3–23.6 ms）、DSpark ITL p99 降至 0.24–0.31 倍（31.6–81.4 ms，约为单卡轮流 prefill 0.61–0.72 倍的一半；[结果](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)）。
+- **硬件 Roofline 拆解与手写 Triton 融合算子。** 对照 RTX PRO 6000 实测可达 HBM 读带宽上限（1.52 TB/s），普通解码已达 82–94% 带宽（步耗时为硬件下限的 1.12–1.22 倍）；而 8-query 验证注意力因 `flash_attn_with_kvcache` 在 `q_len > 1` 时退化关闭 4:1 GQA query 打包，有效带宽仅 39–61%，且全词表拒绝采样在 C=32–64 下耗时 2.2–4.3 ms。在 `exp/fused-kernels` 分支中，将前缀 KV 拆给 4:1 打包的 `flash_attn_varlen_func` 并由 Triton 算子融合尾部因果注意力与在线 LSE 合并，同时将稀疏候选（`top_k + 64`）Markov 采样与 1024 分块拒绝采样融合为两个 Triton 算子，在 C=32–64 下缩短满批轮耗时 10.6–13.9%（等接受率吞吐 +7.7–9.9%），在 3k 上下文下缩短 31.4%（73.5 → 50.5 ms，吞吐 +18.6%；[结果](docs/RESULTS.md#10-speed-of-light-roofline-and-hand-written-triton-kernels)）。
+- **Prefix Caching 交互效应。** 在 512–2,048 共享前缀 token 下（60 组 × 5 个 seed），开启前缀缓存使所有线的稳态吞吐提升 13–70%、稳态 TTFT p50 从 70–148 ms 降至 51–59 ms，但投机解码相对普通解码的加速比在 C=32–64 下收窄 6–12%——原因是批内共享物理 KV 块驻留 L2 cache，对 1-query 普通解码注意力的提速（42–55%）远大于对 8-query 验证注意力的提速（5–23%；[结果](docs/RESULTS.md#11-prefix-caching-with-speculative-decoding)）。
+- **对比 vLLM**（同一台机器，48 条开发集，5 个 seed，全流程挂钟吞吐，vLLM `372477d`）：跑 DSpark 时，C=1–32 下比 vLLM 慢 5.8–8.2%，一轮多出的时间在 draft 一侧；关闭投机时，两者相差不到 2%。
 
 ## 核心实现（四代架构演进）
 
@@ -81,11 +85,15 @@ GPU 实测覆盖四项检验：
 
 变长验证通过了采样器、验证 logits 和 GSM8K 三项检验：准确率 84.2%，普通解码 85.1%，差值 −0.87 个百分点，95% 置信区间 −2.14 ~ +0.40 个百分点。
 
+在 DSpark 论文自己的题目和采样设置下，本引擎复现了论文 Table 1 的每轮 token 数：DFlash 4.10、DSpark 4.80，论文是 4.07、4.81（9 个数据集，3,030 道题；[详情](docs/RESULTS.md#53-tokens-per-round-against-the-dspark-paper)）。
+
 ## 踩过的坑
 
 - **fp32 下原地改写输入**：输入已经是 fp32 时，`x.float()` 直接返回原张量引用，导致上游 RMSNorm 原地修改了输入张量。bf16 路径不受影响，该问题在 fp32 下与 DeepSpec 对齐数值时暴露。
 - **`torch.compile` 重编译回退**：默认重编译上限（8 次）耗尽后，新形状会回退到未编译路径，破坏 CUDA Graph 与 eager 模式的逐位一致性；将上限调至 64 后恢复。
 - **vLLM 基线对齐**：vLLM（`372477d`）默认对 draft 做 greedy 采样，且 DeepSpec 的 DFlash 权重需走其 `dspark` 路径以匹配块布局；对照测试时已将其统一改为同分布随机采样。
+- **多 query 验证时 GQA 打包失效**：`flash_attn_with_kvcache` 仅在 `q_len == 1` 时将每个 KV head 对应的 4 个 query head 打包进同一个 tile；每请求一次验证 8 个候选位置时会退出打包路径，导致验证注意力仅跑出可达 HBM 读带宽的 39–61%（`§7`、`§10`）。
+- **双卡 1P+1D 跨线程 CUDA 锁与 `> 2 GiB` KV 索引切分**：prefill 线程在 `cuda:0` 步末调用 `.tolist()` 会持有设备运行时锁，阻塞 `cuda:1` 跨设备拉取 KV 块；同时在 25.5 GiB（`> 2³¹` 字节）KV 池上直接 `index_select` 会触发 32 位索引回退，将每层拷贝拆成 16 个 kernel。改为由 prefill 线程先打入连续环形缓冲区再单次 P2P DMA 推送至 `cuda:1` 后解决（`§12`）。
 
 ## 快速开始
 
@@ -149,7 +157,7 @@ python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results run
 
 | 文档 | 内容 |
 |---|---|
-| [结果](docs/RESULTS.md) | DSpark 对比 DFlash、变长验证、领先来源、与 vLLM 对比及正确性检验 |
+| [结果](docs/RESULTS.md) | DSpark 对比 DFlash、变长验证、轮流 prefill、双卡 1P+1D、前缀缓存、Roofline 与 Triton 算子、与 vLLM 对比及正确性检验 |
 | [DFlash 结果](docs/v2/RESULTS.md) | DFlash 对比 0.6B 独立小模型、单轮阶段耗时与 prefill 停顿 |
 | [使用指南](docs/DECODING.md) | 模型配置、采样参数与计时 API |
 | [工具](tools/README.md) | 测量、校验与分析脚本清单 |

@@ -66,6 +66,28 @@ The schedule JSON stores the empirical round-time table (indexed by batch size a
 
 See [RESULTS.md](RESULTS.md#8-variable-length-verification) for benchmark results.
 
+## Round-robin prefill
+
+A prefill step runs no decoding in this engine, so each arriving request stalls the requests being decoded. Requests that arrive together are prefilled together, in one long step, or in several when they exceed a step's token budget. With `round_robin_prefill=True`, a step admits at most one waiting request, and a decode step follows each prefill step while requests are being decoded:
+
+```python
+llm = LLM(
+    "/models/Qwen3-8B",
+    draft_model="/models/dspark_qwen3_8b_block7",
+    draft_type="dspark",
+    round_robin_prefill=True,
+    enable_prefix_cache=False,
+    kv_cache_memory_bytes=10 << 30,
+    max_num_seqs=64,
+)
+```
+
+Between two of its deliveries a stream then waits for one prompt's prefill instead of every queued prompt's. The cost falls on arrivals: a request that arrives behind others waits one prefill step and one decode step for each request ahead of it.
+
+The option is for requests that arrive over time (`add_request` / `step`). `generate()` has all its prompts up front and would admit them one at a time, so leave it off there. A decode step that would need a preemption is skipped: a half-prefilled request may hold the KV blocks it needs, and finishes first. `start_measurement(admit_together=True)` holds the option back until the waiting queue has emptied; the closed-loop benchmark uses it for the `C` requests it starts with.
+
+See [RESULTS.md](RESULTS.md#9-round-robin-prefill) for its effect on inter-token latency and on time to first token.
+
 ## Execution flow of a speculative round
 
 At the start of every round, both the target KV cache and the draft context KV cache hold entries up to `len - 1` for each sequence in the batch:

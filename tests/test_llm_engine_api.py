@@ -56,6 +56,13 @@ def test_start_measurement_clears_timings_stats_and_steps():
     engine.start_measurement()
     assert engine.step_timer.timings() == []
     assert engine.num_steps == 0 and not speculative.stats and not speculative.confidence_log and len(resets) == 1
+    assert engine.scheduler.admits_together is False
+
+
+def test_start_measurement_can_let_the_waiting_requests_in_together():
+    engine = make_engine()
+    engine.start_measurement(admit_together=True)
+    assert engine.scheduler.admits_together is True
 
 
 def test_start_measurement_without_a_draft():

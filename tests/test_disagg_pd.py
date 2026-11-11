@@ -137,6 +137,7 @@ class _FakeEngine:
             num_speculative_tokens=0,
             num_kvcache_blocks=16,
             enable_prefix_cache=False,
+            round_robin_prefill=False,
         )
         self.scheduler = Scheduler(cfg)
         self.kv = torch.zeros(2, 1, 16, self.block_size, 1, 1)

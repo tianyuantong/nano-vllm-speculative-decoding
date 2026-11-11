@@ -90,6 +90,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
         kwargs.update(draft_model=draft, num_speculative_tokens=line["k"], draft_type=line["drafter"])
         if line.get("variable_length"):
             kwargs.update(variable_length=True, verify_schedule=str(ROOT / protocol["verify_schedule"]["file"]))
+    if line.get("round_robin_prefill"):
+        kwargs["round_robin_prefill"] = True
     return target, draft, kwargs
 
 
@@ -191,7 +193,7 @@ def closed_loop(args: argparse.Namespace) -> None:
                ignore_eos=sampling["ignore_eos"])
     warmup = [panel[index % len(panel)] for index in range(args.concurrency)]
     run_closed_loop(llm, warmup, SamplingParams(max_tokens=protocol["warmup"]["max_tokens"], **rec), args.concurrency)
-    llm.start_measurement()
+    llm.start_measurement(admit_together=True)    # the first C requests arrive at once, on every line
     wall_start = time.perf_counter()
     record = run_closed_loop(llm, panel, SamplingParams(max_tokens=sampling["max_tokens"], **rec), args.concurrency)
     torch.cuda.synchronize()
@@ -205,7 +207,8 @@ def closed_loop(args: argparse.Namespace) -> None:
               "repeat": args.repeat, "num_requests": len(panel), "sampling": {**rec, "max_tokens": sampling["max_tokens"]},
               "target": target, "draft": draft,
               **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
-                                                  "draft_type", "variable_length", "record_confidences")}}
+                                                  "draft_type", "variable_length", "record_confidences",
+                                                  "round_robin_prefill")}}
     schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
                        if "verify_schedule" in kwargs else None)
     result = build_result(

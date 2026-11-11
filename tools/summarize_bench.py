@@ -203,23 +203,52 @@ def summarize_v2(result: dict) -> dict:
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", nargs="+", type=Path)
-    args = parser.parse_args()
+def _or_dash(value: float | None, spec: str) -> str:
+    return format(value, spec) if value is not None else "-"
+
+
+def v2_table(results: list[tuple[str, dict]]) -> list[str]:
+    """One row per bench-v2 result (file name, result), ordered by line, C, seed and repeat."""
+    out = ["| line | C | seed | file | Q_steady | Q_full | TTFT p50/p99 ms | ITL p50/p99 ms | round p50/p99 ms | "
+           "tokens/round | MBU p50 |", "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
+    def order(item: tuple[str, dict]) -> tuple:
+        config = item[1]["config"]
+        return config["line"], config["concurrency"], config["seed"], config["repeat"]
+    for name, result in sorted(results, key=order):
+        config, s = result["config"], summarize_v2(result)
+        itl = f"{s['itl_ms']['p50']:.1f}/{s['itl_ms']['p99']:.1f}" if s["itl_ms"] else "-"
+        stats = result.get("speculative_stats")
+        out.append(f"| {config['line']} | {config['concurrency']} | {config['seed']} | {name} | {s['q_steady']:.1f} | "
+                   f"{s['q_full']:.1f} | {s['ttft_ms']['p50']:.0f}/{s['ttft_ms']['p99']:.0f} | {itl} | "
+                   f"{s['round_ms']['p50']:.1f}/{s['round_ms']['p99']:.1f} | "
+                   f"{_or_dash(round_weighted_tokens(stats) if stats else None, '.2f')} | {_or_dash(s['mbu_p50'], '.2f')} |")
+    return out
+
+
+def v1_table(results: list[tuple[str, dict]]) -> list[str]:
+    """One row per result of the September engine (file name, result), ordered by batch size, temperature and k."""
     rows = []
-    for path in args.results:
-        result = json.loads(path.read_text())
-        summary = summarize(result)
+    for name, result in results:
         config = result["config"]
-        rows.append((config["max_num_seqs"], config["temperature"], config["num_speculative_tokens"], path.name, summary))
-    print("| B | T | k | file | tok/s | TPOT p50/p95 ms | TTFT p50 ms | tokens/row/round | capped | repeated tail |")
-    print("|---|---|---|---|---:|---:|---:|---:|---:|---:|")
+        rows.append((config["max_num_seqs"], config["temperature"], config["num_speculative_tokens"], name, summarize(result)))
+    out = ["| B | T | k | file | tok/s | TPOT p50/p95 ms | TTFT p50 ms | tokens/row/round | capped | repeated tail |",
+           "|---|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for batch, temperature, k, name, s in sorted(rows):
         tokens_per_round = f"{s['tokens_per_row_round']:.2f}" if "tokens_per_row_round" in s else "-"
-        print(f"| {batch} | {temperature} | {k} | {name} | {s['throughput_tok_s']:.1f} | "
-              f"{s['tpot_ms'][50]:.2f}/{s['tpot_ms'][95]:.2f} | {s['ttft_ms'][50]:.0f} | {tokens_per_round} | "
-              f"{s['capped_share']:.2f} | {s['repeated_tail_share']:.2f} |")
+        out.append(f"| {batch} | {temperature} | {k} | {name} | {s['throughput_tok_s']:.1f} | "
+                   f"{s['tpot_ms'][50]:.2f}/{s['tpot_ms'][95]:.2f} | {s['ttft_ms'][50]:.0f} | {tokens_per_round} | "
+                   f"{s['capped_share']:.2f} | {s['repeated_tail_share']:.2f} |")
+    return out
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("results", nargs="+", type=Path)
+    args = parser.parse_args(argv)
+    results = [(path.name, json.loads(path.read_text())) for path in args.results]
+    v2 = [item for item in results if item[1].get("schema") == "bench-v2"]
+    v1 = [item for item in results if item[1].get("schema") != "bench-v2"]
+    print("\n\n".join("\n".join(table) for table in ([v2_table(v2)] if v2 else []) + ([v1_table(v1)] if v1 else [])))
 
 
 if __name__ == "__main__":
