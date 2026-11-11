@@ -142,6 +142,7 @@ class _FakeEngine:
         self.kv = torch.zeros(2, 1, 16, self.block_size, 1, 1)
         self.model_runner = SimpleNamespace(device=torch.device("cpu"), kv_cache=self.kv)
         self.speculative = None
+        self.num_steps = 0
         self.tokenizer = SimpleNamespace(decode=lambda ids: ",".join(map(str, ids)))
 
     def exit(self):
@@ -169,6 +170,7 @@ class _FakeEngine:
                 kv_val = int(self.kv[0, 0, seq.target_kv.block_table[0], 0, 0, 0].item())
                 token_ids.append(kv_val + seq.num_completion_tokens)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        self.num_steps += 1
         outputs = [(s.seq_id, s.completion_token_ids, 0, 1) for s in seqs if s.is_finished]
         return outputs, num_tokens
 
@@ -448,3 +450,120 @@ def test_bench_pd_disagg_q_steady_and_empty_steady_window():
     assert disagg_q_steady(d_steps, outputs, concurrency=4) == (None, None)
     gaps = disagg_cuda_itl(d_steps, outputs, concurrency=4)
     assert gaps["round_p50"] == 20.0
+
+
+def test_disagg_llm_handoff_thread_ownership(monkeypatch):
+    """In two-thread mode, `begin_handoff` runs only on `pd-prefill` and `end_handoff` runs only on `pd-decode`."""
+    monkeypatch.setattr(Sequence, "block_size", 4)
+    begin_threads: set[str] = set()
+    end_threads: set[str] = set()
+
+    disagg = DisaggLLM("dummy", prefill_engine_cls=_FakeEngine, decode_engine_cls=_FakeEngine, use_cuda_streams=False)
+    orig_begin = disagg.transfer.begin_handoff
+    orig_end = disagg.transfer.end_handoff
+
+    def tracked_begin(*args, **kwargs):
+        begin_threads.add(threading.current_thread().name)
+        return orig_begin(*args, **kwargs)
+
+    def tracked_end(*args, **kwargs):
+        end_threads.add(threading.current_thread().name)
+        return orig_end(*args, **kwargs)
+
+    disagg.transfer.begin_handoff = tracked_begin
+    disagg.transfer.end_handoff = tracked_end
+
+    prompts = [[1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 20], [3, 4, 5, 6, 7, 8]]
+    out = disagg.generate(prompts, SamplingParams(temperature=0.0, max_tokens=4), threaded=True, concurrency=2)
+    disagg.exit()
+
+    assert len(out) == 4
+    assert begin_threads == {"pd-prefill"}
+    assert end_threads == {"pd-decode"}
+
+
+def test_kv_cache_transfer_staging_ring_wraparound_and_backpressure(monkeypatch):
+    """A staging ring smaller than one prefill batch (`max_stage_blocks=3`) wraps cleanly without deadlock or leaks."""
+    monkeypatch.setattr(Sequence, "block_size", 4)
+    prompts = [
+        [1, 2, 3, 4, 5],          # 2 blocks on P
+        [6, 7, 8, 9, 10],         # 2 blocks on P (2 + 2 = 4 > max_stage_blocks=3 -> staging backpressure)
+        [11, 12, 13, 14, 15],     # 2 blocks on P
+        [1, 2, 3, 4, 5, 6, 7, 8, 9],  # 3 blocks on P (forces wrap to slot 0)
+    ]
+    sp = SamplingParams(temperature=0.0, max_tokens=3)
+
+    disagg = DisaggLLM(
+        "dummy",
+        prefill_engine_cls=_FakeEngine,
+        decode_engine_cls=_FakeEngine,
+        use_cuda_streams=False,
+        max_stage_blocks=3,
+    )
+    p_total = len(disagg.prefill_engine.scheduler.block_manager.blocks)
+    d_total = len(disagg.decode_engine.scheduler.block_manager.blocks)
+    serial_out = disagg.generate(prompts, sp, threaded=False)
+    threaded_out = disagg.generate(prompts, sp, threaded=True)
+    assert len(disagg.prefill_engine.scheduler.block_manager.free_block_ids) == p_total
+    assert len(disagg.decode_engine.scheduler.block_manager.free_block_ids) == d_total
+    assert disagg.transfer._occupied_stage == []
+    disagg.exit()
+
+    assert [o["token_ids"] for o in serial_out] == [o["token_ids"] for o in threaded_out]
+
+
+def test_smoke_pd_replay_rounds_reproduces_target_admission_steps(monkeypatch):
+    """`tools/smoke_pd.py:replay_rounds` holds staged sequences until each target decode round `[0, 1, 1, 3]`."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from smoke_pd import first_decode_rounds, replay_rounds
+
+    monkeypatch.setattr(Sequence, "block_size", 4)
+    prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+    sp = SamplingParams(temperature=0.0, max_tokens=6)
+
+    disagg = DisaggLLM("dummy", prefill_engine_cls=_FakeEngine, decode_engine_cls=_FakeEngine, use_cuda_streams=False)
+    target_rounds = [0, 1, 1, 3]
+    replayed = replay_rounds(disagg, prompts, sp, target_rounds)
+    disagg.exit()
+
+    assert first_decode_rounds(replayed) == target_rounds
+
+
+def test_disagg_llm_recovers_staging_and_blocks_after_aborted_generate(monkeypatch):
+    """If `d_worker` fails while staged handoffs sit in `_ready_for_decode` / `_pending_handoffs`, a subsequent run has zero leaks."""
+    monkeypatch.setattr(Sequence, "block_size", 4)
+    should_fail = True
+
+    class _FailOnceDecodeEngine(_FakeEngine):
+        def step(self):
+            if should_fail:
+                raise RuntimeError("transient decode failure")
+            return super().step()
+
+    disagg = DisaggLLM(
+        "dummy",
+        prefill_engine_cls=_FakeEngine,
+        decode_engine_cls=_FailOnceDecodeEngine,
+        use_cuda_streams=False,
+        max_stage_blocks=3,
+    )
+    prompts = [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15]]
+    sp = SamplingParams(temperature=0.0, max_tokens=3)
+    with pytest.raises(RuntimeError, match="transient decode failure"):
+        disagg.generate(prompts, sp, threaded=True)
+
+    # Clear D's scheduler running queue from the aborted step (mirrors a fresh engine state) and verify transfer state recovers.
+    while disagg.decode_engine.scheduler.running:
+        seq = disagg.decode_engine.scheduler.running.popleft()
+        disagg.decode_engine.scheduler.block_manager.deallocate(seq)
+    should_fail = False
+    out = disagg.generate(prompts, sp, threaded=True)
+    p_bm = disagg.prefill_engine.scheduler.block_manager
+    d_bm = disagg.decode_engine.scheduler.block_manager
+    assert len(p_bm.free_block_ids) == len(p_bm.blocks)
+    assert len(d_bm.free_block_ids) == len(d_bm.blocks)
+    assert disagg.transfer._occupied_stage == []
+    assert len(out) == 3
+    disagg.exit()

@@ -7,7 +7,7 @@ import threading
 from time import perf_counter
 import torch
 
-from nanovllm.disagg.kv_transfer import KVCacheTransfer, _NoopEvent
+from nanovllm.disagg.kv_transfer import KVCacheTransfer, StagedHandoff, _NoopEvent
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
 
@@ -18,9 +18,11 @@ class DisaggLLM:
     """Composes a Prefill-only `LLMEngine` (P) and a Decode-only `LLMEngine` (D) connected by `KVCacheTransfer`.
 
     - `prefill_engine` runs with `enforce_eager=True` on `prefill_device` and is mutated only by `prefill_step`.
-      Completed prefills move from `prefill_engine.scheduler.running` to `_pending_handoffs`.
+      Completed prefills are packed on P and DMA-staged into D's contiguous staging ring on P's thread
+      (`_stage_pending_handoffs`), so D's thread never touches `prefill_device`'s CUDA context.
     - `decode_engine` runs with CUDA Graphs enabled on `decode_device` and is mutated only by `decode_step`.
-      Handed-off sequences enter `decode_engine.scheduler.running` directly, eliminating prefill stalls during decode.
+      Once a staged sequence's `d_device` DMA event reports ready and D has free blocks, `decode_step` unpacks it
+      locally on `d_stream` and appends it to `decode_engine.scheduler.running`.
     """
 
     def __init__(
@@ -33,6 +35,7 @@ class DisaggLLM:
         decode_engine_cls=None,
         use_cuda_streams: bool = True,
         event_factory=None,
+        max_stage_blocks: int | None = None,
         **kwargs,
     ) -> None:
         if prefill_device == decode_device and kwargs.get("kv_cache_memory_bytes") is None and (
@@ -66,6 +69,15 @@ class DisaggLLM:
             self.p_stream = self.transfer_stream = self.d_transfer_stream = self.d_stream = None
             self._new_event = event_factory or _NoopEvent
 
+        d_cfg = getattr(self.decode_engine, "config", None)
+        max_seq_blocks = (
+            (d_cfg.max_model_len + d_cfg.kvcache_block_size - 1) // d_cfg.kvcache_block_size
+            if d_cfg is not None
+            else 0
+        )
+        default_stage = 96 if self.d_device != self.p_device else 64
+        effective_stage_blocks = max_stage_blocks or max(default_stage, max_seq_blocks)
+
         p_draft_kv = self.prefill_engine.speculative.drafter.kv_cache if self.prefill_engine.speculative else None
         d_draft_kv = self.decode_engine.speculative.drafter.kv_cache if self.decode_engine.speculative else None
         self.transfer = KVCacheTransfer(
@@ -78,6 +90,8 @@ class DisaggLLM:
             transfer_stream=self.transfer_stream,
             d_transfer_stream=self.d_transfer_stream,
             event_factory=self._new_event,
+            max_stage_blocks=effective_stage_blocks,
+            max_pack_blocks=max_seq_blocks,
         )
 
         self._lock = threading.Lock()
@@ -87,13 +101,27 @@ class DisaggLLM:
         self._total_expected: int = 0
         self._submitted_seq_ids: list[int] = []
         self._pending_handoffs: deque[tuple[Sequence, object]] = deque()
-        self._ready_for_decode: deque[tuple[Sequence, object]] = deque()
+        self._ready_for_decode: deque[tuple[Sequence, StagedHandoff]] = deque()
         self._finished: dict[int, tuple[list[int], dict]] = {}
         self._req_meta: dict[int, dict] = {}
 
+    def _drain_aborted_state(self) -> None:
+        if self.p_stream is not None:
+            self.p_stream.synchronize()
+        if self.d_stream is not None:
+            self.d_stream.synchronize()
+        self.transfer.reclaim_completed(wait_all=True)
+        with self._lock:
+            while self._pending_handoffs:
+                seq, _ = self._pending_handoffs.popleft()
+                if seq.target_kv.block_table:
+                    self.prefill_engine.scheduler.block_manager.deallocate(seq)
+            self._ready_for_decode.clear()
+        self.transfer.reset_staging()
+
     def exit(self) -> None:
         import atexit
-        self.transfer.reclaim_completed(wait_all=True)
+        self._drain_aborted_state()
         for eng in (self.decode_engine, self.prefill_engine):
             eng.exit()
             atexit.unregister(eng.exit)
@@ -140,9 +168,27 @@ class DisaggLLM:
         with self._lock:
             return len(self._finished) == self._total_expected and not self._arrival_queue
 
+    def _stage_pending_handoffs(self) -> int:
+        """Pack and launch P2P DMA for as many `_pending_handoffs` as D's staging ring allows (P thread only)."""
+        self.transfer.reclaim_p()
+        staged_count = 0
+        while True:
+            with self._lock:
+                if not self._pending_handoffs:
+                    break
+                seq, prefill_done = self._pending_handoffs[0]
+                if not self.transfer.can_stage(len(seq.target_kv.block_table)):
+                    break
+                self._pending_handoffs.popleft()
+            staged = self.transfer.begin_handoff(seq, prefill_done)
+            with self._lock:
+                self._ready_for_decode.append((seq, staged))
+            staged_count += 1
+        return staged_count
+
     def prefill_step(self) -> int:
-        """Run one prefill batch on P if waiting requests exist, and move completed prefills to `_pending_handoffs`."""
-        self.transfer.reclaim_completed()
+        """Run one prefill batch on P if waiting requests exist, and stage completed prefills into D's ring."""
+        self._stage_pending_handoffs()
         with self._lock:
             self._admit_arrivals_unlocked()
         p_sched = self.prefill_engine.scheduler
@@ -150,7 +196,7 @@ class DisaggLLM:
             return 0
         first_waiting = p_sched.waiting[0]
         if not first_waiting.block_table and p_sched.block_manager.can_allocate(first_waiting) == -1:
-            self.transfer.reclaim_completed(wait_all=True)
+            self.transfer.reclaim_p(wait_all=True)
             if p_sched.block_manager.can_allocate(first_waiting) == -1:
                 return 0
 
@@ -180,45 +226,35 @@ class DisaggLLM:
                 meta["last_delivery_t"] = now
                 self._pending_handoffs.append((seq, prefill_done))
             self._admit_arrivals_unlocked()
+        self._stage_pending_handoffs()
         return num_tokens
 
-    def _flush_handoffs(self) -> int:
-        """Transfer as many `_pending_handoffs` to `_ready_for_decode` as D's capacity and block budget allow."""
-        transferred = 0
+    def _admit_ready_for_decode(self) -> int:
+        """Unpack ready staged handoffs into D's KV cache and append them to `d_sched.running` (D thread only)."""
+        self.transfer.reclaim_stage()
+        admitted = 0
         d_sched = self.decode_engine.scheduler
         k = d_sched.num_speculative_tokens
-        while True:
+        # A sequence joins D only once its P2P DMA into D's staging ring is done (`staged.query()`). Making `d_stream`
+        # wait on an unfinished DMA would hold this round, and every sequence already running in it, for the DMA.
+        while len(d_sched.running) < d_sched.max_num_seqs:
             with self._lock:
-                if not self._pending_handoffs:
+                if not self._ready_for_decode:
                     break
-                seq, prefill_done = self._pending_handoffs[0]
-                in_flight_d = len(d_sched.running) + len(self._ready_for_decode)
-                if in_flight_d >= d_sched.max_num_seqs or not self.transfer.can_accept(seq, k):
+                seq, staged = self._ready_for_decode[0]
+                if not staged.query() or not self.transfer.can_accept(seq, k):
                     break
-                self._pending_handoffs.popleft()
-            d_alloc_event = self._new_event()
-            if self.d_stream is not None:
-                d_alloc_event.record(self.d_stream)
-            else:
-                d_alloc_event.record()
-            copy_done = self.transfer.handoff(seq, prefill_done, d_alloc_event)
-            self._ready_for_decode.append((seq, copy_done))
-            transferred += 1
-        return transferred
-
-    def decode_step(self) -> int:
-        """Admit the handoffs whose KV copy has finished into D and run one decode / speculative round on D."""
-        self._flush_handoffs()
-        d_sched = self.decode_engine.scheduler
-        # A sequence joins D only once its copy is done. Making `d_stream` wait on `copy_done` instead would hold
-        # this round, and every sequence already running in it, for the whole copy.
-        while self._ready_for_decode and len(d_sched.running) < d_sched.max_num_seqs:
-            seq, copy_done = self._ready_for_decode[0]
-            if not copy_done.query():
-                break
-            self._ready_for_decode.popleft()
+                self._ready_for_decode.popleft()
+            self.transfer.end_handoff(seq, staged, stream=self.d_stream)
             seq.status = SequenceStatus.RUNNING
             d_sched.running.append(seq)
+            admitted += 1
+        return admitted
+
+    def decode_step(self) -> int:
+        """Admit ready staged handoffs into D and run one decode / speculative round on D."""
+        self._admit_ready_for_decode()
+        d_sched = self.decode_engine.scheduler
         if d_sched.waiting:
             raise RuntimeError(
                 "Decode engine preempted a sequence due to insufficient KV cache blocks; "
@@ -281,9 +317,15 @@ class DisaggLLM:
         card and on two. The worker threads never wait: `decode_step` admits each sequence when its own copy is done.
         """
         p_tokens = self.prefill_step()
-        self._flush_handoffs()
-        if self._ready_for_decode:
-            self._ready_for_decode[-1][1].synchronize()    # copies run in order on one stream: the last one ends last
+        while True:
+            if self._ready_for_decode:
+                self._ready_for_decode[-1][1].synchronize()    # DMAs run in order on one stream: the last one ends last
+            admitted = self._admit_ready_for_decode()
+            if not self._pending_handoffs:
+                break
+            self.transfer.reclaim_stage(wait_all=True)
+            if self._stage_pending_handoffs() == 0 and admitted == 0:
+                break
         d_tokens = self.decode_step()
         return p_tokens, d_tokens
 
@@ -297,6 +339,8 @@ class DisaggLLM:
     ) -> list[dict]:
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
+        if self._pending_handoffs or self._ready_for_decode or self.transfer.has_pending_work():
+            self._drain_aborted_state()
         with self._lock:
             self._finished.clear()
             self._req_meta.clear()
@@ -319,8 +363,12 @@ class DisaggLLM:
 
             def p_worker() -> None:
                 try:
+                    if self.p_device.type == "cuda":
+                        torch.cuda.set_device(self.p_device)
                     while not stop_event.is_set() and not self.is_finished():
-                        if self.prefill_step() == 0:
+                        did_prefill = self.prefill_step() > 0
+                        did_stage = self._stage_pending_handoffs() > 0
+                        if not did_prefill and not did_stage:
                             stop_event.wait(_WORKER_POLL_INTERVAL_S)
                 except BaseException as exc:
                     errors.append(exc)
@@ -328,6 +376,8 @@ class DisaggLLM:
 
             def d_worker() -> None:
                 try:
+                    if self.d_device.type == "cuda":
+                        torch.cuda.set_device(self.d_device)
                     while not stop_event.is_set() and not self.is_finished():
                         if self.decode_step() == 0:
                             stop_event.wait(_WORKER_POLL_INTERVAL_S)

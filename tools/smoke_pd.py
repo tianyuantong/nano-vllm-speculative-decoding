@@ -12,8 +12,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from nanovllm import LLM, SamplingParams
-from nanovllm.disagg import DisaggLLM
+from nanovllm import SamplingParams
+from nanovllm.disagg import DisaggLLM, StagedHandoff
 
 PROMPTS = [
     "Explain how paged attention manages KV cache memory in large language model serving.",
@@ -37,38 +37,35 @@ def first_diff(left: list[int], right: list[int]) -> int | None:
     return None if len(left) == len(right) else min(len(left), len(right))
 
 
-class _HeldCopy:
-    """A copy-done event that reports done only once D has reached the step `release_step`."""
+class _HeldHandoff(StagedHandoff):
+    """A `StagedHandoff` that reports ready only once D has reached the step `release_step`."""
 
-    def __init__(self, event, decode_engine, release_step: int):
-        self.event = event
+    def __init__(self, staged: StagedHandoff, decode_engine, release_step: int):
+        super().__init__(staged.slot_start, staged.num_blocks, staged.cached_tokens, staged.dma_done)
         self.decode_engine = decode_engine
         self.release_step = release_step
 
     def query(self) -> bool:
         # An idle D never reaches `release_step`: let the sequence in rather than hang.
         is_released = self.decode_engine.num_steps >= self.release_step or not self.decode_engine.scheduler.running
-        return is_released and self.event.query()
-
-    def synchronize(self) -> None:
-        self.event.synchronize()
+        return is_released and super().query()
 
 
 def replay_rounds(disagg: DisaggLLM, prompts: list[str], params: SamplingParams, rounds: list[int]) -> list[dict]:
     """Serial pass whose request `i` joins decode in round `rounds[i]`, the rounds a two-thread pass reported."""
     first_step = disagg.decode_engine.num_steps
     release_steps = iter(first_step + round_index for round_index in rounds)
-    handoff = disagg.transfer.handoff
+    begin_handoff = disagg.transfer.begin_handoff
 
-    def held_handoff(seq, prefill_done_event=None, d_alloc_event=None):
-        copy_done = handoff(seq, prefill_done_event, d_alloc_event)
-        return _HeldCopy(copy_done, disagg.decode_engine, next(release_steps))
+    def held_begin_handoff(seq, prefill_done_event=None):
+        staged = begin_handoff(seq, prefill_done_event)
+        return _HeldHandoff(staged, disagg.decode_engine, next(release_steps))
 
-    disagg.transfer.handoff = held_handoff
+    disagg.transfer.begin_handoff = held_begin_handoff
     try:
         return disagg.generate(prompts, params, threaded=False)
     finally:
-        del disagg.transfer.handoff
+        del disagg.transfer.begin_handoff
 
 
 def check_line(
@@ -93,6 +90,7 @@ def check_line(
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
 
     # 1. Reference single-engine LLM
+    from nanovllm import LLM
     ref_llm = LLM(model_dir, **common)
     try:
         ref_out = ref_llm.generate(PROMPTS, params, use_tqdm=False)
