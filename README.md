@@ -58,7 +58,7 @@ Medians over 3 seeds on the second 128-prompt test set (Colab G4 RTX PRO 6000, 6
 - **DSpark raises acceptance via its Markov head.** It yields 7–12% more tokens per round than DFlash. At 32–64 concurrent requests, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for 2–6 percentage points of the lead in phase-timing breakdowns).
 - **Speedup narrows at high concurrency.** Verification costs more per row as batch size grows, and prefill steps—which pause decoding in this engine—take 31% of DSpark's steady-state window at 32 concurrent requests.
 - **Round-robin prefill shortens the stalls.** With `round_robin_prefill=True` (off by default), a step admits one request and a decode step follows it. On the second 128-prompt test set the longest gap between a request's deliveries is 70–110 ms, against up to 1.1 s under the default scheduler, and DSpark's ITL p99 at 32–64 concurrent requests falls to 0.58–0.73 of the default's with throughput at 0.97–1.00. Arriving requests queue instead: the p99 TTFT of those that arrive mid-run rises to 1.0–3.8 times ([results](docs/RESULTS.md#9-round-robin-prefill)).
-- **Comparison with vLLM** (48-prompt dev set, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 7.6–7.9% behind vLLM at 1–32 concurrent requests; on plain decoding without speculation, it is 1–5% faster than vLLM.
+- **Comparison with vLLM** (same machine, 48-prompt dev set, 5 seeds, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 5.8–8.2% behind vLLM at 1–32 concurrent requests, and a round's extra time is on the draft side; on plain decoding without speculation it is within 2% of vLLM.
 
 ## Core implementation (four-stage evolution)
 

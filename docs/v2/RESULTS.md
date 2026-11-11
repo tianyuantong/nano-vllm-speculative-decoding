@@ -82,7 +82,7 @@ Prompt length is not the cause. Both panels have a median length of about 1020 t
 | 8 | 515 / 506 / 492 | 608 / 596 | 804 / 881 | 919 |
 | 32 | 1276 / 1257 / 1224 | 1231 / 1279 | 1567 / 1681 | 1794 |
 
-nano's numbers are the median of 5 seeds, without the timing repeats. vLLM's are the median of 2 runs.
+nano's numbers are the median of 5 seeds, without the timing repeats. vLLM's are the median of 2 runs. A retest with both engines on one machine and 5 seeds is in [the DSpark results](../RESULTS.md#4-against-vllm-d48-wall-clock-toks).
 - **vLLM version.** `0.1.1.dev52+g372477d2d`, a development build from 2026-09-12. It runs the 0.6B draft on its v1 model runner and DFlash and DSpark on v2, so the table lists its plain decoding on both runners.
 - **Run-to-run variation.** vLLM's two runs differ by 7.2% at C = 8, so the gap at that concurrency is not stable; at C = 32 they differ by 0.8%.
 - vLLM was not run on K128.
@@ -197,7 +197,7 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 - One GPU model (RTX PRO 6000 Blackwell) and one target model (Qwen3-8B).
 - Random sampling: T 0.7, top-k 20, top-p 0.8. Speculative decoding keeps the output distribution, not the exact tokens; §4 checks the distribution.
 - The comparison with vLLM is on D48 only, against a development build of vLLM.
-- The prefill stall is located but not fixed. Verifying fewer drafts per round and measuring the verify cost curve are not done yet.
+- The prefill stall is located but not fixed here, and neither verifying fewer drafts per round nor measuring the verify cost curve is done here. The DSpark results have both: [variable-length verification](../RESULTS.md#8-variable-length-verification) and [round-robin prefill](../RESULTS.md#9-round-robin-prefill).
 
 ## Appendix: environment and data
 

@@ -2,7 +2,7 @@
 
 On an RTX PRO 6000 with Qwen3-8B in BF16, the DSpark draft (DeepSpec's `dspark_qwen3_8b_block7`) proposes 7 tokens per round like DFlash, then corrects them left to right with its Markov head; a round yields 2.81–2.95 tokens on average. On the unseen K128b confirmation panel, its steady-state throughput is **2.08–2.20×** plain decoding at C = 1, **1.73–1.80×** at C = 8, **1.43× (1.42–1.45)** at C = 32 and **1.15× (1.13–1.15)** at C = 64, faster at all four.
 
-DFlash in the same engine and jobs gives 1.94–2.06 / 1.68 / 1.31 / 1.01×, and DSpark is faster than it at every concurrency: by 4.4–8.1% at C = 1, 1.2–7.7% at C = 8, 8.9–9.9% at C = 32 and 11.0–14.7% at C = 64. At C = 32 and 64, an estimated 2–6 points of that lead come from the two lines sampling differently (§3). Against vLLM's DSpark (same GPU model, same weights, development panel, wall-clock throughput of the whole run), nano is 7.6–7.9% behind at C = 1, 8 and 32.
+DFlash in the same engine and jobs gives 1.94–2.06 / 1.68 / 1.31 / 1.01×, and DSpark is faster than it at every concurrency: by 4.4–8.1% at C = 1, 1.2–7.7% at C = 8, 8.9–9.9% at C = 32 and 11.0–14.7% at C = 64. At C = 32 and 64, an estimated 2–6 points of that lead come from the two lines sampling differently (§3). Against vLLM's DSpark (same machine, same weights, development panel, wall-clock throughput of the whole run), nano is 5.8–8.2% behind at C = 1, 8 and 32.
 
 **Measurement definitions**
 - **Concurrency C**: number of active requests in flight; a new request enters the batch as soon as one finishes.
@@ -113,20 +113,39 @@ Tokens per round over every C and seed of K128b, weighted by rounds as in §1, f
 
 ## 4. Against vLLM (D48, wall-clock tok/s)
 
-| C | plain decoding: nano / vLLM v1 | DFlash: nano / vLLM | DSpark: nano / vLLM | DSpark's extra tokens per round over DFlash: nano / vLLM |
-|---:|---|---|---|---|
-| 1 | 80 / 77 | 154 / 156 | 160 / 173 | +8.3% / +13.7% |
-| 8 | 517 / 506 | 800 / 881 | 849 / 919 | +9.1% / +14.1% |
-| 32 | 1273 / 1257 | 1567 / 1681 | 1652 / 1794 | +10.4% / +12.2% |
+| C | Line | nano | vLLM | Ratio of medians | Ratio per seed | Tokens per round: nano / vLLM |
+|---:|---|---|---|---:|---|---|
+| 1 | plain decoding | 81.5 (81.5–81.5) | 80.0 (79.9–80.0) | 1.019 | 1.018–1.019 | – |
+| 8 | plain decoding | 528.1 (514.3–542.5) | 527.8 (511.1–540.2) | 1.001 | 0.952–1.040 | – |
+| 32 | plain decoding | 1301.6 (1294.3–1310.3) | 1307.6 (1288.4–1316.0) | 0.995 | 0.989–1.016 | – |
+| 1 | DFlash | 155.8 (154.6–160.9) | 157.0 (155.8–159.7) | 0.992 | 0.968–1.019 | 2.50 / 2.45 |
+| 8 | DFlash | 812.6 (798.5–853.1) | 859.9 (837.6–896.2) | 0.945 | 0.898–1.019 | 2.55 / 2.46 |
+| 32 | DFlash | 1593.6 (1581.6–1665.1) | 1714.5 (1693.9–1760.7) | 0.930 | 0.908–0.946 | 2.52 / 2.45 |
+| 1 | DSpark | 161.6 (159.4–163.9) | 172.3 (166.9–176.2) | 0.938 | 0.915–0.968 | 2.71 / 2.74 |
+| 8 | DSpark | 858.7 (826.9–901.8) | 935.2 (909.5–979.4) | 0.918 | 0.877–0.956 | 2.78 / 2.81 |
+| 32 | DSpark | 1673.6 (1663.8–1773.0) | 1775.9 (1741.3–1829.1) | 0.942 | 0.927–0.998 | 2.79 / 2.73 |
 
-nano's numbers are the median of 5 seeds on the new machine, without the timing repeats. vLLM's are the median of 2 runs on the previous machine (the same GPU model) with `0.1.1.dev52+g372477d2d`, which runs DFlash and DSpark on its v2 model runner; vLLM was not rerun.
+Both engines ran on one Colab G4 machine, 5 seeds, the two runs of a (line, C, seed) back to back. Throughputs are `median (min–max)` of the whole run's wall-clock tok/s. vLLM is `0.1.1.dev52+g372477d2d` on its v2 model runner, in its own environment (torch 2.13.0); at C = 1 it runs with `max_num_batched_tokens` 4096, at 8 and 32 with 16384 as nano does.
 
-- nano's DSpark is 7.6–7.9% behind vLLM's at all three concurrencies. Its DFlash is 1.1% behind at C = 1, and 9.2% and 6.8% behind at C = 8 and 32.
-- There are four known differences; which of them matters most is not known.
-  - **Tokens per round.** The two DSparks are close (nano 2.71–2.79, vLLM 2.74–2.87), but nano's DFlash already gets more (2.50–2.55 against 2.44–2.52), so DSpark adds less on top of it.
-  - **Draft truncation.** nano also applies top-k and top-p to the draft; vLLM's draft uses temperature only.
-  - **CUDA graphs.** At C = 1 nano's DSpark propose is 0.68 ms longer than DFlash's, about 4% of a round. vLLM captures the backbone and the 7 sampling steps in one graph; nano uses two.
-  - **The prefill stall.** nano's prefill steps do no decoding ([DFlash results](v2/RESULTS.md) §5.2), which costs throughput at C = 8 and 32.
+- **DSpark is 5.8–8.2% behind vLLM's, DFlash 0.8–7.0% behind, and plain decoding is within 2%.** Every seed has nano's DSpark behind at all three concurrencies, and its DFlash behind at C = 32.
+- **Tokens per round are close**, so the gap is in the time a round takes.
+
+**A round is longer on the draft side.** Both engines were marked with CUDA events at the same phase boundaries; the table gives a full-batch round, nano / vLLM, in ms:
+
+| Phase | DSpark, C = 1 | DSpark, C = 8 | DFlash, C = 32 |
+|---|---|---|---|
+| draft: forward, draw, context store | 3.75 / 2.99 | 4.35 / 3.39 | 6.81 / 4.62 |
+| target's forward | 11.30 / 11.32 | 13.70 / 13.90 | 21.42 / 21.90 |
+| logits and acceptance | 1.18 / 1.07 | 1.35 / 1.18 | 3.20 / 1.92 |
+| the rest | 0.11 / 0.05 | 0.13 / 0.06 | 0.20 / 0.06 |
+| the round | 16.34 / 15.42 | 19.53 / 18.52 | 31.63 / 28.50 |
+
+Of the 0.92 ms and 1.01 ms that DSpark's round is longer at C = 1 and 8, the draft's phase is 0.76 ms and 0.97 ms; the target's forward is no slower. vLLM captures the draft's backbone and its 7 sampling steps in one CUDA graph; nano uses two. With DFlash at C = 32, logits and acceptance add another 1.28 ms.
+
+- **Two single-factor reruns did not close the gap.** Running nano on torch 2.13 with vLLM's flash attention, or sampling nano's draft with temperature only as vLLM does, leaves the per-seed ratio to vLLM at 0.92–0.96 (medians), inside the seeds' spread. Why the draft's phase is longer is not established.
+- **The prefill stall.** nano's prefill steps do no decoding ([DFlash results](v2/RESULTS.md) §5.2), which costs throughput at C = 8 and 32.
+
+nano ran from development trees that are not published (`dee9fbd`, and `8cf8e6c` at C = 1; the marked rounds from `743c261` and `c944546`). Their outputs are token-identical to this engine's where checked: 14 runs against release `results-variable-length` and the cluster reproduction, and the 30 marked runs against the unmarked ones. Raw run files, the reports and the job scripts are archived in release [`results-vllm-samehost`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-vllm-samehost).
 
 ## 5. Correctness
 
@@ -168,7 +187,7 @@ The extra tokens per round were estimated too high: nano's DFlash already gets m
 ## 7. Open questions
 
 - **DSpark's tokens per round moved after candidate sampling.** Candidate sampling changes how the random numbers are drawn, so the same seed produces different text. Across 35 (C, seed) pairs on D48, 23 went down and 12 up, a mean of 2.785 → 2.752 (−1.2%); DFlash, unchanged, reproduces all 35 exactly. At C = 64 all five seeds went down, by 0.03–0.06, while four of five went up at C = 32, which is consistent with random variation. The sampled distribution can change in only one case, a row with more than 84 tokens at or above its cut value; otherwise the candidate path and the whole-vocabulary rule agree row by row (`num_candidates` in `nanovllm/engine/speculative.py`, and the tie test in `tests/test_dspark_propose.py`). How often such rows occur in real logits cannot be told from the gate's 49 rows; it needs a count on the GPU, about 5 minutes.
-- What costs nano the 8% against vLLM's DSpark (§4).
+- Why the draft's phase of a round takes longer than vLLM's (§4).
 
 Measurement scope as in the DFlash results: offline closed loop, one GPU model, one target model, random sampling (T 0.7, top-k 20, top-p 0.8); see [v2/RESULTS.md](v2/RESULTS.md) §7.
 
