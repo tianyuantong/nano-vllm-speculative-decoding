@@ -15,6 +15,15 @@ from nanovllm.engine.batch_metadata import (
 )
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.verify_schedule import VerifySchedule, verify_token_counts
+from nanovllm.layers.fused_ops import (
+    MAX_SPARSE_CANDIDATES,
+    MIN_VERIFY_SPLIT_TOKENS,
+    SparseDraftProbs,
+    VerifySplitBuffers,
+    accept_sparse_varlen,
+    prepare_verify_split_meta,
+    sample_markov_candidate_row,
+)
 from nanovllm.layers.spec_sampler import (
     SamplingTensors,
     accept_greedy,
@@ -28,7 +37,7 @@ from nanovllm.layers.spec_sampler import (
     sampling_per_token,
     sampling_tensors,
 )
-from nanovllm.utils.context import reset_context, set_context
+from nanovllm.utils.context import get_context, reset_context, set_context
 
 if TYPE_CHECKING:
     from nanovllm.config import Config
@@ -107,13 +116,15 @@ class DFlashDrafter:
         """Context K/V of the chunk the target just prefilled, from the aux features its forward exported."""
         decoder = self.decoder
         metadata = prefill_metadata(seqs, decoder.block_size)
+        kwargs = {"kv_cache": self.kv_cache, "fused": True} if decoder.fused_kernels else {}
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
-                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32),
+                                    **kwargs)
 
     @torch.inference_mode()
     def propose(self, seqs: list[Sequence], sampling: SamplingTensors,
-                with_confidence: bool = False) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+                with_confidence: bool = False) -> tuple[torch.Tensor, torch.Tensor | SparseDraftProbs | None, torch.Tensor | None]:
         """One block forward; returns drafts [B, k], probabilities [B, k, V] (None when greedy) and, with_confidence,
         DSpark's confidence logits [B, k] (None otherwise)."""
         hidden = self._forward_graph(seqs) if self.graphs else self._forward_eager(seqs)
@@ -142,8 +153,11 @@ class DFlashDrafter:
         prev = torch.cat([anchors.unsqueeze(1), drafts[:, :-1]], dim=1)
         return self.model.confidence_logits(hidden.view(len(seqs), self.decoder.num_drafts, -1), prev)
 
+    def _use_sparse(self, candidates: int) -> bool:
+        return self.decoder.fused_kernels and 0 < candidates <= MAX_SPARSE_CANDIDATES
+
     def _sample_markov(self, seqs: list[Sequence], logits: torch.Tensor,
-                       sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+                       sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | SparseDraftProbs | None]:
         """DSpark: row j's logits get the Markov bias of the token drawn at row j-1 (the anchor for row 0), so the
         rows are drawn left to right, and each row's q is its distribution after its bias. The noise of all k rows
         is drawn before row 0 in one call, and the sampling graph consumes the generator alike."""
@@ -151,22 +165,40 @@ class DFlashDrafter:
         batch_size, k, vocab_size = logits.shape
         drafts = torch.empty(batch_size, k, dtype=torch.int64, device=decoder.device)
         candidates = num_candidates(sampling.max_top_k, sampling.all_top_k, vocab_size)
-        draft_probs = noise = None
+        draft_probs: torch.Tensor | SparseDraftProbs | None = None
+        noise = next_prev = None
         if sampling.temperatures is not None:
-            draft_probs = torch.empty(logits.shape, dtype=torch.float32, device=decoder.device)
+            if self._use_sparse(candidates):
+                draft_probs = SparseDraftProbs(
+                    cand_ids=torch.empty(batch_size, k, candidates, dtype=torch.int32, device=decoder.device),
+                    cand_probs=torch.empty(batch_size, k, candidates, dtype=torch.float32, device=decoder.device),
+                    q_selected=torch.empty(batch_size, k, dtype=torch.float32, device=decoder.device),
+                )
+                next_prev = torch.empty(batch_size, dtype=torch.int64, device=decoder.device)
+            else:
+                draft_probs = torch.empty(logits.shape, dtype=torch.float32, device=decoder.device)
             noise = exponential_noise_(torch.empty(batch_size, k, candidates or vocab_size, dtype=torch.float32,
                                                    device=decoder.device), decoder.target.generator)
         prev = decoder._device_tensor([seq.last_token for seq in seqs], torch.int64)
-        self._markov_rows(logits, prev, sampling, noise, drafts, draft_probs, candidates)
+        self._markov_rows(logits, prev, sampling, noise, drafts, draft_probs, candidates, next_prev)
         return drafts, draft_probs
 
     def _markov_rows(self, logits: torch.Tensor, prev: torch.Tensor, sampling: SamplingTensors | None,
-                     noise: torch.Tensor | None, drafts: torch.Tensor, draft_probs: torch.Tensor | None,
-                     candidates: int) -> None:
+                     noise: torch.Tensor | None, drafts: torch.Tensor,
+                     draft_probs: torch.Tensor | SparseDraftProbs | None,
+                     candidates: int, next_prev: torch.Tensor | None = None) -> None:
         """Draw the k rows left to right into drafts, and their q into draft_probs unless greedy; prev holds the
         anchors, the previous tokens of row 0. With candidates, a row is drawn among its top `candidates` logits,
         which hold every token the truncation keeps, and its q is scattered back over the vocabulary; otherwise
         over the whole vocabulary."""
+        if isinstance(draft_probs, SparseDraftProbs):
+            assert sampling is not None and noise is not None and next_prev is not None
+            for row in range(logits.shape[1]):
+                row_logits = logits[:, row] + self.model.markov_head(prev)
+                prev = sample_markov_candidate_row(
+                    row_logits, candidates, sampling, noise[:, row], row, drafts, draft_probs, next_prev
+                )
+            return
         if draft_probs is not None and candidates:
             draft_probs.zero_()                    # q is zero outside each row's candidates
         for row in range(logits.shape[1]):
@@ -188,7 +220,7 @@ class DFlashDrafter:
         return sampling_graph_key(sampling) in self.sampling_graphs or len(self.sampling_graphs) < MAX_SAMPLING_KEYS
 
     def _sample_markov_graph(self, batch_size: int,
-                             sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | None]:
+                             sampling: SamplingTensors) -> tuple[torch.Tensor, torch.Tensor | SparseDraftProbs | None]:
         """_sample_markov through the sampling graph of this batch's key, from the block graph's outputs; the
         drafts and q are views of the graph's buffers, valid until the next propose. The noise is drawn outside the
         graph, so capturing draws no random numbers and each call consumes the generator as _sample_markov does."""
@@ -199,7 +231,16 @@ class DFlashDrafter:
         padded = next(size for size in self.decoder.graph_batch_sizes if size >= batch_size)
         self.sampling_graphs[key][padded].replay()
         buffers = self.graph_vars
-        return buffers["drafts"][:batch_size], None if key is None else buffers["probs"][:batch_size]
+        if key is None:
+            return buffers["drafts"][:batch_size], None
+        cands = num_candidates(key[0], key[2], self.decoder.vocab_size)
+        if self._use_sparse(cands):
+            return buffers["drafts"][:batch_size], SparseDraftProbs(
+                cand_ids=buffers["cand_ids"][:batch_size, :, :cands],
+                cand_probs=buffers["cand_probs"][:batch_size, :, :cands],
+                q_selected=buffers["q_selected"][:batch_size],
+            )
+        return buffers["drafts"][:batch_size], buffers["probs"][:batch_size]
 
     def _load_sampling_inputs(self, batch_size: int, sampling: SamplingTensors,
                               key: tuple[int, bool, bool] | None) -> None:
@@ -227,25 +268,46 @@ class DFlashDrafter:
         sampling = SamplingTensors(temperatures=buffers["temperatures"][:batch_size],
                                    top_k=buffers["top_k"][:batch_size], top_p=buffers["top_p"][:batch_size],
                                    max_top_k=max_top_k, has_top_p=has_top_p, all_top_k=all_top_k)
-        self._markov_rows(logits, prev, sampling, self.sampling_noise[key][:batch_size], drafts,
-                          buffers["probs"][:batch_size], num_candidates(max_top_k, all_top_k, logits.shape[-1]))
+        cands = num_candidates(max_top_k, all_top_k, logits.shape[-1])
+        if self._use_sparse(cands):
+            sparse = SparseDraftProbs(
+                cand_ids=buffers["cand_ids"][:batch_size, :, :cands],
+                cand_probs=buffers["cand_probs"][:batch_size, :, :cands],
+                q_selected=buffers["q_selected"][:batch_size],
+            )
+            self._markov_rows(logits, prev, sampling, self.sampling_noise[key][:batch_size], drafts, sparse, cands,
+                              buffers["next_prev"][:batch_size])
+        else:
+            self._markov_rows(logits, prev, sampling, self.sampling_noise[key][:batch_size], drafts,
+                              buffers["probs"][:batch_size], cands)
 
     def _sampling_buffers(self, max_batch_size: int) -> dict[str, torch.Tensor]:
         """What DSpark's sampling graphs read and write besides the block graph's buffers and the noise. Parameters
         start finite, so padding rows stay finite."""
         decoder, shape = self.decoder, (max_batch_size, self.decoder.num_drafts)
         vocab_size, device = decoder.vocab_size, decoder.device
-        return {"drafts": torch.zeros(shape, dtype=torch.int64, device=device),
-                "probs": torch.zeros(*shape, vocab_size, dtype=torch.float32, device=device),
-                "temperatures": torch.ones(max_batch_size, dtype=torch.float32, device=device),
-                "top_k": torch.zeros(max_batch_size, dtype=torch.int64, device=device),
-                "top_p": torch.ones(max_batch_size, dtype=torch.float32, device=device)}
+        out = {"drafts": torch.zeros(shape, dtype=torch.int64, device=device),
+               "temperatures": torch.ones(max_batch_size, dtype=torch.float32, device=device),
+               "top_k": torch.ones(max_batch_size, dtype=torch.int64, device=device),
+               "top_p": torch.ones(max_batch_size, dtype=torch.float32, device=device)}
+        if decoder.fused_kernels:
+            out["cand_ids"] = torch.zeros(*shape, MAX_SPARSE_CANDIDATES, dtype=torch.int32, device=device)
+            out["cand_probs"] = torch.zeros(*shape, MAX_SPARSE_CANDIDATES, dtype=torch.float32, device=device)
+            out["q_selected"] = torch.zeros(shape, dtype=torch.float32, device=device)
+            out["next_prev"] = torch.zeros(max_batch_size, dtype=torch.int64, device=device)
+        else:
+            out["probs"] = torch.zeros(*shape, vocab_size, dtype=torch.float32, device=device)
+        return out
 
     def _allocate_sampling_noise(self, key: tuple[int, bool, bool], max_batch_size: int) -> None:
         """A random key's noise buffer, [max batch, k, candidates or V], with finite padding rows."""
         max_top_k, _, all_top_k = key
         vocab_size = self.decoder.vocab_size
-        width = num_candidates(max_top_k, all_top_k, vocab_size) or vocab_size
+        cands = num_candidates(max_top_k, all_top_k, vocab_size)
+        if not self._use_sparse(cands) and "probs" not in self.graph_vars:
+            self.graph_vars["probs"] = torch.zeros(max_batch_size, self.decoder.num_drafts, vocab_size,
+                                                   dtype=torch.float32, device=self.decoder.device)
+        width = cands or vocab_size
         self.sampling_noise[key] = torch.ones(max_batch_size, self.decoder.num_drafts, width, dtype=torch.float32,
                                               device=self.decoder.device)
 
@@ -272,7 +334,7 @@ class DFlashDrafter:
         set_context(False, slot_mapping=decoder._device_tensor(metadata.slot_mapping, torch.int32),
                     context_lens=decoder._device_tensor(metadata.context_lens, torch.int32),
                     block_tables=decoder._device_tensor(metadata.block_tables, torch.int32),
-                    query_len_per_seq=k, causal=False)
+                    query_len_per_seq=k, causal=False, fused_kernels=decoder.fused_kernels)
         hidden = self.model(decoder._device_tensor(metadata.input_ids, torch.int64),
                             decoder._device_tensor(metadata.positions, torch.int64))
         reset_context()
@@ -315,7 +377,8 @@ class DFlashDrafter:
                 graph = torch.cuda.CUDAGraph()
                 set_context(False, slot_mapping=buffers["slot_mapping"][:rows],
                             context_lens=buffers["context_lens"][:batch_size],
-                            block_tables=buffers["block_tables"][:batch_size], query_len_per_seq=k, causal=False)
+                            block_tables=buffers["block_tables"][:batch_size], query_len_per_seq=k, causal=False,
+                            fused_kernels=decoder.fused_kernels)
                 buffers["outputs"][:rows] = self.model(buffers["input_ids"][:rows], buffers["positions"][:rows])    # warm-up
                 with torch.cuda.graph(graph, decoder.target.graph_pool):
                     buffers["outputs"][:rows] = self.model(buffers["input_ids"][:rows], buffers["positions"][:rows])
@@ -332,9 +395,11 @@ class DFlashDrafter:
         width = max(len(seq.target_kv.block_table) for seq in seqs)
         metadata = verify_varlen_metadata(seqs, lens, decoder.num_drafts, decoder.block_size, len(seqs), sum(lens),
                                           decoder.target.pad_block_id, width)
+        kwargs = {"kv_cache": self.kv_cache, "fused": True} if decoder.fused_kernels else {}
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
-                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32),
+                                    **kwargs)
 
 
 class SpeculativeDecoder:
@@ -358,6 +423,7 @@ class SpeculativeDecoder:
         self.vocab_size = config.hf_config.vocab_size
         self.device = target.device
         self.variable_length = config.variable_length
+        self.fused_kernels = getattr(config, "fused_kernels", False)
         self.schedule = None if config.verify_schedule is None else VerifySchedule.load(
             config.verify_schedule, self.num_drafts, config.max_num_seqs)
         self.record_confidences = config.record_confidences
@@ -366,6 +432,8 @@ class SpeculativeDecoder:
         self.graph_shapes: list[tuple[int, int]] = []                # their (row slots, tokens), by tokens
         self.graph_batch_sizes: list[int] = []
         self.graph_vars: dict[str, torch.Tensor] = {}
+        self.verify_split_pool: VerifySplitBuffers | None = None
+        self.verify_split_views: dict[int, VerifySplitBuffers] = {}
         self.stats: Counter = Counter()
         self._phase_events: list[tuple[str, object, object]] = []
         self._new_event = None
@@ -447,10 +515,16 @@ class SpeculativeDecoder:
             self.confidence_log.append({"logits": confidence.tolist(), "accepted": [row[self.num_drafts] for row in payload]})
         return appended
 
-    def _accept(self, target_logits: torch.Tensor, drafts: torch.Tensor, draft_probs: torch.Tensor | None,
+    def _accept(self, target_logits: torch.Tensor, drafts: torch.Tensor,
+                draft_probs: torch.Tensor | SparseDraftProbs | None,
                 sampling: SamplingTensors, verified_lens: list[int] | None) -> tuple[torch.Tensor, torch.Tensor]:
         """Acceptance of every row's k drafts over [B, k+1, V] logits, or with verified_lens of each row's first
         verified_lens[r] - 1 over the flat [T, V] ones."""
+        if isinstance(draft_probs, SparseDraftProbs):
+            lens = (torch.full((drafts.shape[0],), self.num_drafts + 1, dtype=torch.int64, device=self.device)
+                    if verified_lens is None else self._device_tensor(verified_lens, torch.int64))
+            flat_logits = target_logits.flatten(0, 1) if verified_lens is None else target_logits
+            return accept_sparse_varlen(flat_logits, draft_probs, drafts, sampling, lens, self.target.generator)
         if verified_lens is None:
             if sampling.temperatures is None:
                 return accept_greedy(target_logits, drafts)
@@ -484,17 +558,31 @@ class SpeculativeDecoder:
     def _verify_eager(self, seqs: list[Sequence], drafts: torch.Tensor, verified_lens: list[int],
                       aux_out: torch.Tensor | None = None) -> torch.Tensor:
         width = max(len(seq.target_kv.block_table) for seq in seqs)
+        num_tokens = sum(verified_lens)
         metadata = verify_varlen_metadata(seqs, verified_lens, self.num_drafts, self.block_size, len(seqs),
-                                          sum(verified_lens), self.target.pad_block_id, width)
+                                          num_tokens, self.target.pad_block_id, width)
         input_ids = self._device_tensor(metadata.input_ids, torch.int64)
         self._place_drafts(input_ids, drafts, metadata)
         positions = self._device_tensor(metadata.positions, torch.int64)
+        cu_q = self._device_tensor(metadata.cu_seqlens_q, torch.int32)
+        cu_k = self._device_tensor(metadata.cu_seqlens_k, torch.int32)
+        split_bufs = None
+        if self.fused_kernels and num_tokens >= MIN_VERIFY_SPLIT_TOKENS:
+            hf_config = self.target.config.hf_config
+            head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
+            split_bufs = VerifySplitBuffers.allocate(
+                len(seqs), self.num_drafts + 1, hf_config.num_attention_heads, hf_config.num_key_value_heads,
+                head_dim, hf_config.dtype, self.device,
+            ).slice(len(seqs), num_tokens)
         set_context(True,
-                    self._device_tensor(metadata.cu_seqlens_q, torch.int32),
-                    self._device_tensor(metadata.cu_seqlens_k, torch.int32),
+                    cu_q,
+                    cu_k,
                     self.num_drafts + 1, self.max_model_len,
                     self._device_tensor(metadata.slot_mapping, torch.int32), None,
-                    self._device_tensor(metadata.block_tables, torch.int32))
+                    self._device_tensor(metadata.block_tables, torch.int32),
+                    fused_kernels=self.fused_kernels, verify_attn_buffers=split_bufs)
+        if split_bufs is not None:
+            prepare_verify_split_meta(cu_q, cu_k, split_bufs)
         hidden = self.target.run_model(input_ids, positions, True, need_logits=False, aux_out=aux_out)
         reset_context()
         return hidden
@@ -556,6 +644,15 @@ class SpeculativeDecoder:
             "aux": torch.zeros(max_batch_size * query_len, self.drafter.aux_width, dtype=self.drafter.aux_dtype,
                                device=self.device),
         }
+        if self.fused_kernels:
+            head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
+            self.verify_split_pool = VerifySplitBuffers.allocate(
+                max_batch_size, query_len, hf_config.num_attention_heads, hf_config.num_key_value_heads,
+                head_dim, hf_config.dtype, self.device,
+            )
+            for num_rows, num_tokens in self.graph_shapes:
+                if num_tokens >= MIN_VERIFY_SPLIT_TOKENS:
+                    self.verify_split_views[num_tokens] = self.verify_split_pool.slice(num_rows, num_tokens)
         with torch.device(self.device):
             for num_rows, num_tokens in reversed(self.graph_shapes):
                 padding = verify_varlen_metadata([], [], self.num_drafts, self.block_size, num_rows, num_tokens,
@@ -572,6 +669,9 @@ class SpeculativeDecoder:
         self.drafter.capture_graphs()
 
     def _graph_forward(self, num_tokens: int) -> torch.Tensor:
+        ctx = get_context()
+        if ctx.verify_attn_buffers is not None:
+            prepare_verify_split_meta(ctx.cu_seqlens_q, ctx.cu_seqlens_k, ctx.verify_attn_buffers)
         return self.target.model(self.graph_vars["input_ids"][:num_tokens], self.graph_vars["positions"][:num_tokens],
                                  self.graph_vars["aux"][:num_tokens])
 
@@ -579,11 +679,14 @@ class SpeculativeDecoder:
         buffers = self.graph_vars
         set_context(True, buffers["cu_seqlens_q"][:num_rows + 1], buffers["cu_seqlens_k"][:num_rows + 1],
                     self.num_drafts + 1, self.max_model_len, buffers["slot_mapping"][:num_tokens], None,
-                    buffers["block_tables"][:num_rows])
+                    buffers["block_tables"][:num_rows], fused_kernels=self.fused_kernels,
+                    verify_attn_buffers=self.verify_split_views.get(num_tokens))
 
     def close(self) -> None:
         self.graphs.clear()
         self.graph_vars.clear()
+        self.verify_split_views.clear()
+        self.verify_split_pool = None
         self.drafter.graphs.clear()
         self.drafter.sampling_graphs.clear()
 

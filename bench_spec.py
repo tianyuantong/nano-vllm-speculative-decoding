@@ -92,6 +92,8 @@ def engine_kwargs(protocol: dict, line: dict, panel: list[PanelEntry], concurren
             kwargs.update(variable_length=True, verify_schedule=str(ROOT / protocol["verify_schedule"]["file"]))
     if line.get("round_robin_prefill"):
         kwargs["round_robin_prefill"] = True
+    if line.get("fused_kernels"):
+        kwargs["fused_kernels"] = True
     return target, draft, kwargs
 
 
@@ -208,7 +210,7 @@ def closed_loop(args: argparse.Namespace) -> None:
               "target": target, "draft": draft,
               **{key: kwargs.get(key) for key in ("max_model_len", "max_num_batched_tokens", "kv_cache_memory_bytes",
                                                   "draft_type", "variable_length", "record_confidences",
-                                                  "round_robin_prefill")}}
+                                                  "round_robin_prefill", "fused_kernels")}}
     schedule_sha256 = (hashlib.sha256(Path(kwargs["verify_schedule"]).read_bytes()).hexdigest()
                        if "verify_schedule" in kwargs else None)
     result = build_result(

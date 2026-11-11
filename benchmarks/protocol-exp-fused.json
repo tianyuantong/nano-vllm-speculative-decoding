@@ -1,0 +1,155 @@
+{
+  "version": "exp-fused",
+  "frozen": false,
+  "derived_from": {
+    "file": "benchmarks/protocol-v2.9.json",
+    "sha256": "0963a8458734b197d1a5d5b13fb2fd6c648604920f698965d5c6df0489e068aa"
+  },
+  "scope": "Experimental end-to-end evaluation of the three hand-written Triton fused operator groups (Node C: QK-RMSNorm+RoPE+PagedKV and 5-layer context KV; Node B1: prefix-split GQA verify attention + fused causal tail LSE + draft non-causal GQA packing; Node A: sparse candidate draft sampling + fused target acceptance & chunked residual race) on local branch exp/fused-kernels. Reported as effect sizes; not frozen.",
+  "gpu": {
+    "runtime": "colab new --gpu G4",
+    "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "power_limit_w": 600
+  },
+  "models": {
+    "target": "Qwen3-8B",
+    "dtype": "bfloat16",
+    "drafts": {
+      "model_0p6b": "Qwen3-0.6B",
+      "dflash": "dflash_qwen3_8b_block7-9e44dbbb6cb6",
+      "dspark": "dspark_qwen3_8b_block7-03326e504381"
+    }
+  },
+  "sampling": {
+    "temperature": 0.7,
+    "top_k": 20,
+    "top_p": 0.8,
+    "max_tokens": 512,
+    "ignore_eos": false
+  },
+  "max_model_len": 4096,
+  "max_num_batched_tokens": 16384,
+  "seeds": {
+    "dev": [
+      17011,
+      110017,
+      130031,
+      170041,
+      210011
+    ],
+    "confirm": [
+      17011,
+      110017,
+      130031
+    ]
+  },
+  "kv_budget": "C * ceil((max_prompt_len + max_tokens + 7) / 256) target blocks for every line; a block draft's cache mirrors the target's blocks",
+  "warmup": {
+    "requests": "first C of the panel, cycled",
+    "max_tokens": 64
+  },
+  "metrics": {
+    "primary": "Q_steady",
+    "secondary": "Q_full"
+  },
+  "verify_schedule": {
+    "file": "benchmarks/inputs/verify-schedule-g4.json",
+    "sha256": "10017b48c9ea36dca41eb6482491d9fd829e62cdcafb53d72f87e70834d0c1c6",
+    "made_by": "v2.3's job A; see protocol-v2.3.json"
+  },
+  "trees": {
+    "main": {
+      "branch": "exp/fused-kernels",
+      "rule": "a clean clone of one commit from a git bundle"
+    }
+  },
+  "lines": {
+    "k0": {
+      "tree": "main",
+      "drafter": null,
+      "k": 0,
+      "k0_line": "k0"
+    },
+    "dspark_var": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "variable_length": true,
+      "k0_line": "k0"
+    },
+    "dspark_var_fused": {
+      "tree": "main",
+      "drafter": "dspark",
+      "k": 7,
+      "variable_length": true,
+      "fused_kernels": true,
+      "k0_line": "k0"
+    }
+  },
+  "panels": {
+    "D48": {
+      "file": "benchmarks/inputs/panel-48.json",
+      "sha256": "071befa6898b31870770b653656e9e54465530d4d553f79b84a1aa8ec4958235",
+      "take": "full_cycles"
+    },
+    "S2048": {
+      "file": "benchmarks/inputs/panel-S2048.json",
+      "sha256": "042b887c08b9b4098d1587406dd47fb73b75ee5c86496a5935156bd5dbe5e163",
+      "take": "prefix"
+    }
+  },
+  "gates": {
+    "G1_wide": {
+      "prompts": 8,
+      "block_crossing_lengths": [
+        1022,
+        2046
+      ],
+      "batch": [
+        1,
+        4,
+        16
+      ],
+      "floor_multiple": 2,
+      "margin": 0.5,
+      "varlen": {
+        "lengths": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    }
+  },
+  "comparison": {
+    "d48_concurrency": [
+      1,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "d48_extra_seed_concurrency": [
+      32,
+      64
+    ],
+    "s2048_concurrency": [
+      32,
+      64
+    ],
+    "primary_seed": 17011,
+    "extra_seed": 110017
+  },
+  "invalid_if": [
+    "gpu name mismatch",
+    "preemption > 0",
+    "non-finite value or assertion failure",
+    "decode step or round > 3 x median"
+  ]
+}

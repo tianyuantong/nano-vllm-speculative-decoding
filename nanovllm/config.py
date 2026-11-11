@@ -31,6 +31,7 @@ class Config:
     seed: int | None = None                 # seed of the engine's sampling generator
     round_robin_prefill: bool = False         # a step admits one waiting request, and a decode step follows it
     record_step_timings: bool = False         # record a pair of CUDA events per engine step
+    fused_kernels: bool = False               # experimental Triton fused kernels for QK-norm/RoPE/KV, verify and sampling
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
