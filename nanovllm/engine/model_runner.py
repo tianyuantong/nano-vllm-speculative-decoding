@@ -182,8 +182,7 @@ class ModelRunner:
         cu_seqlens_q = self._device_tensor(metadata.cu_seqlens_q, torch.int32)
         cu_seqlens_k = self._device_tensor(metadata.cu_seqlens_k, torch.int32)
         slot_mapping = self._device_tensor(metadata.slot_mapping, torch.int32)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, metadata.max_seqlen_q, metadata.max_seqlen_k, slot_mapping, None, block_tables,
-                    fused_kernels=self.config.fused_kernels)
+        set_context(True, cu_seqlens_q, cu_seqlens_k, metadata.max_seqlen_q, metadata.max_seqlen_k, slot_mapping, None, block_tables)
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -193,8 +192,7 @@ class ModelRunner:
         slot_mapping = self._device_tensor(metadata.slot_mapping, torch.int32)
         context_lens = self._device_tensor(metadata.context_lens, torch.int32)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables,
-                    fused_kernels=self.config.fused_kernels)
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
     @torch.inference_mode()
@@ -246,8 +244,7 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs],
-                        fused_kernels=config.fused_kernels)
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture

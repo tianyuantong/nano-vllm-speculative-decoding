@@ -35,7 +35,7 @@ def test_draft_noncausal_gqa_packs_and_unpacks_identically(monkeypatch):
             causal=False,
             fused_kernels=True,
         )
-        out = Attention(num_heads, head_dim, 0.125, num_kv_heads)(q, k, v, kv_stored=True)
+        out = Attention(num_heads, head_dim, 0.125, num_kv_heads)(q, k, v)
         assert len(calls) == 1
         q_packed, kwargs = calls[0]
         assert q_packed.shape == (batch_size, q_len * (num_heads // num_kv_heads), num_kv_heads, head_dim)

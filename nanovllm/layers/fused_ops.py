@@ -1,24 +1,17 @@
 """Hand-written Triton fused kernels for speculative decoding (experimental, Config.fused_kernels).
 
-Three operator groups:
-  1. Node C: fused QK-RMSNorm + NeoX RoPE + direct paged KV cache write (target & draft attention), plus batched
-     multi-layer context K/V projection + fused K-RMSNorm + RoPE + paged KV write for DFlashDraftModel.
-  2. Node B1: prefix-split GQA paged attention + fused causal tail & online LSE merge for multi-token verification.
-  3. Node A: sparse candidate draft probability representation + fused candidate truncation/sampling for DSpark's
+Two operator groups:
+  1. Prefix-split GQA paged attention + fused causal tail & online LSE merge for multi-token verification.
+  2. Sparse candidate draft probability representation + fused candidate truncation/sampling for DSpark's
      Markov head + fused sparse target acceptance and chunked exponential residual race.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
 from nanovllm.layers.spec_sampler import EXPONENTIAL_NOISE_FLOOR, SamplingTensors
-
-if TYPE_CHECKING:
-    pass
 
 try:
     import triton
@@ -54,274 +47,7 @@ VOCAB_CHUNK_SIZE = 1024
 
 
 # ==============================================================================
-# Group 1 (Node C): Fused QK-RMSNorm + RoPE + Direct Paged KV Cache Write
-# ==============================================================================
-
-
-@triton.jit
-def _fused_qkv_norm_rope_cache_kernel(
-    qkv_ptr,
-    qkv_stride_n,
-    positions_ptr,
-    q_weight_ptr,
-    k_weight_ptr,
-    cos_sin_ptr,
-    slot_mapping_ptr,
-    q_out_ptr,
-    q_out_stride_n,
-    k_out_ptr,
-    k_out_stride_n,
-    v_out_ptr,
-    v_out_stride_n,
-    k_cache_ptr,
-    v_cache_ptr,
-    eps,
-    Q_SIZE: tl.constexpr,
-    KV_SIZE: tl.constexpr,
-    GROUP: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    HALF_DIM: tl.constexpr,
-    HAS_CACHE: tl.constexpr,
-    WRITE_KV_OUT: tl.constexpr,
-):
-    token_idx = tl.program_id(0).to(tl.int64)
-    kv_head = tl.program_id(1)
-    out_dtype = q_out_ptr.dtype.element_ty
-
-    half_offs = tl.arange(0, HALF_DIM)
-    pos = tl.load(positions_ptr + token_idx).to(tl.int64)
-    cos = tl.load(cos_sin_ptr + pos * HEAD_DIM + half_offs).to(tl.float32)
-    sin = tl.load(cos_sin_ptr + pos * HEAD_DIM + HALF_DIM + half_offs).to(tl.float32)
-
-    qw1 = tl.load(q_weight_ptr + half_offs).to(out_dtype)
-    qw2 = tl.load(q_weight_ptr + HALF_DIM + half_offs).to(out_dtype)
-    inv_dim = 1.0 / HEAD_DIM
-
-    row_ptr = qkv_ptr + token_idx * qkv_stride_n
-    q_out_row_ptr = q_out_ptr + token_idx * q_out_stride_n
-
-    for g in tl.static_range(GROUP):
-        q_head = kv_head * GROUP + g
-        q_ptr = row_ptr + q_head * HEAD_DIM
-        qx1 = tl.load(q_ptr + half_offs).to(tl.float32)
-        qx2 = tl.load(q_ptr + HALF_DIM + half_offs).to(tl.float32)
-        q_var = (tl.sum(qx1 * qx1, axis=0) + tl.sum(qx2 * qx2, axis=0)) * inv_dim
-        q_rstd = tl.rsqrt(q_var + eps)
-        qn1 = ((qx1 * q_rstd).to(out_dtype) * qw1).to(tl.float32)
-        qn2 = ((qx2 * q_rstd).to(out_dtype) * qw2).to(tl.float32)
-        qy1 = (qn1 * cos - qn2 * sin).to(out_dtype)
-        qy2 = (qn2 * cos + qn1 * sin).to(out_dtype)
-        q_dst = q_out_row_ptr + q_head * HEAD_DIM
-        tl.store(q_dst + half_offs, qy1)
-        tl.store(q_dst + HALF_DIM + half_offs, qy2)
-
-    if HAS_CACHE:
-        slot = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
-        if not WRITE_KV_OUT:
-            if slot < 0:
-                return
-
-    kw1 = tl.load(k_weight_ptr + half_offs).to(out_dtype)
-    kw2 = tl.load(k_weight_ptr + HALF_DIM + half_offs).to(out_dtype)
-    k_ptr = row_ptr + Q_SIZE + kv_head * HEAD_DIM
-    kx1 = tl.load(k_ptr + half_offs).to(tl.float32)
-    kx2 = tl.load(k_ptr + HALF_DIM + half_offs).to(tl.float32)
-    k_var = (tl.sum(kx1 * kx1, axis=0) + tl.sum(kx2 * kx2, axis=0)) * inv_dim
-    k_rstd = tl.rsqrt(k_var + eps)
-    kn1 = ((kx1 * k_rstd).to(out_dtype) * kw1).to(tl.float32)
-    kn2 = ((kx2 * k_rstd).to(out_dtype) * kw2).to(tl.float32)
-    ky1 = (kn1 * cos - kn2 * sin).to(out_dtype)
-    ky2 = (kn2 * cos + kn1 * sin).to(out_dtype)
-
-    v_ptr = row_ptr + Q_SIZE + KV_SIZE + kv_head * HEAD_DIM
-    vy1 = tl.load(v_ptr + half_offs).to(out_dtype)
-    vy2 = tl.load(v_ptr + HALF_DIM + half_offs).to(out_dtype)
-
-    if WRITE_KV_OUT:
-        k_dst = k_out_ptr + token_idx * k_out_stride_n + kv_head * HEAD_DIM
-        v_dst = v_out_ptr + token_idx * v_out_stride_n + kv_head * HEAD_DIM
-        tl.store(k_dst + half_offs, ky1)
-        tl.store(k_dst + HALF_DIM + half_offs, ky2)
-        tl.store(v_dst + half_offs, vy1)
-        tl.store(v_dst + HALF_DIM + half_offs, vy2)
-
-    if HAS_CACHE:
-        if slot >= 0:
-            cache_base = slot * KV_SIZE + kv_head * HEAD_DIM
-            tl.store(k_cache_ptr + cache_base + half_offs, ky1)
-            tl.store(k_cache_ptr + cache_base + HALF_DIM + half_offs, ky2)
-            tl.store(v_cache_ptr + cache_base + half_offs, vy1)
-            tl.store(v_cache_ptr + cache_base + HALF_DIM + half_offs, vy2)
-
-
-def fused_qkv_norm_rope_cache(
-    qkv: torch.Tensor,
-    positions: torch.Tensor,
-    q_norm_weight: torch.Tensor,
-    k_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    eps: float,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    slot_mapping: torch.Tensor | None,
-    *,
-    need_kv_out: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    """Fuse Q/K RMSNorm, NeoX RoPE, and paged KV cache write into a single Triton launch."""
-    n_tokens = qkv.shape[0]
-    q_out = torch.empty((n_tokens, num_heads, head_dim), dtype=qkv.dtype, device=qkv.device)
-    if n_tokens == 0:
-        if need_kv_out:
-            empty_kv = torch.empty((0, num_kv_heads, head_dim), dtype=qkv.dtype, device=qkv.device)
-            return q_out, empty_kv, empty_kv
-        return q_out, None, None
-
-    has_cache = k_cache.numel() > 0 and v_cache.numel() > 0 and slot_mapping is not None and slot_mapping.numel() == n_tokens
-    if need_kv_out:
-        k_out = torch.empty((n_tokens, num_kv_heads, head_dim), dtype=qkv.dtype, device=qkv.device)
-        v_out = torch.empty((n_tokens, num_kv_heads, head_dim), dtype=qkv.dtype, device=qkv.device)
-        k_out_stride = k_out.stride(0)
-        v_out_stride = v_out.stride(0)
-    else:
-        k_out = v_out = None
-        k_out_stride = v_out_stride = 0
-
-    q_size = num_heads * head_dim
-    kv_size = num_kv_heads * head_dim
-    group = num_heads // num_kv_heads
-    half_dim = head_dim // 2
-
-    _fused_qkv_norm_rope_cache_kernel[(n_tokens, num_kv_heads)](
-        qkv,
-        qkv.stride(0),
-        positions,
-        q_norm_weight,
-        k_norm_weight,
-        cos_sin_cache,
-        slot_mapping if has_cache else positions,
-        q_out,
-        q_out.stride(0),
-        k_out if need_kv_out else q_out,
-        k_out_stride,
-        v_out if need_kv_out else q_out,
-        v_out_stride,
-        k_cache if has_cache else q_out,
-        v_cache if has_cache else q_out,
-        eps,
-        Q_SIZE=q_size,
-        KV_SIZE=kv_size,
-        GROUP=group,
-        HEAD_DIM=head_dim,
-        HALF_DIM=half_dim,
-        HAS_CACHE=has_cache,
-        WRITE_KV_OUT=need_kv_out,
-    )
-    return q_out, k_out, v_out
-
-
-@triton.jit
-def _fused_ctx_kv_cache_kernel(
-    kv_all_ptr,
-    kv_all_stride_n,
-    positions_ptr,
-    k_weights_ptr,
-    cos_sin_ptr,
-    slot_mapping_ptr,
-    k_cache_all_ptr,
-    v_cache_all_ptr,
-    layer_cache_stride,
-    eps,
-    KV_SIZE: tl.constexpr,
-    NUM_KV_HEADS: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    HALF_DIM: tl.constexpr,
-):
-    token_idx = tl.program_id(0).to(tl.int64)
-    slot = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
-    if slot < 0:
-        return
-
-    lh = tl.program_id(1)
-    layer_id = lh // NUM_KV_HEADS
-    kv_head = lh % NUM_KV_HEADS
-    out_dtype = k_cache_all_ptr.dtype.element_ty
-
-    half_offs = tl.arange(0, HALF_DIM)
-    pos = tl.load(positions_ptr + token_idx).to(tl.int64)
-    cos = tl.load(cos_sin_ptr + pos * HEAD_DIM + half_offs).to(tl.float32)
-    sin = tl.load(cos_sin_ptr + pos * HEAD_DIM + HALF_DIM + half_offs).to(tl.float32)
-
-    kw1 = tl.load(k_weights_ptr + layer_id * HEAD_DIM + half_offs).to(out_dtype)
-    kw2 = tl.load(k_weights_ptr + layer_id * HEAD_DIM + HALF_DIM + half_offs).to(out_dtype)
-
-    layer_base = kv_all_ptr + token_idx * kv_all_stride_n + layer_id * (2 * KV_SIZE)
-    k_ptr = layer_base + kv_head * HEAD_DIM
-    v_ptr = layer_base + KV_SIZE + kv_head * HEAD_DIM
-
-    kx1 = tl.load(k_ptr + half_offs).to(tl.float32)
-    kx2 = tl.load(k_ptr + HALF_DIM + half_offs).to(tl.float32)
-    k_var = (tl.sum(kx1 * kx1, axis=0) + tl.sum(kx2 * kx2, axis=0)) * (1.0 / HEAD_DIM)
-    k_rstd = tl.rsqrt(k_var + eps)
-    kn1 = ((kx1 * k_rstd).to(out_dtype) * kw1).to(tl.float32)
-    kn2 = ((kx2 * k_rstd).to(out_dtype) * kw2).to(tl.float32)
-    ky1 = (kn1 * cos - kn2 * sin).to(out_dtype)
-    ky2 = (kn2 * cos + kn1 * sin).to(out_dtype)
-
-    vy1 = tl.load(v_ptr + half_offs).to(out_dtype)
-    vy2 = tl.load(v_ptr + HALF_DIM + half_offs).to(out_dtype)
-
-    cache_offset = layer_id.to(tl.int64) * layer_cache_stride + slot * KV_SIZE + kv_head * HEAD_DIM
-    tl.store(k_cache_all_ptr + cache_offset + half_offs, ky1)
-    tl.store(k_cache_all_ptr + cache_offset + HALF_DIM + half_offs, ky2)
-    tl.store(v_cache_all_ptr + cache_offset + half_offs, vy1)
-    tl.store(v_cache_all_ptr + cache_offset + HALF_DIM + half_offs, vy2)
-
-
-def fused_context_kv_cache(
-    features: torch.Tensor,
-    positions: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    wk_wv_weight: torch.Tensor,
-    k_norm_weights: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    eps: float,
-    num_layers: int,
-    num_kv_heads: int,
-    head_dim: int,
-    kv_cache: torch.Tensor,
-) -> None:
-    """Project all draft layers' context K/V in one GEMM and write all layers' paged KV caches in one kernel."""
-    n_tokens = features.shape[0]
-    if n_tokens == 0:
-        return
-    kv_all = F.linear(features, wk_wv_weight)
-    kv_size = num_kv_heads * head_dim
-    k_cache_all = kv_cache[0]
-    v_cache_all = kv_cache[1]
-    assert k_cache_all.is_contiguous() and v_cache_all.is_contiguous()
-    _fused_ctx_kv_cache_kernel[(n_tokens, num_layers * num_kv_heads)](
-        kv_all,
-        kv_all.stride(0),
-        positions,
-        k_norm_weights,
-        cos_sin_cache,
-        slot_mapping,
-        k_cache_all,
-        v_cache_all,
-        k_cache_all.stride(0),
-        eps,
-        KV_SIZE=kv_size,
-        NUM_KV_HEADS=num_kv_heads,
-        HEAD_DIM=head_dim,
-        HALF_DIM=head_dim // 2,
-    )
-
-
-# ==============================================================================
-# Group 2 (Node B1): Prefix-Split GQA Verify Attention + Fused Causal Tail LSE
+# Group 1 (Node B1): Prefix-Split GQA Verify Attention + Fused Causal Tail LSE
 # ==============================================================================
 
 
@@ -574,7 +300,7 @@ def fused_verify_paged_attention(
 
 
 # ==============================================================================
-# Group 3 (Node A): Sparse Candidate Draft Sampling + Fused Target Acceptance
+# Group 2 (Node A): Sparse Candidate Draft Sampling + Fused Target Acceptance
 # ==============================================================================
 
 

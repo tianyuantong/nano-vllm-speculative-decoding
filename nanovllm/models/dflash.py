@@ -18,7 +18,6 @@ from torch import nn
 
 from nanovllm.layers import attention
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
-from nanovllm.layers.fused_ops import fused_context_kv_cache
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import ReplicatedLinear
 from nanovllm.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
@@ -86,41 +85,8 @@ class DFlashDraftModel(nn.Module):
         """[T, len(aux_layer_ids) * H] -> [T, H]."""
         return self.hidden_norm(self.fc(aux))
 
-    def store_context_kv(
-        self,
-        features: torch.Tensor,
-        positions: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        *,
-        kv_cache: torch.Tensor | None = None,
-        fused: bool = False,
-    ) -> None:
+    def store_context_kv(self, features: torch.Tensor, positions: torch.Tensor, slot_mapping: torch.Tensor) -> None:
         """Write every layer's context K/V at slot_mapping. W_k, W_v are the K and V rows of the packed qkv_proj."""
-        if fused and kv_cache is not None and len(self.layers) > 0:
-            first_attn = self.layers[0].self_attn
-            version = tuple(layer.self_attn.qkv_proj.weight._version for layer in self.layers)
-            if getattr(self, "_ctx_kv_version", None) != version:
-                self._ctx_kv_weight = torch.cat(
-                    [layer.self_attn.qkv_proj.weight[layer.self_attn.q_size:] for layer in self.layers], dim=0
-                ).contiguous()
-                self._ctx_k_norm_weight = torch.stack(
-                    [layer.self_attn.k_norm.weight for layer in self.layers], dim=0
-                ).contiguous()
-                self._ctx_kv_version = version
-            fused_context_kv_cache(
-                features,
-                positions,
-                slot_mapping,
-                self._ctx_kv_weight,
-                self._ctx_k_norm_weight,
-                first_attn.rotary_emb.cos_sin_cache,
-                first_attn.k_norm.eps,
-                len(self.layers),
-                first_attn.num_kv_heads,
-                first_attn.head_dim,
-                kv_cache,
-            )
-            return
         for layer in self.layers:
             attn = layer.self_attn
             k, v = F.linear(features, attn.qkv_proj.weight[attn.q_size:]).split([attn.kv_size, attn.kv_size], dim=-1)

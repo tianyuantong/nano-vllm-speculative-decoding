@@ -5,12 +5,10 @@ from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.fused_ops import fused_qkv_norm_rope_cache
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from nanovllm.utils.context import get_context
 
 
 class Qwen3Attention(nn.Module):
@@ -77,26 +75,6 @@ class Qwen3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
-        context = get_context()
-        if context.fused_kernels and not self.qkv_bias:
-            need_kv_out = context.is_prefill and context.block_tables is None
-            q, k, v = fused_qkv_norm_rope_cache(
-                qkv,
-                positions,
-                self.q_norm.weight,
-                self.k_norm.weight,
-                self.rotary_emb.cos_sin_cache,
-                self.q_norm.eps,
-                self.num_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.attn.k_cache,
-                self.attn.v_cache,
-                context.slot_mapping,
-                need_kv_out=need_kv_out,
-            )
-            o = self.attn(q, k, v, kv_stored=True)
-            return self.o_proj(o.flatten(1, -1))
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)

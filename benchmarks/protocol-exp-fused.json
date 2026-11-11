@@ -5,7 +5,7 @@
     "file": "benchmarks/protocol-v2.9.json",
     "sha256": "0963a8458734b197d1a5d5b13fb2fd6c648604920f698965d5c6df0489e068aa"
   },
-  "scope": "Experimental end-to-end evaluation of the three hand-written Triton fused operator groups (Node C: QK-RMSNorm+RoPE+PagedKV and 5-layer context KV; Node B1: prefix-split GQA verify attention + fused causal tail LSE + draft non-causal GQA packing; Node A: sparse candidate draft sampling + fused target acceptance & chunked residual race) on local branch exp/fused-kernels. Reported as effect sizes; not frozen.",
+  "scope": "Experimental end-to-end evaluation of the two retained Triton fused operator groups (Node B1: prefix-split GQA verify attention + fused causal tail LSE + draft non-causal GQA packing; Node A: sparse candidate draft sampling + fused target acceptance & chunked residual race; Node C QK-RMSNorm/RoPE/KV removed after ablation) on local branch exp/fused-kernels. Reported as effect sizes; not frozen.",
   "gpu": {
     "runtime": "colab new --gpu G4",
     "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",

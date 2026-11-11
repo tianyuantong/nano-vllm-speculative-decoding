@@ -116,11 +116,9 @@ class DFlashDrafter:
         """Context K/V of the chunk the target just prefilled, from the aux features its forward exported."""
         decoder = self.decoder
         metadata = prefill_metadata(seqs, decoder.block_size)
-        kwargs = {"kv_cache": self.kv_cache, "fused": True} if decoder.fused_kernels else {}
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
-                                    decoder._device_tensor(metadata.slot_mapping, torch.int32),
-                                    **kwargs)
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
 
     @torch.inference_mode()
     def propose(self, seqs: list[Sequence], sampling: SamplingTensors,
@@ -395,11 +393,9 @@ class DFlashDrafter:
         width = max(len(seq.target_kv.block_table) for seq in seqs)
         metadata = verify_varlen_metadata(seqs, lens, decoder.num_drafts, decoder.block_size, len(seqs), sum(lens),
                                           decoder.target.pad_block_id, width)
-        kwargs = {"kv_cache": self.kv_cache, "fused": True} if decoder.fused_kernels else {}
         self.model.store_context_kv(self.model.context_features(aux),
                                     decoder._device_tensor(metadata.positions, torch.int64),
-                                    decoder._device_tensor(metadata.slot_mapping, torch.int32),
-                                    **kwargs)
+                                    decoder._device_tensor(metadata.slot_mapping, torch.int32))
 
 
 class SpeculativeDecoder:

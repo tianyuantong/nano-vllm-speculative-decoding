@@ -57,17 +57,10 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.k_cache = self.v_cache = torch.tensor([])
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor | None,
-        v: torch.Tensor | None,
-        *,
-        kv_stored: bool = False,
-    ):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
-        if not kv_stored and k is not None and v is not None and k_cache.numel() and v_cache.numel():
+        if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:
             if context.verify_attn_buffers is not None:
