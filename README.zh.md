@@ -20,6 +20,8 @@
 
 </div>
 
+> **当前分支 `disagg/dual-gpu-1p1d` —— 双卡 1P+1D Prefill-Decode 分离引擎。** 在 [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main) 基础上扩展 [`DisaggLLM`](nanovllm/disagg/disagg_engine.py) 与 [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py)：单进程双线程在 `cuda:0` 执行 prefill、`cuda:1` 执行 decode 与投机验证，通过连续环形缓冲单次 P2P DMA 跨卡交接 target 与 5 层 draft KV 块（[压测入口](tools/bench_pd.py) · [双卡冒烟校验](tools/smoke_pd.py) · [双卡实测结果 →](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)）。
+
 基于 Qwen3-8B 与单卡 RTX PRO 6000（600 W）实测，通过拒绝采样保证输出分布与原模型一致。
 
 | 并发请求数 | 0.6B 小模型 (k=3) | DFlash (k=7) | DSpark (k=7) | DSpark 相对 DFlash | 每轮生成 token 数 (DFlash / DSpark) |

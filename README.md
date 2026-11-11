@@ -20,6 +20,8 @@ Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nan
 
 </div>
 
+> **Branch `disagg/dual-gpu-1p1d` — Dual-GPU 1P+1D Prefill-Decode Disaggregation.** Extends [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main) with [`DisaggLLM`](nanovllm/disagg/disagg_engine.py) and [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py): prefill runs on `cuda:0` and decode/verification on `cuda:1` inside one process, transferring target + 5-layer draft KV blocks via a contiguous P2P DMA ring buffer ([benchmark driver](tools/bench_pd.py) · [smoke gate](tools/smoke_pd.py) · [2-GPU results →](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)).
+
 Measured on Qwen3-8B and a single RTX PRO 6000 (600 W), with standard rejection sampling preserving the target model's output distribution.
 
 | Concurrent requests | 0.6B draft (k=3) | DFlash (k=7) | DSpark (k=7) | DSpark vs DFlash | Tokens / round (DFlash / DSpark) |
