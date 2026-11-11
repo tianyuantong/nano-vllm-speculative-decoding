@@ -293,12 +293,35 @@ In this closed-loop workload the option bounds the stall of the requests being d
 
 Engine `c28b1f9`, driver 580.82.07; 66 runs, 0 void. The runs without the option are token-identical to §8's runs of the same lines (33 runs), and at one concurrent request DSpark with the option is token-identical to DSpark without it. Both tables come from [`tools/round_robin_report.py`](../tools/round_robin_report.py); raw run JSONs are archived in release [`results-round-robin-prefill`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-round-robin-prefill).
 
-## 10. Hand-written Triton kernels on an experimental branch
+## 10. Speed-of-light roofline and hand-written Triton kernels
 
-`RMSNorm` and `RotaryEmbedding` in the main engine already run under `TorchInductor`, leaving two bottlenecks in variable-length DSpark that `@torch.compile` cannot fuse across libraries or dynamic loops:
+### 10.1 Phase and kernel breakdown against the hardware floor
 
-1. **Multi-query GQA verification attention and draft cross-attention.** `flash_attn_with_kvcache` packs the 4 query heads per KV head into one tile only when each sequence carries a single query (§7). When the verified batch holds at least 96 tokens, an experimental branch splits verification into `flash_attn_varlen_func(..., causal=False)` over cached prefix KV with 4:1 packed queries, followed by a Triton kernel that computes the causal `1..8`-token tail and merges both halves via online log-sum-exp; the draft's 5 non-causal cross-attention layers apply the same 4:1 query packing (`16` lines in `nanovllm/layers/attention.py`).
-2. **Dense vocabulary buffers in Markov sampling and rejection acceptance.** Replacing the `[B, 7, 151936]` fp32 draft probability buffer (`272 MB` at `C = 64`) with `[B, 7, 84]` candidate IDs and probabilities lets one Triton kernel fuse each Markov step's top-k / top-p truncation and exponential race, and a second Triton kernel fuse variable-length target acceptance with `1024`-chunked `max(p - q, 0)` residual sampling over the `151,936`-token vocabulary.
+On Colab G4 (RTX PRO 6000 Blackwell Server Edition, 600 W), microbenchmarks in `outputs/sol-g4-72f993c` measure a bf16 square GEMM ceiling of `403 TFLOPS` (`8192³`) and a reachable HBM read bandwidth of `1.52 TB/s` (`1.46 TB/s` copy, `85%` of the `1.8 TB/s` datasheet peak; the target model's `13.95 GB` of bf16 weights alone set a `9.18 ms` floor per forward pass). Profiling steady-state full-batch steps at context length `L = 1,300` tokens compares plain decoding (`k0`) and fixed-length DSpark (`dspark_k7`, 8 verified positions per row) against the sum of per-phase weight/KV bandwidth and GEMM compute floors:
+
+| Line | C | Step / round, ms | Roofline floor, ms | Wall / floor | Target GEMM, ms (% of 1.52 TB/s) | Attention, ms (% of 1.52 TB/s) | `accept`, ms (kernels) | `propose`, ms (GEMM / attn / other / gap) |
+|---|---:|---|---|---|---|---|---|---|
+| plain decoding | 1 | 12.21 | 10.30 | 1.19× | 9.75 (94%) | 0.67 (29%) | — | — |
+| plain decoding | 8 | 12.97 | 11.00 | 1.18× | 10.05 (91%) | 1.16 (82%) | — | — |
+| plain decoding | 32 | 17.01 | 13.99 | 1.22× | 11.12 (82%) | 4.02 (87%) | — | — |
+| plain decoding | 64 | 21.41 | 19.18 | 1.12× | 13.98 (66%) | 6.53 (94%) | — | — |
+| DSpark (`k = 7`) | 1 | 16.41 | 11.53 | 1.42× | 9.77 (94%) | 0.87 (39%) | 0.25 (77) | 3.31 (0.71 / 0.30 / 0.89 / 0.72) |
+| DSpark (`k = 7`) | 8 | 19.86 | 12.83 | 1.55× | 11.19 (82%) | 1.88 (53%) | 0.59 (77) | 4.19 (1.41 / 0.45 / 0.90 / 0.71) |
+| DSpark (`k = 7`) | 32 | 29.74 | 16.75 | 1.78× | 13.94 (66%) | 6.46 (56%) | 2.24 (77) | 5.59 (3.09 / 1.01 / 1.05 / 0.68) |
+| DSpark (`k = 7`) | 64 | 49.49 | 23.09 | 2.14× | 23.91 (38% BW / 42% TFLOPS) | 13.26 (61%) | 4.32 (77) | 8.79 (5.00 / 1.84 / 1.48 / 0.76) |
+
+`RMSNorm` (`32 × 2 + 1` calls) and `RotaryEmbedding` (`36` calls) already run inside `TorchInductor`-fused kernels (`0.38–1.05 ms` total across 36 target layers), and plain decoding runs within `1.12–1.22×` of the hardware floor (`82–94%` of reachable HBM bandwidth on both target GEMMs at low batch and 1-query decode attention at `C = 8–64`). The remaining gap in DSpark concentrates in two places that `@torch.compile` does not fuse across library boundaries or data-dependent loops:
+1. **Multi-query GQA verification attention and draft cross-attention.** At `C = 32` and `64`, 8-query verification attention reaches only `0.85` and `0.93 TB/s` (`56%` and `61%` of `1.52 TB/s`, vs `87%` and `94%` for 1-query decode over the same KV cache) because `flash_attn_with_kvcache` disables 4:1 GQA query-head packing when `q_len > 1` (§7). At `L = 2,600`, verification attention grows to `23.59 ms` at `C = 64` (`46%` of the round).
+2. **Full-vocabulary tensor round-trips in Markov drafting and rejection acceptance.** At `C = 32` and `64`, `accept` spends `2.24` and `4.32 ms` (`2.11` and `4.19 ms` kernel busy time across 77 kernels against a `0.79` and `1.58 ms` single-read floor), repeatedly reading and writing the `[B*8, 151936]` fp32 vocabulary tensor (`311 MB` per pass at `C = 64`). In `propose`, materializing `[B, 7, 151936]` fp32 draft probabilities (`272 MB` at `C = 64`) and running 7 sequential PyTorch top-k / softmax / exponential-race steps adds `1.05–1.48 ms` of small sampling kernels and `0.68–0.76 ms` of inter-kernel launch gaps.
+
+Microbenchmark JSONs, Chrome traces, and `report.md` (`72f993c`) are archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention).
+
+### 10.2 Hand-written Triton kernels (`exp/fused-kernels`)
+
+Targeting those two bottlenecks in variable-length DSpark:
+
+1. **Prefix-split GQA verification attention and packed draft cross-attention.** When the verified batch holds at least 96 tokens, an experimental branch splits verification into `flash_attn_varlen_func(..., causal=False)` over cached prefix KV with 4:1 packed queries, followed by a Triton kernel that computes the causal `1..8`-token tail and merges both halves via online log-sum-exp; the draft's 5 non-causal cross-attention layers apply the same 4:1 query packing (`16` lines in `nanovllm/layers/attention.py`).
+2. **Sparse candidate probabilities and chunked rejection sampling.** Replacing the `[B, 7, 151936]` fp32 draft probability buffer (`272 MB` at `C = 64`) with `[B, 7, 84]` candidate IDs and probabilities lets one Triton kernel fuse each Markov step's top-k / top-p truncation and exponential race, and a second Triton kernel fuse variable-length target acceptance with `1024`-chunked `max(p - q, 0)` residual sampling over the `151,936`-token vocabulary.
 
 Closed-loop runs on Colab G4 (RTX PRO 6000, 600 W), `k0`, `dspark_var`, and `dspark_var_fused` run back to back in each group (`2` seeds at `D48` `C = 32` and `64` with reversed order on the second seed, `1` seed elsewhere; `S2048` has `~3,150`-token context):
 
@@ -320,6 +343,59 @@ Phase and round times are medians of full-batch rounds in the steady window (`ds
 - **Verification and run checks.** `dspark_var_fused` passes `G1-wide` (worst gap `1.19`, bound `3.0`; bit-identical to `dspark_var` at `batch = 1` and `4` where verified tokens `< 96`). Standalone GPU checks (`fused-check.py`) verify split-GQA attention against `flash_attn_varlen_func` (`max |Δ| = 0.0039`), draft GQA packing (`0.0010`), CUDA Graph replay bit-equality, candidate probability match (`5e-8`), a 200,000-trial overlapping-support rejection-sampling test (`0.431` empirical vs `0.432` theoretical acceptance, TV distance `0.0025`), and a 120,000-trial cross-chunk residual test over all `151,936` tokens (`0.422` vs `0.423` acceptance, TV distance `0.0030`, zero mass outside target support). All 16 `D48` runs of `k0` and `dspark_var` are token-identical to §8's development matrix; `D48` `C = 4` and `8` hit two ~90 ms Python GC pauses in host scheduling (`max / median` `≤ 1.12` across all `C = 1, 16, 32, 64` and `S2048` runs), leaving median round times within `0.05 ms` of §8.
 
 Experimental branch `exp/fused-kernels` (`08dfb70`, with `69a9d1e` for the ablation), not merged into `main`. The git bundle, both 30-run directories, gates, and scripts are archived in release [`results-fused-kernels`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-fused-kernels).
+
+## 11. Prefix caching with speculative decoding
+
+In `main`, the 5-layer draft KV cache shares the target model's `BlockManager` and `block_tables` (`block_size = 256`), and `SpeculativeDecoder` calls `block_manager.may_append(seq)` as tokens are accepted so full 256-token blocks enter `hash_to_block_id`. On a 256-prompt panel disjoint from D48, K128, and K128b (private prompt median `1,031` tokens, `min = 516`, `max = 1,622`), prepending a shared system prefix of `P ∈ {0, 512, 1024, 2048}` tokens (`0, 2, 4, 8` full KV blocks) tests how prefix caching interacts with plain and speculative decoding across `C ∈ {8, 32, 64}` and 5 seeds (`60` back-to-back cache-off vs cache-on groups on Colab G4, engine `061244b`, `protocol-v2.6.json`).
+
+At `P = 0` (no shared blocks), every one of the 60 `(C, line, seed)` pairs produces bit-identical token outputs with prefix caching on vs off, and steady-state throughput stays within `±0.2%`. Across `P = 512, 1024, 2048`:
+
+| C | Line | `Q_steady` gain `G` (`P = 512`) | `G` (`P = 1024`) | `G` (`P = 2048`, off → on tok/s) | Speculative ratio `R(off) → R(on)` (`P = 1024`) | `R(off) → R(on)` (`P = 2048`) | Relative lead change `ρ − 1` (`P = 1024` / `2048`) |
+|---:|---|---|---|---|---|---|---|
+| 8 | plain decoding | +13.7% (+13.6 … +13.8%) | +24.8% (+24.6 … +25.0%) | +45.9% (530 → 773) | — | — | — |
+| 8 | DFlash (`k = 7`) | +13.2% (+8.4 … +16.1%) | +21.3% (+18.1 … +26.7%) | +45.7% (838 → 1,229) | 1.60 → 1.56 | 1.58 → 1.59 | −2.8% / −0.1% |
+| 8 | DSpark, fixed length | +15.7% (+14.0 … +18.3%) | +26.9% (+22.5 … +30.0%) | +47.8% (923 → 1,355) | 1.72 → 1.75 | 1.73 → 1.75 | +1.7% / +1.4% |
+| 8 | DSpark, variable length | +13.0% (+11.1 … +15.0%) | +26.9% (+22.1 … +28.2%) | +47.4% (925 → 1,357) | 1.73 → 1.74 | 1.74 → 1.76 | +1.8% / +0.9% |
+| 32 | plain decoding | +17.4% (+17.2 … +17.5%) | +31.8% (+31.5 … +32.3%) | +59.9% (1,123 → 1,796) | — | — | — |
+| 32 | DFlash (`k = 7`) | +13.2% (+8.4 … +22.5%) | +22.8% (+20.8 … +25.0%) | +40.9% (1,341 → 1,896) | 1.24 → 1.15 | 1.20 → 1.06 | −6.9% / −11.9% |
+| 32 | DSpark, fixed length | +16.7% (+12.4 … +20.0%) | +22.6% (+20.1 … +26.6%) | +43.6% (1,508 → 2,174) | 1.37 → 1.29 | 1.35 → 1.21 | −6.9% / −10.2% |
+| 32 | DSpark, variable length | +14.6% (+13.3 … +18.4%) | +23.8% (+17.2 … +27.3%) | +43.9% (1,558 → 2,248) | 1.41 → 1.33 | 1.39 → 1.25 | −5.9% / −10.1% |
+| 64 | plain decoding | +19.9% (+19.2 … +20.2%) | +37.4% (+37.0 … +38.0%) | +69.7% (1,103 → 1,873) | — | — | — |
+| 64 | DFlash (`k = 7`) | +13.7% (+10.8 … +16.8%) | +26.8% (+21.6 … +27.8%) | +56.0% (1,073 → 1,649) | 1.01 → 0.94 | 0.96 → 0.88 | −7.8% / −8.0% |
+| 64 | DSpark, fixed length | +15.8% (+13.9 … +20.6%) | +32.0% (+29.6 … +34.4%) | +63.6% (1,164 → 1,923) | 1.11 → 1.07 | 1.07 → 1.03 | −4.2% / −3.8% |
+| 64 | DSpark, variable length | +16.9% (+13.9 … +17.9%) | +30.1% (+28.6 … +36.4%) | +67.4% (1,294 → 2,157) | 1.24 → 1.17 | 1.17 → 1.15 | −5.4% / −1.4% |
+
+Values are medians over 5 seeds (`G = Q_steady(on) ÷ Q_steady(off) − 1`, `ρ = R(on) ÷ R(off)` paired by seed).
+
+- **Absolute throughput and TTFT improve on every line.** Enabling prefix caching raises `Q_steady` by `13–70%` across all concurrencies and lines (`dspark_var` reaches `2,642 / 2,466 / 2,157 tok/s` at `C = 64` for `P = 512 / 1024 / 2048`), while steady-state TTFT p50 drops from `70 / 96 / 148 ms` to `51 / 53 / 59 ms` because arriving requests skip prefill on the `2 / 4 / 8` shared blocks after the first wave.
+- **Why speculative decoding's relative lead (`R`) narrows at `C ≥ 32, P ≥ 1024`.** Both plain and speculative decoding save the exact same fraction of prefill time (`29% / 44% / 61%` at `P = 512 / 1024 / 2048`), and tokens accepted per round change by less than `0.5%`. The shift comes from full-batch decode steps: when all `C` active requests point to the same physical KV block IDs for the shared prefix, those blocks remain resident in the GPU's L2 cache (`96 MB` on RTX PRO 6000) across sequences within a step. That shortens 1-query plain decode steps by `3–26%` (`21.38 → 18.88 ms` at `C = 32, P = 2048`, and `31.11 → 23.02 ms` at `C = 64, P = 2048`), whereas 8-query verification steps shorten by `< 2%` at `C ≤ 32` (`32.72 → 32.16 ms`) and `13–18%` at `C = 64` (`62.08 → 52.89 ms`). Single-layer attention benchmarks (`outputs/verify-attention/one-layer/attn.json`) confirm the asymmetry: sharing prefix KV blocks speeds up `q_len = 1` attention by `42–55%` at `C = 32–64, P = 2048`, compared with `5–23%` at `q_len = 4–8`.
+
+Run JSONs, summary reports, and git bundle (`exp/m6-prefix-cache` at `2dea7f7`, engine `061244b`) are archived in release [`results-prefix-cache`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-prefix-cache).
+
+## 12. Dual-GPU prefill-decode disaggregation (1P+1D)
+
+While single-GPU round-robin prefill (§9) bounds prefill stalls with zero extra hardware by queueing arriving requests, branch `feat/pd-disagg` tests a 2-GPU prefill-decode disaggregation architecture (`DisaggLLM`): a single Python process runs a prefill worker thread on `cuda:0` (`P`) and a decode worker thread on `cuda:1` (`D`), using thread-local attention contexts, per-device CUDA Graph capture streams, and asynchronous P2P KV copies synchronized by CUDA events (`cudaStreamWaitEvent`) so `D` never executes a prefill step.
+
+Measured on 2 × RTX PRO 6000 Blackwell Server Edition (300 W, `gpu-pro6000-9`, P2P CUMEM), D48 panel, closed loop, 3 seeds (`17011, 110017, 130031`), comparing 1-GPU default scheduling, 1-GPU round-robin prefill (on the same GPU type, job `1732840`), and 2-GPU 1P+1D (`prefill_max_seqs = 2`):
+
+| Line | C | 1-GPU default `Q_steady`, tok/s | 1-GPU round-robin `Q_steady` ratio | 2-GPU 1P+1D `Q_steady` ratio (per-GPU) | Post-arrival ITL p99, ms (default / RR / 1P+1D) | Post-arrival ITL p99 ratio (RR / 1P+1D) | Post-arrival TTFT p99, ms (default / RR / 1P+1D) |
+|---|---:|---|---|---|---|---|---|
+| plain decoding | 1 | 83 | — | 0.99× (0.49×) | 12.7 / — / 13.0 | — / 1.02× | 82 / — / 66 |
+| plain decoding | 8 | 510 | 1.00× | 1.13× (0.56×) | 88.4 / 90.4 / 13.3 | 1.02× / **0.15×** | 150 / 191 / 121 |
+| plain decoding | 32 | 1,292 | 1.00× | **1.39×** (0.69×) | 98.5 / 92.8 / 19.0 | 0.94× / **0.19×** | 599 / 754 / 720 |
+| plain decoding | 64 | 1,680 | 0.99× | **1.45×** (0.73×) | 147.6 / 100.3 / 25.8 | 0.68× / **0.18×** | 1,354 / 2,004 / 1,203 |
+| DSpark (`k = 7`) | 1 | 154 | — | 1.00× (0.50×) | 22.9 / — / 23.0 | — / 1.01× | 74 / — / 55 |
+| DSpark (`k = 7`) | 8 | 834 | 1.02× | 1.19× (0.59×) | 101.1 / 99.6 / 57.3 | 0.99× / **0.57×** | 95 / 126 / 84 |
+| DSpark (`k = 7`) | 32 | 1,685 | 0.98× | **1.42×** (0.71×) | 189.1 / 115.6 / 102.0 | 0.61× / **0.54×** | 164 / 209 / 113 |
+| DSpark (`k = 7`) | 64 | 1,806 | 0.99× | **1.39×** (0.69×) | 260.4 / 187.4 / 169.3 | 0.72× / **0.65×** | 256 / 473 / 82 |
+
+Values are medians over the 3 seeds. "Post-arrival" covers requests `C .. 47` that enter as earlier requests finish (requests `0 .. C−1` arrive together at `t = 0`). At `C = 1`, `1P+1D` produces bit-identical tokens to 1-GPU default across all 6 runs; the 18 default-scheduler runs in the 1-GPU round-robin job (`1732840`) are also bit-identical to the 1-GPU default runs in the 2-GPU job (`1733571`).
+
+- **Throughput and per-GPU efficiency.** Offloading prefill from `D` raises total steady-state throughput at `C = 32` and `64` to `1.39–1.45×` of 1-GPU default on plain decoding (`0.69–0.73×` per GPU) and `1.39–1.42×` on DSpark (`0.69–0.71×` per GPU), because prefill accounts for `25–31%` of a single GPU's steady-state time at those concurrencies while `P` sits idle once all 48 prompts have been prefilled.
+- **Post-arrival ITL p99 and TTFT trade-off vs round-robin prefill.** For requests arriving after the initial wave, 1P+1D eliminates prefill pauses on `D`: plain-decoding ITL p99 drops from `88–148 ms` to `13–26 ms` (`0.15–0.19×` of default), and DSpark ITL p99 drops from `101–260 ms` to `57–169 ms` (`0.54–0.65×` of default; the remaining tail on DSpark comes from the single handoff gap between Token 1 emitted on `P` and Token 2 emitted after `D`'s in-flight speculative round finishes). Unlike 1-GPU round-robin prefill—which achieves `0.61–0.72×` ITL p99 on DSpark on a single GPU at the cost of raising post-arrival TTFT p99 to `1.28–1.85×`—1P+1D keeps post-arrival TTFT p50 at `65–75 ms` (vs `76–81 ms` default) and lowers DSpark's post-arrival TTFT p99 at `C = 32` and `64` from `164` and `256 ms` to `113` and `82 ms` (`0.69×` and `0.32×`).
+- **Cross-thread driver lock and `> 2 GiB` KV indexing at `C = 64` (`ed1f665` → `ae3c96e`).** In the 72-run matrix (`ed1f665`), initial-wave requests at `C = 64` experienced a `4.6 s` handoff delay and `0.9–1.0 s` mid-run pauses on `k0` (raising all-request ITL p99 at `C = 64` before settling). Profiling isolated two causes: (1) calling `.tolist()` at the end of `ModelRunner.run` on `P` held the `cuda:0` runtime lock while `P`'s stream was busy, stalling `D` whenever `D` switched to `cuda:0` to pull KV blocks; and (2) indexing into a `25.5 GiB` (`> 2³¹` bytes) KV pool forced PyTorch's `index_select` onto 32-bit index math and split each layer's copy into 16 kernels (`~1,088` launches per 14-request handoff). Commit `ae3c96e` packs KV blocks on `P` into a pre-allocated contiguous ring buffer (`64` slots) and issues a single P2P DMA copy to `D` with zero `cuda:0` access from the `D` thread.
+
+Branch `feat/pd-disagg` (`ae3c96e`, with `ed1f665` for the 72-run matrix); run JSONs, `report.md`, and the git bundle are archived in release [`results-pd-disagg`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-pd-disagg).
 
 ## Appendix: environment and data
 
