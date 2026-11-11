@@ -82,6 +82,8 @@ GPU 实测覆盖四项检验：
 
 变长验证通过了采样器、验证 logits 和 GSM8K 三项检验：准确率 84.2%，普通解码 85.1%，差值 −0.87 个百分点，95% 置信区间 −2.14 ~ +0.40 个百分点。
 
+在 DSpark 论文自己的题目和采样设置下，本引擎复现了论文 Table 1 的每轮 token 数：DFlash 4.10、DSpark 4.80，论文是 4.07、4.81（9 个数据集，3,030 道题；[详情](docs/RESULTS.md#53-tokens-per-round-against-the-dspark-paper)）。
+
 ## 踩过的坑
 
 - **fp32 下原地改写输入**：输入已经是 fp32 时，`x.float()` 直接返回原张量引用，导致上游 RMSNorm 原地修改了输入张量。bf16 路径不受影响，该问题在 fp32 下与 DeepSpec 对齐数值时暴露。

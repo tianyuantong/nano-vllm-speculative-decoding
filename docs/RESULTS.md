@@ -173,6 +173,31 @@ All 1319 questions × 2 seeds, paired by question and seed. The gate requires th
 - **Decided position**: one where the reference's top logit leads the second by more than 0.5.
 - G1-draft and G1-wide ran on the engine before candidate sampling (`ed4a35c`); candidate sampling changed neither the model nor verification. Alignment was rerun after it and gave the same numbers: temperature-only sampling does not take the candidate path, and its random stream did not change.
 
+### 5.3 Tokens per round against the DSpark paper
+
+With the prompts and sampling of the paper's evaluation code ([DeepSpec](https://github.com/deepseek-ai/DeepSpec) `005e03b`: temperature 1.0 without truncation, at most 2048 new tokens), the engine reproduces the Qwen3-8B row of Table 1 of the DSpark paper ([arXiv:2607.05147](https://arxiv.org/abs/2607.05147)). Tokens per round, the target's own token included, nano / paper:
+
+| Set | Prompts | DFlash | DSpark | DSpark over DFlash |
+|---|---:|---|---|---|
+| GSM8K | 500 | 5.40 / 5.33 | 6.15 / 6.17 | +13.8% / +15.8% |
+| MATH500 | 500 | 4.89 / 4.91 | 5.76 / 5.78 | +18.0% / +17.7% |
+| AIME25 | 30 | 4.15 / 4.07 | 4.98 / 5.01 | +20.0% / +23.1% |
+| HumanEval | 164 | 4.63 / 4.64 | 5.50 / 5.52 | +18.6% / +19.0% |
+| MBPP | 256 | 4.36 / 4.36 | 5.18 / 5.16 | +18.7% / +18.3% |
+| LiveCodeBench | 500 | 4.51 / 4.39 | 5.12 / 5.17 | +13.4% / +17.8% |
+| MT-Bench | 80 | 3.11 / 3.11 | 3.69 / 3.72 | +18.6% / +19.6% |
+| Alpaca | 500 | 3.00 / 2.98 | 3.57 / 3.58 | +18.9% / +20.1% |
+| Arena-Hard | 500 | 2.80 / 2.81 | 3.24 / 3.21 | +15.8% / +14.2% |
+| **Mean of the nine** | 3030 | **4.10 / 4.07** | **4.80 / 4.81** | **+17.2% / +18.4%** |
+
+- Every set is within 3% of the paper's value, and both lines keep the paper's order of domains: math, then code, then chat.
+- The paper prints the nine values and the 18.4%; its two means here are computed from the nine.
+- One run per line, at 32 concurrent requests, seed 980406. DeepSpec's code runs one prompt at a time, and nano ends a request at `<|im_end|>` only; the effect of neither difference was measured.
+- K128b's rounds yield 2.81–2.95 tokens under its own prompts and sampling (temperature 0.7, top-k 20, top-p 0.8). Under the paper's, the port yields what the paper reports.
+- These runs give token counts only: both runs' timings are void under the protocol's rule (2 rounds each above 3 times the median), and plain decoding was not run on these prompts.
+
+Engine `bafe536` (the run files name `ad87956`, see the appendix), on the cluster's RTX PRO 6000 Server Edition. The two runs and the script that prints the table are in release [`results-paper-table1`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-paper-table1).
+
 ## 6. Estimates made beforehand
 
 | item | estimate | measured |
@@ -291,12 +316,12 @@ Result files and frozen protocols name the commit a job ran from. The jobs behin
 | `10b38b4` | release `results-dflash-dspark`, 39 files | `a01aadd` | same tree |
 | `3dc0dba` | release `results-dflash-dspark`, 118 files | `ed4a35c` | same tree |
 | `f30ed0a` | release `results-dflash-dspark`, 155 files | `2d64fa4` | same tree |
-| `ad87956` | protocols v2.2 and v2.3; 2 reference runs in release `results-round-robin-prefill` | `bafe536` | same tree |
+| `ad87956` | protocols v2.2 and v2.3; 2 reference runs in release `results-round-robin-prefill`; the 2 runs of release `results-paper-table1` | `bafe536` | same tree |
 | `9316ab3` | protocol v2.2 | `a28d721` | same tree |
 | `97fdd3c` | release `results-variable-length`, 177 files | `70e0d4d` | same tree |
 | `5bf4cbc` | release `results-variable-length`, 6 files; protocol v2.3 | `70e0d4d` | same `nanovllm/` and `bench_spec.py` |
 | `66f99b6` | release `results-variable-length`, 30 files | `4d8426f` | same `nanovllm/` and `bench_spec.py` |
 
-`dee9fbd`, named in protocol v2.9 and by one reference run in release `results-round-robin-prefill`, is on the development branch the round-robin scheduler was first written on, which was not published; §9's engine, `c28b1f9`, reproduces that run token for token.
+`dee9fbd`, named in protocol v2.9 and by one reference run in release `results-round-robin-prefill`, is on the development branch the round-robin scheduler was first written on, which was not published; §9's engine, `c28b1f9`, reproduces that run token for token. The other development trees of §4 (`8cf8e6c`, `743c261`, `c944546`) were not published either.
 
 The DFlash results on K128 are in [v2/RESULTS.md](v2/RESULTS.md), and the September results of the 0.6B draft in [v1/RESULTS.md](v1/RESULTS.md).

@@ -82,6 +82,8 @@ Verified on GPU across four checks:
 
 Variable-length verification passes the sampler, verification-logit and GSM8K checks: 84.2% vs 85.1% plain decoding, −0.87 pt difference, 95% CI −2.14 to +0.40 pt.
 
+On the DSpark paper's own prompts and sampling, the engine reproduces the tokens per round of the paper's Table 1: 4.10 for DFlash and 4.80 for DSpark, against 4.07 and 4.81 (9 sets, 3,030 prompts; [details](docs/RESULTS.md#53-tokens-per-round-against-the-dspark-paper)).
+
 ## Engineering pitfalls
 
 - **In-place input overwrite in fp32**: `x.float()` returns the original tensor reference when `x` is already fp32, causing the upstream RMSNorm to overwrite its input in-place during fp32 numerical checks against DeepSpec (bf16 runs were unaffected).
