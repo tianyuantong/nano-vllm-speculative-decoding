@@ -4,7 +4,7 @@
 
 Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): evolving from a 0.6B standalone draft to DFlash parallel blocks, DSpark's in-block Markov correction, and variable-length verification.
 
-**Single-request 2.10× · 8 concurrent 1.78× · 32 concurrent 1.48× · 64 concurrent 1.25×**
+**Single-request 2.02× · 8 concurrent 1.79× · 32 concurrent 1.48× · 64 concurrent 1.25×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)

@@ -4,7 +4,7 @@
 
 基于 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 的块式投机解码：从 0.6B 独立小模型演进至 DFlash 并行草稿、DSpark 块内 Markov 修正与变长验证。
 
-**单请求 2.10× · 8 并发 1.78× · 32 并发 1.48× · 64 并发 1.25×**
+**单请求 2.02× · 8 并发 1.79× · 32 并发 1.48× · 64 并发 1.25×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
