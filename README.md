@@ -1,179 +1,151 @@
 <div align="center">
 
-# nano-vllm-speculative-decoding
+# nano-vllm-speculative-decoding · 双卡 1P+1D Prefill-Decode 分离
 
-Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm): evolving from a 0.6B standalone draft to DFlash parallel blocks, DSpark's in-block Markov correction, and variable-length verification.
+基于 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 的单进程双线程双卡 Prefill-Decode 分离引擎：连续环形缓冲单次点对点（Peer-to-Peer，P2P）推送，同时支持普通解码与 DSpark 块式投机解码。
 
-**Single-request 2.02× · 8 concurrent 1.79× · 32 concurrent 1.48× · 64 concurrent 1.25×**
+**8–64 并发全程 token 间延迟（ITL）p99：普通解码 0.15–0.19× · DSpark 0.24–0.31× ｜ 32–64 并发稳态吞吐：普通解码 1.35–1.52× · DSpark 1.38–1.39×**
 
 [![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-**English** | [简体中文](README.zh.md) · [Quick start](#quick-start) · [Results](docs/RESULTS.md) · [Usage guide](docs/DECODING.md)
+**简体中文** | [English](README.en.md) · [快速开始](#快速开始) · [双卡详细结果](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d) · [主分支 (DFlash / DSpark) →](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-overview-dark.svg">
-  <img alt="Speedup over plain decoding on 128-prompt held-out test sets (medians over 3 seeds). Left (DFlash vs 0.6B standalone draft): 0.6B reaches 1.54×, 1.21×, 0.96×, 0.82× at 1, 8, 32, 64 concurrent requests; DFlash reaches 2.19×, 1.80×, 1.40×, 1.08×. Right (DSpark vs DFlash): DFlash reaches 2.00×, 1.68×, 1.31×, 1.01×; DSpark reaches 2.10×, 1.78×, 1.43×, 1.15×." src="docs/assets/speedup-overview-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/pd-1p1d-overview-dark.svg">
+  <img alt="双卡 1P+1D 分离对比单卡默认调度（48 题开发集，3 个 seed 中位数与范围）。左图（全程 ITL p99 相对单卡默认比值，越低越好）：8/32/64 并发下，单卡轮流 prefill DSpark 为 1.00×、0.72×、0.61×；双卡 1P+1D DSpark 为 0.31×、0.24×、0.31×；双卡 1P+1D 普通解码为 0.15×、0.19×、0.16×。右图（稳态吞吐相对单卡默认比值，越高越好）：1/8/32/64 并发下，双卡 1P+1D 普通解码为 1.00×、1.10×、1.35×、1.52×；DSpark 为 0.98×、1.22×、1.38×、1.39×。" src="docs/assets/pd-1p1d-overview-light.svg" width="760">
 </picture>
 
 </div>
 
-> **Branch `disagg/dual-gpu-1p1d` — Dual-GPU 1P+1D Prefill-Decode Disaggregation.** Extends [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main) with [`DisaggLLM`](nanovllm/disagg/disagg_engine.py) and [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py): prefill runs on `cuda:0` and decode/verification on `cuda:1` inside one process, transferring target + 5-layer draft KV blocks via a contiguous P2P DMA ring buffer ([benchmark driver](tools/bench_pd.py) · [smoke gate](tools/smoke_pd.py) · [2-GPU results →](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)).
+> **分支说明**：本分支（`disagg/dual-gpu-1p1d`）承载双卡 1P+1D Prefill-Decode 分离引擎（[`DisaggLLM`](nanovllm/disagg/disagg_engine.py) 与 [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py)）及双卡评测工具。单卡四代投机解码演进（DFlash、DSpark 与变长验证）位于 [`main` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)，0.6B 独立小模型基线位于 [`baseline/qwen3-0.6b-draft` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)。
 
-Measured on Qwen3-8B and a single RTX PRO 6000 (600 W), with standard rejection sampling preserving the target model's output distribution.
+基于 Qwen3-8B 与同节点 2 × RTX PRO 6000（300 W，PCIe P2P 直传）在 48 条开发集上闭环实测，对照同一物理节点上的单卡默认调度与单卡轮流 prefill（3 个 seed 中位数，在途请求数保持一致 `prefetch = 0`）：
 
-| Concurrent requests | 0.6B draft (k=3) | DFlash (k=7) | DSpark (k=7) | DSpark vs DFlash | Tokens / round (DFlash / DSpark) |
-|---:|---|---|---|---|---|
-| 1 | 1.54× | 2.00× | **2.10×** | 1.07× | 2.59 / 2.82 |
-| 8 | 1.21× | 1.68× | **1.78×** | 1.06× | 2.53 / 2.81 |
-| 32 | 0.96× | 1.31× | **1.43×** | 1.10× | 2.70 / 2.95 |
-| 64 | 0.82× | 1.01× | **1.15×** | 1.14× | 2.65 / 2.93 |
+| 解码模式 | 并发请求数 | 全程 ITL p99 (默认 → 1P+1D) | 1P+1D 比值 | 单卡轮流比值 | 稳态吞吐 (默认 → 1P+1D) | 双卡吞吐比值 | 每卡 |
+|---|---:|---|---|---|---|---|---|
+| 普通解码 | 1 | 12.4 → 12.3 ms | 1.00× | — | 82 → 82 tok/s | 1.00× | 0.50× |
+| 普通解码 | 8 | 88.3 → 13.3 ms | **0.15×** | 1.00× | 545 → 601 tok/s | 1.10× | 0.55× |
+| 普通解码 | 32 | 97.5 → 18.1 ms | **0.19×** | 0.99× | 1,329 → 1,800 tok/s | **1.35×** | 0.68× |
+| 普通解码 | 64 | 147.9 → 23.6 ms | **0.16×** | 0.71× | 1,814 → 2,764 tok/s | **1.52×** | 0.76× |
+| DSpark (k=7) | 1 | 17.3 → 17.4 ms | 1.01× | — | 165 → 164 tok/s | 0.98× | 0.49× |
+| DSpark (k=7) | 8 | 101.1 → 31.6 ms | **0.31×** | 1.00× | 867 → 1,053 tok/s | 1.22× | 0.61× |
+| DSpark (k=7) | 32 | 182.9 → 44.8 ms | **0.24×** | 0.72× | 1,488 → 2,060 tok/s | **1.38×** | 0.69× |
+| DSpark (k=7) | 64 | 264.5 → 81.4 ms | **0.31×** | 0.61× | 1,660 → 2,307 tok/s | **1.39×** | 0.70× |
 
-Values are steady-state throughput multiples over plain decoding on 128-prompt held-out test sets (medians over 3 seeds). The 0.6B standalone draft ([`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), 2.49–2.53 tokens/round) was measured on the first 128-prompt set (where DFlash reaches 2.19× / 1.80× / 1.40× / 1.08×, left panel); all other columns were measured back-to-back on the second 128-prompt set (right panel). [Full results and protocol →](docs/RESULTS.md) · [0.6B baseline comparison →](docs/v2/RESULTS.md)
+表中 `ITL`（Inter-Token Latency，token 间延迟）为单条请求相邻两次交付的主机时钟间隔；各 seed 波动区间与后到请求分项指标见 [RESULTS.md §12](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)。
 
-## Variable-length verification
+## 收益拆解与工程取舍
 
-In DSpark, target verification accounts for roughly three quarters of a round's duration and scales steeply with batch size: in the measured cost table, verifying 8 positions per request instead of 1 increases round time by 14%, 25%, and 49% at batch sizes 16, 32, and 64. With variable-length verification enabled, the engine ranks all candidate positions across the batch by predicted survival probability (DSpark Algorithm 1), admits positions while estimated throughput from the measured round-time table continues to rise, and rounds the total verified token count up to a captured CUDA Graph size—raising DSpark's speedup to **1.48×** (+2.2%) at 32 concurrent requests and **1.25×** (+8.9%) at 64.
+- **为什么用 1P+1D 而不是起两个单卡副本：消除 decode 侧的 prefill 停顿。** 32–64 并发下两张卡折合每卡稳态吞吐为单卡的 0.68–0.76×（纯看总吞吐不如双副本），但双副本仍会在各自卡内因新请求 prefill 暂停在跑解码批次。将 prefill 彻底剥离至 `cuda:0` 后，64 并发下全程最长单次交付间隔在普通解码上从 3.37 s 压至 0.27 s（0.08×），在 DSpark 上从 3.52 s 压至 0.40 s（0.11×，单卡轮流 prefill 为 1.00×）；后到请求在解码卡上的轮间最长间隔贴合单轮耗时（普通解码 25 ms，DSpark 81 ms）。
+- **对比单卡轮流 prefill。** 单卡轮流 prefill 无需额外硬件即可把 32–64 并发下 DSpark 的 ITL p99 压至 0.61–0.72×，但解码步之间仍夹着单条 prompt 的 prefill 耗时；双卡 1P+1D 将 DSpark 全程 ITL p99 再砍一半至 0.24–0.31×，普通解码直接压至 0.15–0.19×（8–64 并发下仅 13.3–23.6 ms）。
+- **后到请求的首 token 延迟（Time To First Token，TTFT）。** 普通解码在 8 / 32 / 64 并发下，后到请求的 TTFT p99 降至单卡默认调度的 0.90× / 0.67× / 0.38×（单卡轮流 prefill 升至 1.28–1.33×）。DSpark 在 8、32 并发下为 1.06×、1.32×；64 并发下因解码卡在 0.99 s 提前开跑，前 5 条短请求在初始 64 条 prefill 波（4.90 s 结束）排空前已完成，闭环立刻补进的第 64..68 号请求排在初始波末尾等待 1.9–3.0 s，使全部后到请求的 TTFT p99 升至 1,934 ms（默认调度的 7.06×）；初始波排空后的第 70..287 号请求 TTFT p99 回落至 297–391 ms（单卡默认 274 ms，轮流 prefill 510 ms）。
+- **预取裕量（`prefetch = 2`）。** 主表固定 `prefetch = 0` 以对齐单卡在途请求数；若允许 `cuda:0` 提前预填充 2 条请求，32 与 64 并发下 DSpark 稳态吞吐升至 1.44× 与 1.47×，代价是请求在环形缓冲区的交接等待中位数增至 30–174 ms。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-variable-dark.svg">
-  <img alt="Speedup over plain decoding on the 128-prompt held-out test set (medians over 3 seeds). Fixed-length DSpark reaches 2.08×, 1.76×, 1.44×, 1.14× at 1, 8, 32, 64 concurrent requests; variable-length DSpark reaches 2.02×, 1.79×, 1.48×, 1.25×; 0.6B standalone draft reaches 1.50×, 1.21×, 1.00×, 0.85×." src="docs/assets/speedup-variable-light.svg" width="760">
-</picture>
+## 核心实现
 
-| Concurrent requests | 0.6B draft (k=3) | DSpark fixed-length | DSpark variable-length | Variable vs fixed | Positions verified per request per round |
-|---:|---|---|---|---|---|
-| 1 | 1.50× | 2.08× | 2.02× | −2.7% | 8.00 |
-| 8 | 1.21× | 1.76× | 1.79× | +2.2% | 6.68 |
-| 32 | 1.00× | 1.44× | **1.48×** | **+2.2%** | 4.62 |
-| 64 | 0.85× | 1.14× | **1.25×** | **+8.9%** | 4.43 |
+本分支在单个 Python 进程内组合一个只跑 prefill 的 `LLMEngine`（`cuda:0`，eager 模式）与一个只跑 decode / 投机验证的 `LLMEngine`（`cuda:1`，启用 CUDA Graph），核心模块约 760 行：
 
-Medians over 3 seeds on the second 128-prompt test set (Colab G4 RTX PRO 6000, 600 W). `Variable vs fixed` reports the median of per-seed paired gains (consistent positive gains across all 3 seeds at 32 and 64 concurrent requests; mixed seed directions at 8). [Variable-length results and protocol →](docs/RESULTS.md#8-variable-length-verification)
+```mermaid
+flowchart LR
+    P["GPU 0 · Prefill 线程<br/>(LLMEngine, eager)"] --> Pack["64 位 index_select<br/>连续打包缓冲 _p_pack"]
+    Pack --> DMA["单次 cudaMemcpyPeerAsync<br/>跨卡推送 target + 5 层 draft KV"]
+    DMA --> Ring["GPU 1 · 96 块连续环形缓冲<br/>(_d_stage, dma_done 事件)"]
+    Ring --> D["GPU 1 · Decode 线程<br/>本地 index_copy_ 解包并解码"]
+```
 
-- **Verification savings at high concurrency**: At 64 concurrent requests, verification time drops from 36.51 ms to 27.96 ms per round and acceptance from 4.31 ms to 2.45 ms. Each round is 18.6% shorter while delivering only 5.6% fewer tokens, yielding a +16.1% throughput gain on decode rounds alone (+8.9% overall including prefill steps).
-- **Single-request overhead**: At concurrency 1, every round verifies all 8 positions and produces token-identical output to fixed-length mode; the 2.7% overhead reflects confidence scoring and dynamic schedule lookup.
+- **单向推送式连续环形缓冲交接（[`nanovllm/disagg/kv_transfer.py`](nanovllm/disagg/kv_transfer.py)）**：`KVCacheTransfer` 同时搬运 36 层 target KV 与 5 层 DSpark 辅助上下文 KV。`threading.Lock` 仅保护环形缓冲槽位与在途队列的 CPU 簿记，所有 GPU 打包、跨卡拷贝与解包均在锁外执行；源端事件记在 `cuda:0` 流供 prefill 线程独立回收块，目标端 `dma_done` 事件记在 `cuda:1` 流，decode 线程全程不调用 `cuda:0`。
+- **双线程流水线编排（[`nanovllm/disagg/disagg_engine.py`](nanovllm/disagg/disagg_engine.py)）**：`DisaggLLM` 在 decode 侧仅当 `dma_done.query()` 就绪且 `cuda:1` 剩余块数足以容纳首轮投机验证时，才分配目标块并在 `d_stream` 本地解包接纳，新请求传输期间不阻塞已在跑批次。
+- **同进程多设备底层隔离（[`context.py`](nanovllm/utils/context.py)、[`model_runner.py`](nanovllm/engine/model_runner.py)）**：将注意力上下文改为 `threading.local()` 线程局部存储，为每个实例分配本卡独立的 CUDA Graph `capture_stream`、随机数生成器与 `HashStore` 单卡通信组，并在模型构建前清理 RoPE `@lru_cache` 跨卡缓存。
 
-## Performance breakdown and comparisons
+## 正确性核对
 
-- **Block drafting eliminates serial autoregressive overhead.** A standalone 0.6B draft runs 3 sequential decode steps per round (~6 ms) and maintains a separate KV cache, falling below plain decoding at 32 concurrent requests (0.96×); a block draft proposes all 7 candidate tokens in a single forward pass.
-- **DSpark raises acceptance via its Markov head.** It yields 7–12% more tokens per round than DFlash. At 32–64 concurrent requests, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for 2–6 percentage points of the lead in phase-timing breakdowns).
-- **Speedup narrows at high concurrency.** Verification costs more per row as batch size grows, and prefill steps—which pause decoding in this engine—take 31% of DSpark's steady-state window at 32 concurrent requests.
-- **Round-robin prefill shortens the stalls.** With `round_robin_prefill=True` (off by default), a step admits one request and a decode step follows it. On the second 128-prompt test set the longest gap between a request's deliveries is 70–110 ms, against up to 1.1 s under the default scheduler, and DSpark's ITL p99 at 32–64 concurrent requests falls to 0.58–0.73 of the default's with throughput at 0.97–1.00. Arriving requests queue instead: the p99 TTFT of those that arrive mid-run rises to 1.0–3.8 times ([results](docs/RESULTS.md#9-round-robin-prefill)).
-- **Dual-GPU prefill-decode disaggregation (1P+1D).** On a single-process two-thread 1P+1D engine (`DisaggLLM` on branch [`disagg/dual-gpu-1p1d`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/disagg/dual-gpu-1p1d), P on `cuda:0`, D on `cuda:1` with contiguous ring-buffered P2P DMA KV transfer on 2 × RTX PRO 6000), offloading prefill reaches 1.35–1.52× single-GPU throughput at 32–64 concurrent requests (0.68–0.76× per GPU) and cuts whole-run ITL p99 to 0.15–0.19× on plain decoding (13.3–23.6 ms) and 0.24–0.31× on DSpark (31.6–81.4 ms, roughly half of single-GPU round-robin prefill's 0.61–0.72×) ([results](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d)).
-- **Hardware roofline and custom Triton kernels.** Against a measured 1.52 TB/s reachable HBM bandwidth ceiling on RTX PRO 6000, plain decoding reaches 82–94% bandwidth (1.12–1.22× of the hardware floor), whereas 8-query verification attention drops to 39–61% because `flash_attn_with_kvcache` disables 4:1 GQA query-head packing when `q_len > 1`, and dense full-vocabulary rejection sampling takes 2.2–4.3 ms at 32–64 concurrent requests. On `exp/fused-kernels`, splitting cached prefix KV from a fused Triton causal-tail + online-LSE kernel and fusing sparse-candidate (`top_k + 64`) Markov sampling with 1024-chunked rejection acceptance shortens full-batch rounds by 10.6–13.9% at 32–64 concurrent requests (+7.7–9.9% equal-acceptance throughput) and by 31.4% (73.5 → 50.5 ms, +18.6% throughput) on 3k-token contexts ([results](docs/RESULTS.md#10-speed-of-light-roofline-and-hand-written-triton-kernels)).
-- **Prefix caching interaction.** Across 512–2,048 shared prefix tokens (60 groups × 5 seeds), prefix caching raises steady-state throughput by 13–70% on every line and cuts TTFT p50 from 70–148 ms to 51–59 ms, while narrowing speculative decoding's relative lead over plain decoding by 6–12% at 32–64 concurrent requests—because shared KV blocks stay hot in L2 and speed up 1-query decode attention (42–55%) more than 8-query verification (5–23%) ([results](docs/RESULTS.md#11-prefix-caching-with-speculative-decoding)).
-- **Comparison with vLLM** (same machine, 48-prompt dev set, 5 seeds, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 5.8–8.2% behind vLLM at 1–32 concurrent requests, and a round's extra time is on the draft side; on plain decoding without speculation it is within 2% of vLLM.
+双卡冒烟检验（[`tools/smoke_pd.py`](tools/smoke_pd.py)）覆盖三项不变量：
+- **串行 1P+1D 对齐单引擎**：普通解码与 DSpark 两条线在串行步模式下与单卡 `LLM` 输出逐 token 完全一致。
+- **双线程对齐按轮次重放**：双卡异步交接会改变请求进入 decode 的轮次与批次大小，因此双线程模式不声称与单引擎逐 token 相同；按双线程实测进批轮次在串行路径重放后，输出逐 token 一致。
+- **物理块与环槽完整回收**：运行结束后 P、D 双端 `BlockManager` 空闲块均为 `113 / 113`，零泄漏；压测作业与同节点单卡对照作业的 18 次默认调度运行逐 token 一致。
 
-## Core implementation (four-stage evolution)
+## 踩过的坑
 
-The `main` engine is 2,850 lines of Python, built across four generations:
-- **Stage 1 — 0.6B standalone draft (branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft))**: two separate models with independent block tables and KV caches; the 0.6B model runs k=3 autoregressive steps per round, the target verifies all positions in one fixed-length CUDA Graph pass, and a vectorized GPU sampler (`SpecSampler`) performs batched rejection sampling and KV rollback.
-- **Stage 2 — DFlash parallel block draft**: replaces the standalone model with a single 7-query, non-causal pass through the decode attention path that reads 5 auxiliary target layers; a 5-layer draft KV cache shares the target's block table (`block_tables`) and stores context K/V for accepted positions after verification.
-- **Stage 3 — DSpark in-block Markov correction**: adds a Markov head on top of the DFlash block features to draw the 7 candidate positions left to right, passing each position's bias-adjusted distribution to the rejection sampler. Three CUDA Graphs cover target verification, the draft block forward pass, and DSpark's 7 sampling steps.
-- **Stage 4 — Variable-length verification**: uses DSpark's confidence head to compute each position's survival probability (the prefix product of calibrated confidences), admits positions across the batch while expected tokens divided by the measured round-time schedule keep rising, and pads the total verified token count up to a captured CUDA Graph size without breaking lossless rejection sampling.
+- **64 并发下跨线程设备等待与 `> 2 GiB` KV 逐块拷贝拆核**：早期由 decode 线程跨卡拉取离散 KV 块时，64 并发下 `3/3` 次运行在起步前 3.6 s 内无法启动首轮解码，稳态普通解码偶发 891–1,035 ms 停顿，DSpark 后到请求 ITL p99 停在 0.54–0.65×（102–169 ms）。源码路径与步时间线指向两处交互：① prefill 线程步末 `.tolist()` 同步拷贝结果期间（64 并发一批约 900 ms）持有 `cuda:0` 运行时上下文锁（`CUcontext`），每批仅开头约 9.5–12.6 ms 尚未进入 `.tolist()`，decode 线程跨卡拉取块或析构 `cuda:0` 事件即会被阻塞；② 64 并发下 KV 池达 25.5 GiB（`> 2³¹` 字节），单块跨层切片偏移超出 32 位有符号整数上限，触发 PyTorch `TensorIterator` 将**每块** `copy_` 拆成 16 个 kernel（一批 14 条请求约 68 块共发射约 1,088 次 kernel，越过发射窗口）。改为在 prefill 线程做 `int64` 连续打包与单次 `cudaMemcpyPeerAsync` 推送、decode 线程不碰 `cuda:0` 后，64 并发起步等待降为 `0/3`，普通解码轮间最长间隔从 891–1,035 ms 降至 25 ms，DSpark 全程 ITL p99 降至 44.8–81.4 ms（0.24–0.31×）。
+- **同进程双卡捕获 CUDA Graph 与全局缓存串卡**：PyTorch `torch.cuda.graph` 的默认捕获流在整个进程只有一条，不在第二张卡显式传入 `cuda:1` 专属 `capture_stream` 会触发 Triton 设备指针报错；同时 `get_rope` 的 `@lru_cache` 会把 `cuda:0` 上的旋转位置编码张量复用到 `cuda:1`。
+- **解码流直接等待跨卡拷贝事件会拖慢整批请求**：早期让 `d_stream` 直接 `wait_event(copy_done)`，导致每次交接时整批在跑请求一起等待 PCIe 传输；改为在主机端轮询 `dma_done.query()` 就绪后再接纳解包，解耦传输与解码步。
 
-Entry points: `SpeculativeDecoder.run_round` (five-step round pipeline), `VerifySchedule.verify_lengths`, `DFlashDrafter.propose`, `_markov_rows` and `after_verify`, and the decode branch of `Attention.forward`.
+## 快速开始
 
-## Correctness verification
-
-Candidates are verified via standard rejection sampling: accept $x$ when $u \lt \min(1, p_{\text{target}}(x) / p_{\text{draft}}(x))$, otherwise resample from $\text{normalize}(\max(p_{\text{target}} - p_{\text{draft}}, 0))$, guaranteeing the exact target output distribution (for DSpark, $p_{\text{draft}}$ is each position's distribution after its Markov bias).
-
-Verified on GPU across four checks:
-- Multi-step sampler output distribution (29 test cases)
-- DSpark block and Markov-corrected logits against the DeepSpec reference implementation (0.59–1.08% relative error)
-- Verification logits against step-by-step decoding (0.84 max absolute difference)
-- GSM8K math reasoning accuracy (84.7% vs 85.2% plain decoding, −0.5 pt difference, 95% CI −1.7 to +0.8 pt)
-
-Variable-length verification passes the sampler, verification-logit and GSM8K checks: 84.2% vs 85.1% plain decoding, −0.87 pt difference, 95% CI −2.14 to +0.40 pt.
-
-On the DSpark paper's own prompts and sampling, the engine reproduces the tokens per round of the paper's Table 1: 4.10 for DFlash and 4.80 for DSpark, against 4.07 and 4.81 (9 sets, 3,030 prompts; [details](docs/RESULTS.md#53-tokens-per-round-against-the-dspark-paper)).
-
-## Engineering pitfalls
-
-- **In-place input overwrite in fp32**: `x.float()` returns the original tensor reference when `x` is already fp32, causing the upstream RMSNorm to overwrite its input in-place during fp32 numerical checks against DeepSpec (bf16 runs were unaffected).
-- **`torch.compile` recompile fallback**: exceeding the default recompile limit (8) sent new batch shapes to the uncompiled path and broke bitwise identity between CUDA Graphs and eager execution; raising the limit to 64 restored parity.
-- **vLLM baseline alignment**: vLLM (`372477d`) defaults to greedy draft sampling and requires routing DeepSpec's DFlash checkpoint through its `dspark` path to match the block layout; both sides were aligned to probabilistic sampling under the same distribution.
-- **Unpacked GQA tiles in multi-query verification**: `flash_attn_with_kvcache` packs 4 query heads per KV head into one tile only when `q_len == 1`; verifying 8 candidate tokens per request drops out of the packed path and reduces verification attention to 39–61% of reachable HBM bandwidth (`§7`, `§10`).
-- **Cross-thread CUDA runtime lock and `> 2 GiB` KV indexing in 1P+1D**: calling `.tolist()` on `cuda:0` at the end of a prefill step held the per-device runtime lock and stalled `cuda:1` during pull-based P2P KV copies, while indexing into a 25.5 GiB KV pool (`> 2³¹` bytes) forced `index_select` onto 32-bit index math and split each layer's copy into 16 kernels; packing KV blocks on the prefill thread into a contiguous ring buffer and pushing them via a single P2P DMA copy eliminated both (`§12`).
-
-## Quick start
-
-Requires Python 3.10–3.12 and a CUDA GPU with enough memory for the target and draft models and their KV caches.
+环境要求：Python 3.10–3.12，同节点 2 张支持 P2P 访问的 CUDA GPU（传入相同设备号时亦可在单卡双流下做功能验证，需显式指定 `kv_cache_memory_bytes`）。
 
 ```bash
-git clone https://github.com/tianyuantong/nano-vllm-speculative-decoding.git
+git clone -b disagg/dual-gpu-1p1d https://github.com/tianyuantong/nano-vllm-speculative-decoding.git
 cd nano-vllm-speculative-decoding
 pip install torch triton flash-attn "transformers>=4.51" xxhash pytest
 python -m pip install -e . --no-deps
 ```
 
-Set the local model paths and generate:
+参照 [`tools/smoke_pd.py`](tools/smoke_pd.py) 在集群双卡上验证过的调用方式启动 `DisaggLLM`：
 
 ```python
-from nanovllm import LLM, SamplingParams
+from nanovllm import SamplingParams
+from nanovllm.disagg import DisaggLLM
 
-llm = LLM(
+disagg = DisaggLLM(
     "/models/Qwen3-8B",
-    draft_model="/models/dspark_qwen3_8b_block7",    # deepseek-ai/dspark_qwen3_8b_block7
+    prefill_device=0,
+    decode_device=1,
+    draft_model="/models/dspark_qwen3_8b_block7",    # 省略 draft_model 与 draft_type 即为普通解码
     draft_type="dspark",
     max_num_seqs=8,
+    max_model_len=1024,
     enable_prefix_cache=False,
-    kv_cache_memory_bytes=10 << 30,
+    kv_cache_memory_bytes=4 << 30,
     seed=0,
 )
-params = SamplingParams(temperature=0.7, top_k=20, top_p=0.8, max_tokens=256)
+params = SamplingParams(temperature=0.0, max_tokens=64)
 
 try:
-    outputs = llm.generate(["Explain KV caching."], params)
+    outputs = disagg.generate(["Explain KV caching in two sentences."], params, threaded=True)
     print(outputs[0]["text"])
 finally:
-    llm.exit()
+    disagg.exit()
 ```
 
-DSpark and DFlash propose a fixed block of 7 tokens per round (set by the checkpoint), so `num_speculative_tokens` is not needed. `kv_cache_memory_bytes` budgets the target's KV blocks; the 5-layer draft KV cache shares the same block table and is allocated outside that budget. For DFlash, pass `draft_model="/models/dflash_qwen3_8b_block7"` and `draft_type="dflash"`; for plain decoding, omit `draft_model`. The standalone 0.6B draft implementation and usage live on branch [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft).
-[Model configuration and API →](docs/DECODING.md)
+## 复现
 
-## Reproduce
-
-Build the prompt panels first, then run plain decoding (`k0`) and the speculative lines across concurrencies and seeds in one directory:
+先跑 CPU 单元测试与双卡冒烟检验，再运行单卡默认调度与双卡 1P+1D 的背靠背闭环压测：
 
 ```bash
-python -m pytest -q    # CPU tests, under 30 s
-python tools/fetch_panels.py && python tools/build_panel_k128.py
-for c in 1 8 32 64; do
-  for s in 17011 110017 130031; do
-    for line in k0 dflash_k7 dspark_k7; do
-      python bench_spec.py --mode closed-loop --protocol benchmarks/protocol-v2.1.json --panel K128b \
-          --line "$line" --concurrency "$c" --seed "$s" --models-root /path/to/models \
-          --commit "$(git rev-parse --short HEAD)" --output "runs/${line}_c${c}_s${s}.json"
-    done
-  done
+python -m pytest -q    # CPU 测试（含 DisaggLLM 与环形缓冲回绕单测）
+python tools/fetch_panels.py
+python tools/smoke_pd.py --models-root /path/to/models --dspark-dir dspark_qwen3_8b_block7 \
+    --prefill-device 0 --decode-device 1 --kv-gb 4 --output runs/smoke_2gpu.json
+
+for s in 17011 110017 130031; do
+  python tools/bench_pd.py --protocol benchmarks/protocol-v2.3.json --panel D48 \
+      --lines k0 dspark_k7 --concurrencies 1 8 32 64 --seed "$s" \
+      --prefill-device 0 --decode-device 1 --prefetches 0 2 \
+      --models-root /path/to/models --output "runs/bench_pd_s${s}.json"
 done
-python tools/report_v2.py --protocol benchmarks/protocol-v2.1.json --results runs
 ```
 
-For variable-length verification, pass `benchmarks/protocol-v2.3.json` and run lines `k0 dspark_k7 dspark_var` (line names, concurrencies, and seeds are defined in the protocol file). `tools/report_v2.py` summarizes throughput and speedup ratios, `tools/gain_factors.py` decomposes speedup gains by factor, and `tools/plot_speedup.py` generates the speedup bar charts. Raw result JSONs and prompt panels are packaged in two release assets: [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark) and [`results-variable-length`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-variable-length) (for the variable-length runs).
+双卡 72 次正式运行、修改前 72 次对照运行、同节点单卡轮流 prefill 基线及汇总脚本均打包在 Release 附件 [`results-pd-disagg`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-pd-disagg) 中。
 
-## Explore the project
+## 深入了解
 
-| Document | Contents |
+| 文档 / 模块 | 内容 |
 |---|---|
-| [Results](docs/RESULTS.md) | DSpark vs DFlash, variable-length verification, round-robin prefill, 2-GPU 1P+1D, prefix caching, hardware roofline & Triton kernels, vLLM comparison and correctness checks |
-| [DFlash results](docs/v2/RESULTS.md) | DFlash vs the 0.6B standalone draft, per-round phase timings and prefill stalls |
-| [Usage guide](docs/DECODING.md) | Model configuration, sampling options and timing API |
-| [Tools](tools/README.md) | Measurement, verification and analysis scripts |
-| [0.6B branch & design](docs/design/batched-speculative-decoding.md) | 0.6B draft architecture: dual-model execution, KV state, batching and CUDA Graphs |
-| [0.6B v1 results](docs/v1/RESULTS.md) | Initial 0.6B draft release: batch-size scaling, phase timings and repeatability |
-| [Optimization history](docs/PERFORMANCE.md) | Profiling the initial implementation and the bottlenecks that motivated the rewrite |
+| [双卡 1P+1D 完整结果](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d) | 吞吐、全程与后到请求 ITL / TTFT 分位数及跨线程停顿修复对比 |
+| [`nanovllm/disagg/`](nanovllm/disagg/) | `DisaggLLM` 双线程流水线编排与 `KVCacheTransfer` 连续环形缓冲 P2P 传输 |
+| [`tools/smoke_pd.py`](tools/smoke_pd.py) · [`tools/bench_pd.py`](tools/bench_pd.py) | 双卡正确性与块回收冒烟闸门、同作业单卡对照与双卡闭环压测驱动 |
+| [单卡轮流 prefill 结果](docs/RESULTS.md#9-round-robin-prefill) | 零额外硬件下的单卡尾延迟治理对照 |
+| [主分支 README](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main) | 单卡四代投机解码演进（0.6B → DFlash → DSpark → 变长验证） |
 
-CPU tests run in [GitHub Actions](.github/workflows/cpu-tests.yml).
+## 致谢
 
-## Acknowledgments
+基于 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 构建，单进程双线程异步交接骨架参考 [nanoPD](https://github.com/HJCheng0602/nanoPD)，DSpark 权重来自 [DeepSpec](https://github.com/deepseek-ai/DeepSpec)，基座模型使用 [Qwen3](https://huggingface.co/Qwen/Qwen3-8B)。
+[上游版本与项目历史 →](docs/UPSTREAM.md)
 
-Built on [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm). The DFlash block draft design is from [DFlash](https://github.com/z-lab/dflash) ([arXiv:2602.06036](https://arxiv.org/abs/2602.06036)), and DSpark is from DeepSeek ([arXiv:2607.05147](https://arxiv.org/abs/2607.05147)); both checkpoints and the reference implementation used for numerical verification are from [DeepSpec](https://github.com/deepseek-ai/DeepSpec). Base model: [Qwen3](https://huggingface.co/Qwen/Qwen3-8B); kernels: [FlashAttention](https://github.com/Dao-AILab/flash-attention) and [Triton](https://github.com/triton-lang/triton). The sampling algorithm follows Leviathan et al., *Fast Inference from Transformers via Speculative Decoding* (2023), and Chen et al., *Accelerating Large Language Model Decoding with Speculative Sampling* (2023).
-[Upstream history →](docs/UPSTREAM.md)
+## 许可
 
-## License
-
-[MIT](LICENSE).
+[MIT](LICENSE)。
