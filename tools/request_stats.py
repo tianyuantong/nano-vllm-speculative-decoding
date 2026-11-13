@@ -21,7 +21,7 @@ from report_v2 import BASELINE, count_runs, load_runs  # noqa: E402
 from summarize_bench import percentile, steady_window, tokens_per_round  # noqa: E402
 
 CATEGORIES = {"code_completion": "code completion", "NIAH": "NIAH", "creative_writing": "creative writing",
-              "open_books": "open-book QA"}
+              "open_books": "book continuation"}
 WIDTH, LEFT, RIGHT, BOTTOM, PANEL_GAP = 760, 56, 24, 60, 64
 GAPS_HEIGHT, GAPS_TOP = 480, 156    # room for two legend rows and the panel headings above the plots
 CATEGORIES_HEIGHT, CATEGORIES_TOP = 430, 112

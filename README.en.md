@@ -15,7 +15,7 @@ Block speculative decoding for [nano-vLLM](https://github.com/GeeeekExplorer/nan
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-overview-dark.svg">
-  <img alt="Speedup over plain decoding on 128-prompt held-out test sets (medians over 3 seeds). Left (DFlash vs 0.6B standalone draft): 0.6B reaches 1.54×, 1.21×, 0.96×, 0.82× at 1, 8, 32, 64 concurrent requests; DFlash reaches 2.19×, 1.80×, 1.40×, 1.08×. Right (DSpark vs DFlash): DFlash reaches 2.00×, 1.68×, 1.31×, 1.01×; DSpark reaches 2.10×, 1.78×, 1.43×, 1.15×." src="docs/assets/speedup-overview-light.svg" width="760">
+  <img alt="Speedup over plain decoding on the same 128-prompt held-out test set (RTX PRO 6000 600 W, medians over 3 seeds): Qwen3-0.6B draft (k=3) reaches 1.50×, 1.21×, 1.00×, 0.85×; DFlash (k=7) reaches 1.98×, 1.66×, 1.31×, 1.02×; fixed-length DSpark (k=7) reaches 2.08×, 1.76×, 1.44×, 1.14× at 1, 8, 32, 64 concurrent requests." src="docs/assets/speedup-overview-light.svg" width="760">
 </picture>
 
 </div>
@@ -24,12 +24,12 @@ Measured on Qwen3-8B and a single RTX PRO 6000 (600 W), with standard rejection 
 
 | Concurrent requests | 0.6B draft (k=3) | DFlash (k=7) | DSpark (k=7) | DSpark vs DFlash | Tokens / round (DFlash / DSpark) |
 |---:|---|---|---|---|---|
-| 1 | 1.54× | 2.00× | **2.10×** | 1.07× | 2.59 / 2.82 |
-| 8 | 1.21× | 1.68× | **1.78×** | 1.06× | 2.53 / 2.81 |
-| 32 | 0.96× | 1.31× | **1.43×** | 1.10× | 2.70 / 2.95 |
-| 64 | 0.82× | 1.01× | **1.15×** | 1.14× | 2.65 / 2.93 |
+| 1 | 1.50× | 1.98× | **2.08×** | 1.06× | 2.59 / 2.82 |
+| 8 | 1.21× | 1.66× | **1.76×** | 1.06× | 2.53 / 2.81 |
+| 32 | 1.00× | 1.31× | **1.44×** | 1.10× | 2.70 / 2.95 |
+| 64 | 0.85× | 1.02× | **1.14×** | 1.12× | 2.65 / 2.93 |
 
-Values are steady-state throughput multiples over plain decoding on 128-prompt held-out test sets (medians over 3 seeds). The 0.6B standalone draft ([`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft), 2.49–2.53 tokens/round) was measured on the first 128-prompt set (where DFlash reaches 2.19× / 1.80× / 1.40× / 1.08×, left panel); all other columns were measured back-to-back on the second 128-prompt set (right panel). [Full results and protocol →](docs/RESULTS.md) · [0.6B baseline comparison →](docs/v2/RESULTS.md)
+Values are steady-state throughput multiples over plain decoding on the same 128-prompt held-out test set stratified from NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) (~1,000-token prompts spanning needle-in-a-haystack retrieval, code completion, book continuation, and creative writing; Colab G4 RTX PRO 6000, 600 W, medians over 3 seeds; shared plain-decoding baselines agree within 2× timing noise across jobs). The 0.6B standalone draft ([`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)) and the variable-length table below use this same test set; earlier Nebius measurements and full per-seed ranges are in [Full results and protocol →](docs/RESULTS.md) · [0.6B baseline comparison →](docs/v2/RESULTS.md)
 
 ## Variable-length verification
 
@@ -47,18 +47,18 @@ In DSpark, target verification accounts for roughly three quarters of a round's 
 | 32 | 1.00× | 1.44× | **1.48×** | **+2.2%** | 4.62 |
 | 64 | 0.85× | 1.14× | **1.25×** | **+8.9%** | 4.43 |
 
-Medians over 3 seeds on the second 128-prompt test set (Colab G4 RTX PRO 6000, 600 W). `Variable vs fixed` reports the median of per-seed paired gains (consistent positive gains across all 3 seeds at 32 and 64 concurrent requests; mixed seed directions at 8). [Variable-length results and protocol →](docs/RESULTS.md#8-variable-length-verification)
+Medians over 3 seeds on the same 128-prompt held-out test set (Colab G4 RTX PRO 6000, 600 W). `Variable vs fixed` reports the median of per-seed paired gains (consistent positive gains across all 3 seeds at 32 and 64 concurrent requests; mixed seed directions at 8). [Variable-length results and protocol →](docs/RESULTS.md#8-variable-length-verification)
 
 - **Verification savings at high concurrency**: At 64 concurrent requests, verification time drops from 36.51 ms to 27.96 ms per round and acceptance from 4.31 ms to 2.45 ms. Each round is 18.6% shorter while delivering only 5.6% fewer tokens, yielding a +16.1% throughput gain on decode rounds alone (+8.9% overall including prefill steps).
 - **Single-request overhead**: At concurrency 1, every round verifies all 8 positions and produces token-identical output to fixed-length mode; the 2.7% overhead reflects confidence scoring and dynamic schedule lookup.
 
 ## Performance breakdown and comparisons
 
-- **Block drafting eliminates serial autoregressive overhead.** A standalone 0.6B draft runs 3 sequential decode steps per round (~6 ms) and maintains a separate KV cache, falling below plain decoding at 32 concurrent requests (0.96×); a block draft proposes all 7 candidate tokens in a single forward pass.
+- **Block drafting eliminates serial autoregressive overhead.** A standalone 0.6B draft runs 3 sequential decode steps per round (~6 ms) and maintains a separate KV cache, breaking even with plain decoding at 32 concurrent requests (1.00×) and dropping to 0.85× at 64; a block draft proposes all 7 candidate tokens in a single forward pass.
 - **DSpark raises acceptance via its Markov head.** It yields 7–12% more tokens per round than DFlash. At 32–64 concurrent requests, sampling within the top-k candidate window also avoids full-vocabulary softmax overhead (accounting for 2–6 percentage points of the lead in phase-timing breakdowns).
 - **Speedup narrows at high concurrency.** Verification costs more per row as batch size grows, and prefill steps—which pause decoding in this engine—take 31% of DSpark's steady-state window at 32 concurrent requests.
-- **Round-robin prefill bounds single-GPU stalls.** With `round_robin_prefill=True` (off by default), a step admits one request and a decode step follows it. On the second 128-prompt test set, the longest gap between a request's deliveries drops from up to 1.1 s to 70–110 ms, and DSpark's inter-token latency (ITL) p99 at 32–64 concurrent requests falls to 0.58–0.73× of default scheduling with throughput at 0.97–1.00×. Arriving requests queue instead: the time to first token (TTFT) p99 of requests arriving mid-run rises to 1.0–3.8× ([results](docs/RESULTS.md#9-round-robin-prefill)).
-- **Comparison with vLLM** (same machine, 48-prompt dev set, 5 seeds, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 5.8–8.2% behind vLLM at 1–32 concurrent requests, with the extra time per round on the draft side; on plain decoding without speculation it is within 2% of vLLM ([results](docs/RESULTS.md#4-against-vllm-d48-wall-clock-toks)).
+- **Round-robin prefill bounds single-GPU stalls.** With `round_robin_prefill=True` (off by default), a step admits one request and a decode step follows it. On the same 128-prompt held-out test set, the longest gap between a request's deliveries drops from up to 1.1 s to 70–110 ms, and DSpark's inter-token latency (ITL) p99 at 32–64 concurrent requests falls to 0.58–0.73× of default scheduling with throughput at 0.97–1.00×. Arriving requests queue instead: the time to first token (TTFT) p99 of requests arriving mid-run rises to 1.0–3.8× ([results](docs/RESULTS.md#9-round-robin-prefill)).
+- **Comparison with vLLM** (same machine, 48-prompt SPEED-Bench dev set, 5 seeds, end-to-end wall-clock throughput, vLLM `372477d`): on DSpark, this engine is 5.8–8.2% behind vLLM at 1–32 concurrent requests, with the extra time per round on the draft side; on plain decoding without speculation it is within 2% of vLLM ([results](docs/RESULTS.md#4-against-vllm-d48-wall-clock-toks)).
 
 Three companion studies examine high-concurrency stalls, kernel floors, and shared prefixes:
 
@@ -66,7 +66,7 @@ Three companion studies examine high-concurrency stalls, kernel floors, and shar
 |---|---|---|
 | **Dual-GPU 1P+1D disaggregation** | Decouples prefill and decode across 2 GPUs: across 8–64 concurrent requests, cuts whole-run ITL p99 to **0.15–0.19×** of 1-GPU default on plain decoding (13.3–23.6 ms) and **0.24–0.31×** on DSpark (31.6–81.4 ms, roughly half of 1-GPU round-robin prefill at 32–64 concurrent); at 32–64 concurrent requests, reaches **1.35–1.52×** and **1.38–1.39×** steady-state throughput (0.68–0.76× and 0.69–0.70× per GPU). | [`disagg/dual-gpu-1p1d` branch](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/disagg/dual-gpu-1p1d) · [Results §12](docs/RESULTS.md#12-dual-gpu-prefill-decode-disaggregation-1p1d) · [Archive](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-pd-disagg) |
 | **Roofline & custom Triton kernels** | Plain decoding reaches 82–94% of reachable high-bandwidth memory (HBM) read bandwidth (1.52 TB/s) while 8-query verification drops to 39–61% without grouped-query attention (GQA) packing; custom Triton kernels for split-prefix verification and sparse-candidate chunked rejection shorten full-batch variable-length DSpark rounds by **10.6–13.9%** at 32–64 concurrent requests and by **31.4%** (73.5 → 50.5 ms) at 64 concurrent requests on ~3k-token contexts. | [Results §10](docs/RESULTS.md#10-speed-of-light-roofline-and-hand-written-triton-kernels) · [Roofline archive](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention) · [Kernel archive](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-fused-kernels) |
-| **Prefix caching interaction** | Across 512–2,048 shared prefix tokens, prefix caching raises steady-state throughput by **13–70%** on every line and cuts steady-state TTFT p50 to **51–59 ms**, while narrowing speculative speedup by 6–12% at 32–64 concurrent requests because L2-resident shared KV blocks accelerate 1-query decode more than 8-query verification. | [Results §11](docs/RESULTS.md#11-prefix-caching-with-speculative-decoding) · [Archive](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-prefix-cache) |
+| **Prefix caching interaction** | Across 512–2,048 shared prefix tokens (`exp/m6-prefix-cache`; `main` keeps `enable_prefix_cache=False` with a draft model), prefix caching raises steady-state throughput by **13–70%** on every line and cuts steady-state TTFT p50 to **51–59 ms**, while narrowing speculative speedup by 6–12% at 32–64 concurrent requests because L2-resident shared KV blocks accelerate 1-query decode more than 8-query verification. | [Results §11](docs/RESULTS.md#11-prefix-caching-with-speculative-decoding) · [Archive](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-prefix-cache) |
 
 ## Core implementation (four-stage evolution)
 
@@ -138,7 +138,7 @@ DSpark and DFlash propose a fixed block of 7 tokens per round (set by the checkp
 
 ## Reproduce
 
-Build the prompt panels first, then run plain decoding (`k0`) and the speculative lines across concurrencies and seeds in one directory:
+Fetch NVIDIA SPEED-Bench and build the prompt panels (`D48` = 48-prompt dev set; `K128` / `K128b` = first and second disjoint 128-prompt held-out test sets), then run plain decoding (`k0`) and the speculative lines (`dflash_k7`, `dspark_k7`) across concurrencies and seeds in one directory:
 
 ```bash
 python -m pytest -q    # CPU tests, under 30 s

@@ -9,12 +9,12 @@ The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.8
 **Measurement definitions**
 - **Concurrency C**: number of active requests in flight; a new request enters the batch as soon as one finishes.
 - **Speedup R**: steady-state throughput (the window where all `C` requests are active) divided by plain decoding (`k0`) at the same concurrency and seed within the same job. The vLLM comparison uses end-to-end wall-clock throughput (§3).
-- **K128**: a held-out 128-prompt evaluation set run once with 3 seeds per concurrency.
+- **Prompt panels (`D48`, `K128`)**: stratified subsets of NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) `throughput_1k` (~1,000-token prompts): `D48` is the 48-prompt development set (5 seeds per `C`), and `K128` is a disjoint 128-prompt held-out evaluation set run once with 3 seeds per `C`.
 - **Protocol**: all decision thresholds and invalidation rules are fixed in [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), frozen prior to the confirmation runs.
 
 ## 1. Confirmation panel (K128)
 
-K128 is 128 prompts from SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): NIAH 43, code completion 40, open-book QA 37, creative writing 8. None of them overlap D48.
+K128 is 128 prompts from NVIDIA SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): needle-in-a-haystack retrieval (NIAH, 43), code completion (40), classic book continuation (`open_books`, 37), and creative writing (8). None of them overlap D48.
 
 Which prompts each concurrency uses:
 - C = 1 and 8 take the first 48 prompts. Creative writing is 17% of those 48 against 6% of the whole panel, which likely lifts the speedup at these two concurrencies by about 0.04 (estimate).
@@ -70,7 +70,7 @@ The engine is the same on both panels; what differs is acceptance. K128 yields a
 | code completion | 3.42 | 3.49 |
 | NIAH | 2.80 | 2.92 |
 | creative writing | 2.59 | 2.95 |
-| open-book QA | 2.13 | 2.42 |
+| book continuation | 2.13 | 2.42 |
 
 Prompt length is not the cause. Both panels have a median length of about 1020 tokens, and D48 has only three longer prompts (1229, 1264 and 2262 tokens).
 
