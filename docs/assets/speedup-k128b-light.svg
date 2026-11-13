@@ -1,7 +1,7 @@
 <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 430' width='760' height='430' role='img'><title>Speedup over plain decoding, by concurrency</title><desc>DFlash draft, k = 7: 1.94–2.06× at C = 1, 1.68× at C = 8, 1.31× at C = 32, 1.01× at C = 64; DSpark draft, k = 7: 2.08–2.20× at C = 1, 1.73–1.80× at C = 8, 1.43× at C = 32, 1.15× at C = 64</desc>
 <rect width='760' height='430' fill='#fcfcfb' rx='8'/>
 <text x='56.0' y='28.0' font-size='18' fill='#0b0b0b' text-anchor='start' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Speedup over plain decoding, by concurrency</text>
-<text x='56.0' y='49.0' font-size='12' fill='#52514e' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition · K128b panel · median and range over 3 seeds</text>
+<text x='56.0' y='49.0' font-size='12' fill='#52514e' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition · 128-prompt held-out set · median and range over 3 seeds</text>
 <rect x='56' y='68' width='12' height='12' rx='3' fill='#2a78d6'/>
 <text x='74.0' y='78.5' font-size='12' fill='#0b0b0b' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DFlash draft, k = 7</text>
 <rect x='208.0' y='68' width='12' height='12' rx='3' fill='#1baf7a'/>

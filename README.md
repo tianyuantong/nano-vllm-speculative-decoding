@@ -22,7 +22,7 @@
 
 > **分支说明**：本分支（`disagg/dual-gpu-1p1d`）承载双卡 1P+1D Prefill-Decode 分离引擎（[`DisaggLLM`](nanovllm/disagg/disagg_engine.py) 与 [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py)）及双卡评测工具。单卡四代投机解码演进（DFlash、DSpark 与变长验证）位于 [`main` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)，0.6B 独立小模型基线位于 [`baseline/qwen3-0.6b-draft` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)。
 
-基于 Qwen3-8B 与同节点 2 × RTX PRO 6000（300 W，PCIe P2P 直传）在 48 条开发集上闭环实测，对照同一物理节点上的单卡默认调度与单卡轮流 prefill（3 个 seed 中位数，在途请求数保持一致 `prefetch = 0`）：
+基于 Qwen3-8B 与同节点 2 × RTX PRO 6000（300 W，PCIe P2P 直传），在 NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)（约 1,000 token 长输入，涵盖大海捞针检索、代码补全、古典小说续写与创意写作）48 题开发集上闭环实测，对照同一物理节点上的单卡默认调度与单卡轮流 prefill（3 个 seed 中位数，在途请求数保持一致 `prefetch = 0`）：
 
 | 解码模式 | 并发请求数 | 全程 ITL p99 (默认 → 1P+1D) | 1P+1D 比值 | 单卡轮流比值 | 稳态吞吐 (默认 → 1P+1D) | 双卡吞吐比值 | 每卡 |
 |---|---:|---|---|---|---|---|---|
@@ -113,7 +113,7 @@ finally:
 
 ## 复现
 
-先跑 CPU 单元测试与双卡冒烟检验，再运行单卡默认调度与双卡 1P+1D 的背靠背闭环压测：
+先跑 CPU 单元测试与双卡冒烟检验，再在 48 题 SPEED-Bench 开发集（`--panel D48`）上运行普通解码（`k0`）与 DSpark（`dspark_k7`）的单卡默认调度与双卡 1P+1D 背靠背闭环压测：
 
 ```bash
 python -m pytest -q    # CPU 测试（含 DisaggLLM 与环形缓冲回绕单测）

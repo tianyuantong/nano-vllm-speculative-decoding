@@ -22,7 +22,7 @@ Single-process, two-thread Prefill-Decode disaggregation for [nano-vLLM](https:/
 
 > **Branch note**: This branch (`disagg/dual-gpu-1p1d`) hosts the dual-GPU 1P+1D Prefill-Decode disaggregation engine ([`DisaggLLM`](nanovllm/disagg/disagg_engine.py) and [`KVCacheTransfer`](nanovllm/disagg/kv_transfer.py)) and its dual-GPU benchmark suite. The four-stage single-GPU speculative decoding engine (DFlash, DSpark, and variable-length verification) lives on [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main), and the 0.6B standalone draft baseline lives on [`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft).
 
-Measured closed-loop on Qwen3-8B across 2 × RTX PRO 6000 (300 W, PCIe P2P) on the 48-prompt development set against 1-GPU default scheduling and 1-GPU round-robin prefill on the same host (medians over 3 seeds, `prefetch = 0` matching single-GPU in-flight concurrency):
+Measured closed-loop on Qwen3-8B across 2 × RTX PRO 6000 (300 W, PCIe P2P) on the 48-prompt NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) development set (~1,000-token prompts across needle-in-a-haystack retrieval, code completion, book continuation, and creative writing) against 1-GPU default scheduling and 1-GPU round-robin prefill on the same host (medians over 3 seeds, `prefetch = 0` matching single-GPU in-flight concurrency):
 
 | Line | Concurrent requests | Whole-run ITL p99 (default → 1P+1D) | 1P+1D ratio | 1-GPU RR ratio | Steady-state throughput (default → 1P+1D) | 2-GPU ratio | Per GPU |
 |---|---:|---|---|---|---|---|---|
@@ -113,7 +113,7 @@ finally:
 
 ## Reproduce
 
-Run CPU unit tests and the dual-GPU smoke check first, then run back-to-back single-GPU default vs dual-GPU 1P+1D closed-loop benchmarks:
+Run CPU unit tests and the dual-GPU smoke check first, then run back-to-back single-GPU default vs dual-GPU 1P+1D closed-loop benchmarks on the 48-prompt SPEED-Bench dev set (`--panel D48`) across plain decoding (`k0`) and DSpark (`dspark_k7`):
 
 ```bash
 python -m pytest -q    # CPU tests, including DisaggLLM and ring wrap-around checks
