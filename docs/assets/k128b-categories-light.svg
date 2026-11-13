@@ -1,7 +1,7 @@
-<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 430' width='760' height='430' role='img'><title>Tokens per round by prompt category</title><desc>code completion: DFlash draft, k = 7 3.41, DSpark draft, k = 7 3.74; NIAH: DFlash draft, k = 7 3.00, DSpark draft, k = 7 3.48; creative writing: DFlash draft, k = 7 2.75, DSpark draft, k = 7 3.11; open-book QA: DFlash draft, k = 7 2.18, DSpark draft, k = 7 2.37</desc>
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 430' width='760' height='430' role='img'><title>Tokens per round by prompt category</title><desc>code completion: DFlash draft, k = 7 3.41, DSpark draft, k = 7 3.74; NIAH: DFlash draft, k = 7 3.00, DSpark draft, k = 7 3.48; creative writing: DFlash draft, k = 7 2.75, DSpark draft, k = 7 3.11; book continuation: DFlash draft, k = 7 2.18, DSpark draft, k = 7 2.37</desc>
 <rect width='760' height='430' fill='#fcfcfb' rx='8'/>
 <text x='56.0' y='28.0' font-size='18' fill='#0b0b0b' text-anchor='start' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Tokens per round by prompt category</text>
-<text x='56.0' y='49.0' font-size='12' fill='#52514e' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition · K128b panel · every concurrency and seed, weighted by rounds</text>
+<text x='56.0' y='49.0' font-size='12' fill='#52514e' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>Qwen3-8B · bfloat16 · RTX PRO 6000 Blackwell Server Edition · 128-prompt held-out set · every concurrency and seed, weighted by rounds</text>
 <rect x='56' y='68' width='12' height='12' rx='3' fill='#2a78d6'/>
 <text x='74.0' y='78.5' font-size='12' fill='#0b0b0b' text-anchor='start' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>DFlash draft, k = 7</text>
 <rect x='208.0' y='68' width='12' height='12' rx='3' fill='#1baf7a'/>
@@ -41,6 +41,6 @@
 <text x='635.0' y='223.3' font-size='11' fill='#0b0b0b' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>2.18</text>
 <path d='M656.0,370.0 V221.4 Q656.0,217.4 660.0,217.4 H674.0 Q678.0,217.4 678.0,221.4 V370.0 Z' fill='#1baf7a'/>
 <text x='667.0' y='211.4' font-size='11' fill='#0b0b0b' text-anchor='middle' font-weight='600' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>2.37</text>
-<text x='651.0' y='390.0' font-size='12' fill='#0b0b0b' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>open-book QA</text>
+<text x='651.0' y='390.0' font-size='12' fill='#0b0b0b' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>book continuation</text>
 <text x='651.0' y='408.0' font-size='11' fill='#52514e' text-anchor='middle' font-weight='normal' font-family='-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif'>37 prompts · DSpark +8%</text>
 </svg>

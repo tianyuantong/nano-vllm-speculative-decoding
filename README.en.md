@@ -31,7 +31,7 @@ Measured on Qwen3-8B (target) + Qwen3-0.6B (draft, k=3) on a single RTX PRO 6000
 | 32 | 0.96× | 2.53 | Overtaken by verification cost |
 | 64 | 0.82× | 2.53 | Overtaken by verification cost |
 
-Values are steady-state throughput multiples over plain decoding in the same job on the 128-prompt held-out test set (left panel, medians over 3 seeds). The right panel shows the full decay curve across 1 / 2 / 4 / 8 / 16 / 32 / 64 concurrent requests on the 48-prompt development set (medians over 5 seeds: **1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**), placing the break-even point between 16 and 32 concurrent requests. Per-seed ranges and phase timings are in [Full comparison details →](docs/v2/RESULTS.md) · [Initial v1 report →](docs/v1/RESULTS.md)
+Values are steady-state throughput multiples over plain decoding in the same job on the 128-prompt held-out test set stratified from NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) (~1,000-token prompts spanning needle-in-a-haystack retrieval, code completion, book continuation, and creative writing; left panel, medians over 3 seeds). The right panel shows the full decay curve across 1 / 2 / 4 / 8 / 16 / 32 / 64 concurrent requests on the 48-prompt SPEED-Bench development set (medians over 5 seeds: **1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**), placing the break-even point between 16 and 32 concurrent requests. Per-seed ranges and phase timings are in [Full comparison details →](docs/v2/RESULTS.md) · [Initial v1 report →](docs/v1/RESULTS.md)
 
 ## Performance breakdown and bottlenecks (why we moved to block drafting)
 
@@ -104,7 +104,7 @@ Omit `draft_model` and `num_speculative_tokens` for plain decoding.
 
 ## Reproduce
 
-Build the prompt panels first, then run plain decoding (`k0`) and the 0.6B speculative line (`model_k3`) across concurrencies and seeds in one directory:
+Fetch NVIDIA SPEED-Bench and build the 128-prompt held-out test set (`--panel K128`; the 48-prompt dev set is `D48`), then run plain decoding (`k0`) and the 0.6B speculative line (`model_k3`) across concurrencies and seeds in one directory:
 
 ```bash
 python -m pytest -q    # CPU tests

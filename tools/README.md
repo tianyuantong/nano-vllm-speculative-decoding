@@ -12,8 +12,8 @@ Measurement, gates and analysis for bench-v2 (`benchmarks/protocol-v2.json`). `v
 | `plot_speedup.py` | The README figure: speedup over plain decoding by concurrency, median and range over seeds |
 | `gain_factors.py` | One line's paired gain over another, split into tokens per round, round time, prefill share and the rest |
 | `bench_vllm.py` | The vLLM baselines on the same panel and GPU |
-| `fetch_panels.py` | Downloads the D48 development panel |
-| `build_panel_k128.py` | Builds the confirmation panels (K128, then K128b) from SPEED-Bench `throughput_1k` |
+| `fetch_panels.py` | Downloads the 48-prompt development set |
+| `build_panel_k128.py` | Builds the 128-prompt held-out confirmation sets from SPEED-Bench `throughput_1k` |
 | `gate_verify_logits.py` | G1-wide: verification logits against step-by-step decoding, judged against the decode noise floor |
 | `gate_sampler_distribution.py` | G2-real: acceptance rate and output distribution on a real target/draft pair |
 | `gate_task_accuracy.py` | G5: GSM8K accuracy of a line against k0 |

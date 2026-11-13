@@ -1,20 +1,20 @@
 # Results: DFlash speculative decoding on nano-vLLM
 
-> Superseded by [the DSpark results](../RESULTS.md); this page keeps the DFlash results on the K128 panel.
+> Superseded by [the DSpark results](../RESULTS.md); this page keeps the DFlash vs 0.6B results on the initial 128-prompt held-out set.
 
-On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_qwen3_8b_block7`) proposes 7 tokens per round and a round yields 2.8 on average. On the unseen K128 confirmation panel, its steady-state throughput is **2.11–2.24×** plain decoding at C = 1, **1.75–1.85×** at C = 8 and **1.32–1.40×** at C = 32. At C = 64 it is 1.08× (1.06–1.09), which is within timing noise.
+On an RTX PRO 6000 with Qwen3-8B in BF16, the DFlash draft (DeepSpec's `dflash_qwen3_8b_block7`) proposes 7 tokens per round and a round yields 2.8 on average. On the unseen 128-prompt confirmation set, its steady-state throughput is **2.11–2.24×** plain decoding at C = 1, **1.75–1.85×** at C = 8 and **1.32–1.40×** at C = 32. At C = 64 it is 1.08× (1.06–1.09), which is within timing noise.
 
-The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, development panel, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
+The earlier 0.6B draft (k = 3) in the same engine gives 1.54 / 1.21 / 0.96 / 0.82×, so DFlash is 1.29–1.56× the 0.6B line at every concurrency. Against vLLM (same GPU, same draft weights, 48-prompt development set, wall-clock throughput of the whole run), DFlash is level at C = 1 (155 vs 156 tok/s), 9% behind at C = 8 and 7% behind at C = 32.
 
 **How it is measured**
 - **Concurrency C**: the number of requests in flight; a new request enters as soon as one finishes.
 - **Speedup R**: steady-state throughput (the stretch where all C requests are running) divided by plain decoding's (k0) at the same C and seed, in the same job. Against vLLM the comparison is wall-clock throughput of the whole run (§3).
-- **K128**: 128 prompts whose outputs nobody looked at before this run. It is run once, with 3 seeds per C.
+- **Prompt sets**: stratified subsets of NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) `throughput_1k` (~1,000-token prompts): a 48-prompt development set (5 seeds per C) and a disjoint 128-prompt held-out confirmation set run once with 3 seeds per C.
 - **Rules**: every threshold and verdict is fixed in [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), frozen before the confirmation runs.
 
-## 1. Confirmation panel (K128)
+## 1. Held-out confirmation set (128 prompts)
 
-K128 is 128 prompts from SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): NIAH 43, code completion 40, open-book QA 37, creative writing 8. None of them overlap D48.
+The confirmation set draws 128 prompts from NVIDIA SPEED-Bench `throughput_1k`, ranked within each category by sha256(salt + question id): needle-in-a-haystack retrieval (NIAH, 43), code completion (40), classic book continuation (`open_books`, 37), and creative writing (8). None of them overlap the 48-prompt development set.
 
 Which prompts each concurrency uses:
 - C = 1 and 8 take the first 48 prompts. Creative writing is 17% of those 48 against 6% of the whole panel, which likely lifts the speedup at these two concurrencies by about 0.04 (estimate).
@@ -40,9 +40,9 @@ Values are the median (min–max) over seeds, to two decimals, or only the range
 - The 0.6B line drops below plain decoding from C = 32; DFlash stays above 1 up to C = 64.
 - Tokens per round, averaged over rounds: DFlash 2.75–2.85, 0.6B 2.49–2.53.
 
-## 2. Development panel (D48) and confirmation panel (K128)
+## 2. 48-prompt development set and 128-prompt confirmation set
 
-| C | DFlash, D48 | DFlash, K128 | 0.6B, D48 | 0.6B, K128 |
+| C | DFlash, 48-prompt dev | DFlash, 128-prompt held-out | 0.6B, 48-prompt dev | 0.6B, 128-prompt held-out |
 |---:|---|---|---|---|
 | 1 | 1.91–1.99 | 2.11–2.24 | 1.45–1.52 | 1.54 |
 | 8 | 1.66–1.72 | 1.75–1.85 | 1.17 | 1.21 |
@@ -50,24 +50,24 @@ Values are the median (min–max) over seeds, to two decimals, or only the range
 | 64 | 1.01 | 1.08 | 0.79 | 0.82 |
 | tokens per round | 2.47–2.55 | 2.75–2.85 | 2.37–2.40 | 2.49–2.53 |
 
-D48 is the 48-prompt panel of the September release, with 5 seeds per C. It also covers C = 2, 4 and 16:
+The 48-prompt development set is the panel of the September release, with 5 seeds per C. It also covers C = 2, 4 and 16:
 - DFlash: 1.91–1.97, 1.69–1.85 and 1.55;
 - 0.6B: 1.42, 1.32 and 0.99–1.04.
 
-The two panels agree on the direction and on every verdict.
+The two sets agree on the direction and on every verdict.
 
-The engine is the same on both panels; what differs is acceptance. K128 yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round, from [`tools/request_stats.py`](../../tools/request_stats.py)):
+The engine is the same on both sets; what differs is acceptance. The 128-prompt set yields about 0.3 more tokens per round. By category (C = 1, DFlash, tokens per round, from [`tools/request_stats.py`](../../tools/request_stats.py)):
 
-| category | D48 | K128 |
+| category | 48-prompt dev | 128-prompt held-out |
 |---|---:|---:|
 | code completion | 3.42 | 3.49 |
 | NIAH | 2.80 | 2.92 |
 | creative writing | 2.59 | 2.95 |
-| open-book QA | 2.13 | 2.42 |
+| book continuation | 2.13 | 2.42 |
 
-Prompt length is not the cause. Both panels have a median length of about 1020 tokens, and D48 has only three longer prompts (1229, 1264 and 2262 tokens).
+Prompt length is not the cause. Both sets have a median length of about 1020 tokens, and the 48-prompt set has only three longer prompts (1229, 1264 and 2262 tokens).
 
-## 3. Against vLLM (D48, wall-clock tok/s)
+## 3. Against vLLM (wall-clock tok/s)
 
 | C | plain decoding: nano / vLLM v1 / vLLM v2 | 0.6B: nano / vLLM | DFlash: nano / vLLM | vLLM DSpark |
 |---:|---|---|---|---:|
@@ -78,7 +78,7 @@ Prompt length is not the cause. Both panels have a median length of about 1020 t
 nano's numbers are the median of 5 seeds, without the timing repeats. vLLM's are the median of 2 runs.
 - **vLLM version.** `0.1.1.dev52+g372477d2d`, a development build from 2026-09-12. It runs the 0.6B draft on its v1 model runner and DFlash and DSpark on v2, so the table lists its plain decoding on both runners.
 - **Run-to-run variation.** vLLM's two runs differ by 7.2% at C = 8, so the gap at that concurrency is not stable; at C = 32 they differ by 0.8%.
-- vLLM was not run on K128.
+- vLLM was evaluated on the 48-prompt development set.
 
 What the table shows:
 - **Plain decoding.** nano is 1.5–4% faster than vLLM's v1 runner and 4–10% faster than its v2 runner. nano's plain decoding runs at about 69–71% memory-bandwidth utilisation: bytes of weights and KV read ÷ step time ÷ the 1.79 TB/s peak.
@@ -138,7 +138,7 @@ The protocol's `revised` notes record each revision together with the first run'
 
 ### 5.1 One round
 
-DFlash on D48, median GPU time per phase (ms):
+DFlash on the 48-prompt development set, median GPU time per phase (ms):
 
 | C | propose | verify | context store | accept | round |
 |---:|---:|---:|---:|---:|---:|
@@ -179,8 +179,8 @@ Before the first measurement, the plan estimated:
 | item | estimate | measured |
 |---|---|---|
 | round time at C = 1 | 15–16.5 ms | 15.7 ms |
-| tokens per round | 3.5–5, from the T = 1.0 numbers of the [DSpark paper](https://arxiv.org/abs/2607.05147) | 2.5 (D48), 2.8 (K128); DeepSpec's own implementation on 8 D48 prompts with temperature-only sampling (T 0.7) also gives just 2.55 (three runs, 2.49–2.59) |
-| speedup at C = 1 | 2.6–4.0 | 1.91–1.99 (D48), 2.11–2.24 (K128) |
+| tokens per round | 3.5–5, from the T = 1.0 numbers of the [DSpark paper](https://arxiv.org/abs/2607.05147) | 2.5 (48-prompt dev), 2.8 (128-prompt held-out); DeepSpec's own implementation on 8 development prompts with temperature-only sampling (T 0.7) also gives just 2.55 (three runs, 2.49–2.59) |
+| speedup at C = 1 | 2.6–4.0 | 1.91–1.99 (48-prompt dev), 2.11–2.24 (128-prompt held-out) |
 
 The cost was estimated well and the gain too high: acceptance on these prompts is lower than on the paper's benchmarks.
 
@@ -189,7 +189,7 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 - Offline closed loop: fixed concurrency, with a new request as soon as one finishes. This is not an online serving benchmark, and no service-level objectives were measured.
 - One GPU model (RTX PRO 6000 Blackwell) and one target model (Qwen3-8B).
 - Random sampling: T 0.7, top-k 20, top-p 0.8. Speculative decoding keeps the output distribution, not the exact tokens; §4 checks the distribution.
-- The comparison with vLLM is on D48 only, against a development build of vLLM.
+- The comparison with vLLM is on the 48-prompt development set, against a development build of vLLM.
 - The prefill stall is located but not fixed. Verifying fewer drafts per round and measuring the verify cost curve are not done yet.
 
 ## Appendix: environment and data
@@ -201,7 +201,7 @@ The cost was estimated well and the gain too high: acceptance on these prompts i
 | software | torch 2.9.1+cu130 (CUDA 13.0), flash-attn 2.8.3, triton 3.5.1, transformers 5.16.1, Python 3.12.3 |
 | models | target Qwen3-8B; drafts Qwen3-0.6B and DeepSpec's `dflash_qwen3_8b_block7` |
 | protocol | [`benchmarks/protocol-v2.json`](../../benchmarks/protocol-v2.json), SHA256 `d012e92933cda36f…` |
-| panels | D48 `071befa6898b3187…`; K128 `44f6fb6b4922c3d8…`; GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
+| panels | 48-prompt development set (`panel-48.json`, `071befa6898b3187…`); 128-prompt held-out set (`panel-K128.json`, `44f6fb6b4922c3d8…`); GSM8K test set (openai/grade-school-math `3101c7d`) `3730d312f6e34405…` |
 | tools | [`tools/report_v2.py`](../../tools/report_v2.py) applies the protocol's pre-registered rules; [`tools/stall_stats.py`](../../tools/stall_stats.py) and [`tools/itl_stats.py`](../../tools/itl_stats.py) break down prefill stalls and ITL; [`tools/plot_speedup.py`](../../tools/plot_speedup.py) draws the README figure |
 
 Each run writes one JSON file (schema `bench-v2`) with the protocol's SHA256, a manifest (GPU, driver, library versions, commit, node, and SHA256 of the installed packages and of the panel) and the GPU state before and after the run. Every run's file and log, the gates' outputs, the job scripts and the panels are the release asset [`results-dflash-dspark`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-dflash-dspark), whose README gives the commands that regenerate these tables.
