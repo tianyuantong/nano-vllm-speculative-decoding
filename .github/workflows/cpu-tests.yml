@@ -2,7 +2,7 @@ name: cpu-tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, disagg/dual-gpu-1p1d, baseline/qwen3-0.6b-draft]
   pull_request:
 
 jobs:
