@@ -6,7 +6,7 @@ Single-process, two-thread Prefill-Decode disaggregation for [nano-vLLM](https:/
 
 **Whole-run inter-token latency (ITL) p99 (8–64 concurrent): plain 0.15–0.19× · DSpark 0.24–0.31× | Steady-state throughput (32–64 concurrent): plain 1.35–1.52× · DSpark 1.38–1.39×**
 
-[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
+[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg?branch=disagg%2Fdual-gpu-1p1d)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml?query=branch%3Adisagg%2Fdual-gpu-1p1d)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
@@ -49,11 +49,11 @@ Measured closed-loop on Qwen3-8B across 2 × RTX PRO 6000 (300 W, PCIe P2P) on t
 Inside one Python process, `DisaggLLM` pairs a prefill-only `LLMEngine` on `cuda:0` (eager mode) with a decode/verification `LLMEngine` on `cuda:1` (CUDA Graphs enabled) in ~760 lines of disaggregation code:
 
 ```mermaid
-flowchart LR
-    P["GPU 0 · Prefill thread<br/>(LLMEngine, eager)"] --> Pack["64-bit index_select<br/>contiguous _p_pack buffer"]
-    Pack --> DMA["Single cudaMemcpyPeerAsync<br/>target + 5-layer draft KV"]
-    DMA --> Ring["GPU 1 · 96-block staging ring<br/>(_d_stage, dma_done event)"]
-    Ring --> D["GPU 1 · Decode thread<br/>local index_copy_ & decode"]
+flowchart TB
+    P["GPU 0 · Prefill thread (LLMEngine, eager)"] --> Pack["64-bit index_select contiguous _p_pack buffer"]
+    Pack --> DMA["Single cudaMemcpyPeerAsync push (target + 5-layer draft KV)"]
+    DMA --> Ring["GPU 1 · 96-block staging ring (_d_stage, dma_done event)"]
+    Ring --> D["GPU 1 · Decode thread: local index_copy_ & decode"]
 ```
 
 - **Push-based contiguous ring-buffer handoff ([`nanovllm/disagg/kv_transfer.py`](nanovllm/disagg/kv_transfer.py))**: `KVCacheTransfer` moves both the 36-layer target KV cache and DSpark's 5-layer draft context KV cache. A `threading.Lock` guards only CPU bookkeeping for ring-slot intervals and in-flight deques—all GPU packing, peer DMA copies, and unpacking run outside the lock; source events stay on `cuda:0` for the prefill thread to reclaim blocks, destination `dma_done` events stay on `cuda:1`, and the decode thread never calls into `cuda:0`.
@@ -69,7 +69,7 @@ The dual-GPU smoke gate ([`tools/smoke_pd.py`](tools/smoke_pd.py)) checks three 
 
 ## Engineering pitfalls
 
-- **Cross-thread device waits and `> 2 GiB` per-block KV copy splitting at 64 concurrent requests**: when the decode thread pulled scattered KV blocks directly from `cuda:0`, 3 of 3 runs at 64 concurrent requests stalled for 3.6 s before the first decode round and hit 891–1,035 ms mid-run freezes on plain decoding, leaving post-arrival DSpark ITL p99 at 0.54–0.65× (102–169 ms). The code path and step timelines point to two interactions: (1) `.tolist()` at the end of `ModelRunner.run` on the prefill thread held the `cuda:0` runtime context lock (`CUcontext`) for ~900 ms while `p_stream` drained (leaving only ~9.5–12.6 ms at the start of each batch before `.tolist()`), blocking the decode thread whenever it pulled from `cuda:0` or destroyed `cuda:0` events; and (2) indexing into a 25.5 GiB (`> 2³¹` bytes) KV pool exceeded 32-bit signed offsets across layers, forcing PyTorch's `TensorIterator` to split **each block's** `copy_` into 16 kernels (~1,088 launches across ~68 blocks in a 14-request handoff, overrunning the launch window). Moving 64-bit `index_select` packing, single-transfer `cudaMemcpyPeerAsync` pushes, and `cuda:0` event cleanup onto the prefill thread—so the decode thread never touches `cuda:0`—reduced initial wave stalls from 3/3 to 0/3, cut plain-decoding inter-round stalls from 891–1,035 ms to 25 ms, and lowered DSpark whole-run ITL p99 to 44.8–81.4 ms (0.24–0.31×).
+- **Cross-thread device waits and `> 2 GiB` per-block KV copy splitting at 64 concurrent requests**: when the decode thread pulled scattered KV blocks directly from `cuda:0`, 3 of 3 runs at 64 concurrent requests stalled for 3.6 s before the first decode round and hit 891–1,035 ms mid-run freezes on plain decoding, leaving whole-run DSpark ITL p99 across 8–64 concurrent requests at 59.7–168.0 ms (0.58–0.64×). The code path and step timelines point to two interactions: (1) `.tolist()` at the end of `ModelRunner.run` on the prefill thread held the `cuda:0` runtime context lock (`CUcontext`) for ~900 ms while `p_stream` drained (leaving only ~9.5–12.6 ms at the start of each batch before `.tolist()`), blocking the decode thread whenever it pulled from `cuda:0` or destroyed `cuda:0` events; and (2) indexing into a 25.5 GiB (`> 2³¹` bytes) KV pool exceeded 32-bit signed offsets across layers, forcing PyTorch's `TensorIterator` to split **each block's** `copy_` into 16 kernels (~1,088 launches across ~68 blocks in a 14-request handoff, overrunning the launch window). Moving 64-bit `index_select` packing, single-transfer `cudaMemcpyPeerAsync` pushes, and `cuda:0` event cleanup onto the prefill thread—so the decode thread never touches `cuda:0`—reduced initial wave stalls from 3/3 to 0/3, cut plain-decoding inter-round stalls from 891–1,035 ms to 25 ms, and lowered whole-run DSpark ITL p99 across 8–64 concurrent requests to 31.6–81.4 ms (0.24–0.31×).
 - **Shared process-wide CUDA Graph capture stream and RoPE cache**: `torch.cuda.graph` uses a single process-wide default capture stream unless an explicit `cuda:1` `capture_stream` is passed (otherwise failing with Triton device-pointer errors on the second GPU), while `get_rope`'s `@lru_cache` reused `cuda:0` rotary tensors on `cuda:1`.
 - **Stream-level waits on in-flight KV transfers stall active batches**: making `d_stream` wait directly on `copy_done` forced every running request to wait on PCIe handoffs; polling `dma_done.query()` on the host before admission keeps transfers off the decode stream.
 
