@@ -29,7 +29,7 @@
 | 32 | 1.00× | 1.31× | **1.44×** | 1.10× | 2.70 / 2.95 |
 | 64 | 0.85× | 1.02× | **1.14×** | 1.12× | 2.65 / 2.93 |
 
-表中为基于 NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)（约 1,000 token 长输入，涵盖大海捞针检索、代码补全、古典小说续写与创意写作）分层抽样的同一套 128 题留出测试集上，在 Colab G4（RTX PRO 6000，600 W）相对普通解码的稳态吞吐倍数（3 个 seed 中位数；跨作业共有基线 `k0` 吞吐差在两倍计时噪声内）。0.6B 独立小模型（[`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）与下节变长验证同样测自该测试集；早期 Nebius 机器实测与各 seed 完整区间见 [完整数据与评测协议 →](docs/RESULTS.md) · [0.6B 基线对照详情 →](docs/v2/RESULTS.md)
+表中为基于 NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)（约 1,000 token 长输入，涵盖大海捞针检索、代码补全、古典小说续写与创意写作）分层抽样的同一套 128 题留出测试集上，在 Colab G4（RTX PRO 6000，600 W）相对普通解码的稳态吞吐倍数（3 个 seed 中位数）。0.6B 独立小模型（[`baseline/qwen3-0.6b-draft`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/baseline/qwen3-0.6b-draft)）与下节变长验证同样测自该测试集；早期 Nebius 机器实测与各 seed 完整区间见 [完整数据与评测协议 →](docs/RESULTS.md) · [0.6B 基线对照详情 →](docs/v2/RESULTS.md)
 
 ## 变长验证
 
