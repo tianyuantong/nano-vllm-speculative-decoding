@@ -310,21 +310,23 @@ Engine `c28b1f9`, driver 580.82.07; 66 runs, 0 void. The runs without the option
 
 ### 10.1 Phase and kernel breakdown against the hardware floor
 
-On Colab G4 (RTX PRO 6000 Blackwell Server Edition, 600 W), hardware roofline microbenchmarks (`72f993c`, archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention)) measure a bf16 square GEMM ceiling of `403 TFLOPS` (`8192³`) and a reachable HBM read bandwidth of `1.52 TB/s` (`1.46 TB/s` copy, `85%` of the `1.8 TB/s` datasheet peak; the target model's `13.95 GB` of bf16 weights alone set a `9.18 ms` floor per forward pass). Profiling steady-state full-batch steps at context length `L = 1,300` tokens compares plain decoding (`k0`) and fixed-length DSpark (`dspark_k7`, 8 verified positions per row) against the sum of per-phase weight/KV bandwidth and GEMM compute floors:
+On Colab G4 (RTX PRO 6000 Blackwell Server Edition, 600 W), hardware roofline microbenchmarks (`72f993c`, archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention)) measure a bf16 square GEMM ceiling of `403 TFLOPS` (`8192³`) and a reachable HBM read bandwidth of `1.52 TB/s` (`1.46 TB/s` copy, `85%` of the `1.79 TB/s` datasheet peak). Streaming the target model's `15.14 GB` of bf16 weights sets a `9.96 ms` floor per forward pass, and the 5-layer draft's `3.34 GB` adds a `2.20 ms` floor. At context length `L = 1,300` tokens, full-batch steady-state profiling compares plain decoding (`k0`) and fixed-length DSpark (`dspark_k7`, 8 verified positions per row) against their per-phase weight/KV bandwidth and GEMM compute floors:
 
-| Line | C | Step / round, ms | Roofline floor, ms | Wall / floor | Target GEMM, ms (% of 1.52 TB/s) | Attention, ms (% of 1.52 TB/s) | `accept`, ms (kernels) | `propose`, ms (GEMM / attn / other / gap) |
-|---|---:|---|---|---|---|---|---|---|
-| plain decoding | 1 | 12.21 | 10.30 | 1.19× | 9.75 (94%) | 0.67 (29%) | — | — |
-| plain decoding | 8 | 12.97 | 11.00 | 1.18× | 10.05 (91%) | 1.16 (82%) | — | — |
-| plain decoding | 32 | 17.01 | 13.99 | 1.22× | 11.12 (82%) | 4.02 (87%) | — | — |
-| plain decoding | 64 | 21.41 | 19.18 | 1.12× | 13.98 (66%) | 6.53 (94%) | — | — |
-| DSpark (`k = 7`) | 1 | 16.41 | 11.53 | 1.42× | 9.77 (94%) | 0.87 (39%) | 0.25 (77) | 3.31 (0.71 / 0.30 / 0.89 / 0.72) |
-| DSpark (`k = 7`) | 8 | 19.86 | 12.83 | 1.55× | 11.19 (82%) | 1.88 (53%) | 0.59 (77) | 4.19 (1.41 / 0.45 / 0.90 / 0.71) |
-| DSpark (`k = 7`) | 32 | 29.74 | 16.75 | 1.78× | 13.94 (66%) | 6.46 (56%) | 2.24 (77) | 5.59 (3.09 / 1.01 / 1.05 / 0.68) |
-| DSpark (`k = 7`) | 64 | 49.49 | 23.09 | 2.14× | 23.91 (38% BW / 42% TFLOPS) | 13.26 (61%) | 4.32 (77) | 8.79 (5.00 / 1.84 / 1.48 / 0.76) |
+| Line | C | Step / round, ms | Roofline floor, ms | Wall / floor | Target GEMM, ms | Target attention, ms | `propose` / `accept`, ms |
+|---|---:|---:|---:|---:|---|---|---|
+| plain decoding | 1 | 12.21 | 10.08 | 1.21× | 10.57 (94% BW) | 0.55 (23% BW) | — |
+| plain decoding | 8 | 12.97 | 10.97 | 1.18× | 10.49 (95% BW) | 1.30 (78% BW) | — |
+| plain decoding | 32 | 17.01 | 13.99 | 1.22× | 11.00 (91% BW) | 4.66 (86% BW) | — |
+| plain decoding | 64 | 21.41 | 18.03 | 1.19× | 11.34 (88% BW) | 8.63 (94% BW) | — |
+| DSpark (`k = 7`) | 1 | 16.65 | 12.28 | 1.36× | 10.49 (95% BW) | 1.17 (11% BW) | 3.56 / 0.38 |
+| DSpark (`k = 7`) | 8 | 19.97 | 13.16 | 1.52× | 11.56 (86% BW) | 2.56 (39% BW) | 4.21 / 0.49 |
+| DSpark (`k = 7`) | 32 | 30.78 | 16.19 | 1.90× | 14.28 (70% BW / 67% TF) | 7.21 (56% BW) | 5.59 / 2.24 |
+| DSpark (`k = 7`) | 64 | 51.94 | 22.90 | 2.27× | 23.91 (80% TF) | 13.26 (61% BW) | 8.79 / 4.32 |
 
-`RMSNorm` (`32 × 2 + 1` calls) and `RotaryEmbedding` (`36` calls) already run inside `TorchInductor`-fused kernels (`0.38–1.05 ms` total across 36 target layers), and plain decoding runs within `1.12–1.22×` of the hardware floor (`82–94%` of reachable HBM bandwidth on both target GEMMs at low batch and 1-query decode attention at `C = 8–64`). The remaining gap in DSpark concentrates in two places that `@torch.compile` does not fuse across library boundaries or data-dependent loops:
-1. **Multi-query GQA verification attention and draft cross-attention.** At `C = 32` and `64`, 8-query verification attention reaches only `0.85` and `0.93 TB/s` (`56%` and `61%` of `1.52 TB/s`, vs `87%` and `94%` for 1-query decode over the same KV cache) because `flash_attn_with_kvcache` disables 4:1 GQA query-head packing when `q_len > 1` (§7). At `L = 2,600`, verification attention grows to `23.59 ms` at `C = 64` (`46%` of the round).
+Step, round, `propose`, and `accept` times are unprofiled CUDA-event medians (`ctx_store` adds `0.27–0.54 ms`); GEMM and attention times come from profiler kernel breakdowns (`BW` = share of `1.52 TB/s` reachable HBM read bandwidth, `TF` = share of `403 TFLOPS` bf16 GEMM peak once `8 × C` verified rows cross the `265 FLOP/byte` ridge point; `C = 1` DSpark kernel split from rerun `sol-g4-72f993c-r2`).
+
+`RMSNorm` and `RotaryEmbedding` already run inside `TorchInductor`-fused kernels (`0.26–0.60 ms` across 36 target layers), and plain decoding stays within `1.18–1.22×` of the hardware floor (`88–95%` of reachable HBM bandwidth on target GEMMs across `C = 1–64`, and `78–94%` on 1-query decode attention across `C = 8–64`). At `C = 32` and `64`, target verification GEMMs (`256` and `512` rows) run at `67%` and `80%` of the square-GEMM ceiling, matching standalone cuBLAS microbenchmarks. The remaining gap in DSpark concentrates in two places that `@torch.compile` does not fuse across library boundaries or data-dependent loops:
+1. **Multi-query GQA verification attention and draft cross-attention.** Across `C = 8–64`, 8-query verification attention reaches only `0.60–0.92 TB/s` (`39–61%` of `1.52 TB/s`, vs `78–94%` for 1-query decode over the same KV cache) because `flash_attn_with_kvcache` disables 4:1 GQA query-head packing when `q_len > 1` (§7). At `L = 2,600`, verification attention grows to `30.54 ms` at `C = 64` (`43%` of the `70.95 ms` round).
 2. **Full-vocabulary tensor round-trips in Markov drafting and rejection acceptance.** At `C = 32` and `64`, `accept` spends `2.24` and `4.32 ms` (`2.11` and `4.19 ms` kernel busy time across 77 kernels against a `0.79` and `1.58 ms` single-read floor), repeatedly reading and writing the `[B*8, 151936]` fp32 vocabulary tensor (`311 MB` per pass at `C = 64`). In `propose`, materializing `[B, 7, 151936]` fp32 draft probabilities (`272 MB` at `C = 64`) and running 7 sequential PyTorch top-k / softmax / exponential-race steps adds `1.05–1.48 ms` of small sampling kernels and `0.68–0.76 ms` of inter-kernel launch gaps.
 
 Microbenchmark JSONs, Chrome traces, and `report.md` (`72f993c`) are archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention).
@@ -359,29 +361,29 @@ Experimental branch `exp/fused-kernels` (`08dfb70`, with `69a9d1e` for the ablat
 
 ## 11. Prefix caching with speculative decoding
 
-The 5-layer draft KV cache shares the target model's `BlockManager` and `block_tables` (`block_size = 256`), and `SpeculativeDecoder` calls `block_manager.may_append(seq)` as tokens are accepted. `main` keeps `enable_prefix_cache=False` when a draft model is configured (`nanovllm/config.py`) to isolate the baseline benchmarks; experimental branch `exp/m6-prefix-cache` (`061244b`) lifts that guard and restricts `block_manager.hash_blocks(seq)` to prefill steps so plain and speculative decoding hash identical 256-token prompt blocks. On a 256-prompt SPEED-Bench panel disjoint from D48, K128, and K128b (private prompt median `1,031` tokens, `min = 516`, `max = 1,622`), prepending a shared system prefix of `P ∈ {0, 512, 1024, 2048}` tokens (`0, 2, 4, 8` full KV blocks) tests how prefix caching interacts with plain and speculative decoding across `C ∈ {8, 32, 64}` and 5 seeds (`60` back-to-back cache-off vs cache-on groups on Colab G4, `protocol-v2.6.json`).
+The 5-layer draft KV cache shares the target model's `BlockManager` and `block_tables` (`block_size = 256`), and `SpeculativeDecoder` calls `block_manager.may_append(seq)` as tokens are accepted. `main` keeps `enable_prefix_cache=False` when a draft model is configured (`nanovllm/config.py`) to isolate the baseline benchmarks; experimental branch `exp/m6-prefix-cache` (`061244b`) lifts that guard and restricts `block_manager.hash_blocks(seq)` to prefill steps so plain and speculative decoding hash identical 256-token prompt blocks. On a 256-prompt SPEED-Bench panel disjoint from D48, K128, and K128b (private prompt median `1,031` tokens, `min = 938`, `max = 1,293`), prepending a shared system prefix of `P ∈ {0, 512, 1024, 2048}` tokens (`0, 2, 4, 8` full KV blocks) tests how prefix caching interacts with plain and speculative decoding across `C ∈ {8, 32, 64}` and 5 seeds (`60` back-to-back cache-off vs cache-on groups on Colab G4, `protocol-v2.6.json`).
 
 At `P = 0` (no shared blocks), every one of the 60 `(C, line, seed)` pairs produces bit-identical token outputs with prefix caching on vs off, and steady-state throughput stays within `±0.2%`. Across `P = 512, 1024, 2048`:
 
-| C | Line | `Q_steady` gain `G` (`P = 512`) | `G` (`P = 1024`) | `G` (`P = 2048`, off → on tok/s) | Speculative ratio `R(off) → R(on)` (`P = 1024`) | `R(off) → R(on)` (`P = 2048`) | Relative lead change `ρ − 1` (`P = 1024` / `2048`) |
-|---:|---|---|---|---|---|---|---|
-| 8 | plain decoding | +13.7% (+13.6 … +13.8%) | +24.8% (+24.6 … +25.0%) | +45.9% (530 → 773) | — | — | — |
-| 8 | DFlash (`k = 7`) | +13.2% (+8.4 … +16.1%) | +21.3% (+18.1 … +26.7%) | +45.7% (838 → 1,229) | 1.60 → 1.56 | 1.58 → 1.59 | −2.8% / −0.1% |
-| 8 | DSpark, fixed length | +15.7% (+14.0 … +18.3%) | +26.9% (+22.5 … +30.0%) | +47.8% (923 → 1,355) | 1.72 → 1.75 | 1.73 → 1.75 | +1.7% / +1.4% |
-| 8 | DSpark, variable length | +13.0% (+11.1 … +15.0%) | +26.9% (+22.1 … +28.2%) | +47.4% (925 → 1,357) | 1.73 → 1.74 | 1.74 → 1.76 | +1.8% / +0.9% |
-| 32 | plain decoding | +17.4% (+17.2 … +17.5%) | +31.8% (+31.5 … +32.3%) | +59.9% (1,123 → 1,796) | — | — | — |
-| 32 | DFlash (`k = 7`) | +13.2% (+8.4 … +22.5%) | +22.8% (+20.8 … +25.0%) | +40.9% (1,341 → 1,896) | 1.24 → 1.15 | 1.20 → 1.06 | −6.9% / −11.9% |
-| 32 | DSpark, fixed length | +16.7% (+12.4 … +20.0%) | +22.6% (+20.1 … +26.6%) | +43.6% (1,508 → 2,174) | 1.37 → 1.29 | 1.35 → 1.21 | −6.9% / −10.2% |
-| 32 | DSpark, variable length | +14.6% (+13.3 … +18.4%) | +23.8% (+17.2 … +27.3%) | +43.9% (1,558 → 2,248) | 1.41 → 1.33 | 1.39 → 1.25 | −5.9% / −10.1% |
-| 64 | plain decoding | +19.9% (+19.2 … +20.2%) | +37.4% (+37.0 … +38.0%) | +69.7% (1,103 → 1,873) | — | — | — |
-| 64 | DFlash (`k = 7`) | +13.7% (+10.8 … +16.8%) | +26.8% (+21.6 … +27.8%) | +56.0% (1,073 → 1,649) | 1.01 → 0.94 | 0.96 → 0.88 | −7.8% / −8.0% |
-| 64 | DSpark, fixed length | +15.8% (+13.9 … +20.6%) | +32.0% (+29.6 … +34.4%) | +63.6% (1,164 → 1,923) | 1.11 → 1.07 | 1.07 → 1.03 | −4.2% / −3.8% |
-| 64 | DSpark, variable length | +16.9% (+13.9 … +17.9%) | +30.1% (+28.6 … +36.4%) | +67.4% (1,294 → 2,157) | 1.24 → 1.17 | 1.17 → 1.15 | −5.4% / −1.4% |
+| C | Line | Gain (`P = 512`) | Gain (`P = 1024`) | Gain (`P = 2048`, off → on tok/s) | Speedup `R`, `P = 1024` | Speedup `R`, `P = 2048` | `R` change (`P = 1024` / `2048`) |
+|---:|---|---:|---:|---|---:|---:|---:|
+| 8 | plain decoding | +6.2% | +11.5% | +20.0% (448 → 539) | — | — | — |
+| 8 | DFlash (`k = 7`) | +3.7% | +14.2% | +24.5% (717 → 866) | 1.69 → 1.74 | 1.60 → 1.61 | +2.4% / +3.5% |
+| 8 | DSpark, fixed length | +9.4% | +11.1% | +27.9% (774 → 968) | 1.82 → 1.86 | 1.72 → 1.80 | −0.3% / +6.4% |
+| 8 | DSpark, variable length | +7.3% | +12.2% | +22.2% (767 → 937) | 1.82 → 1.81 | 1.70 → 1.74 | +0.5% / +1.9% |
+| 32 | plain decoding | +14.4% | +32.1% | +60.5% (915 → 1,470) | — | — | — |
+| 32 | DFlash (`k = 7`) | +13.4% | +23.9% | +40.2% (1,206 → 1,689) | 1.37 → 1.26 | 1.31 → 1.15 | −6.0% / −11.9% |
+| 32 | DSpark, fixed length | +12.4% | +21.2% | +44.6% (1,307 → 1,890) | 1.52 → 1.41 | 1.42 → 1.28 | −8.3% / −10.2% |
+| 32 | DSpark, variable length | +13.3% | +22.1% | +44.7% (1,302 → 1,871) | 1.52 → 1.41 | 1.41 → 1.27 | −7.6% / −10.1% |
+| 64 | plain decoding | +19.9% | +37.4% | +69.7% (1,103 → 1,873) | — | — | — |
+| 64 | DFlash (`k = 7`) | +13.4% | +27.1% | +57.4% (1,161 → 1,833) | 1.11 → 1.02 | 1.05 → 0.98 | −7.9% / −7.2% |
+| 64 | DSpark, fixed length | +15.6% | +30.5% | +62.3% (1,269 → 2,074) | 1.21 → 1.15 | 1.14 → 1.11 | −5.0% / −4.2% |
+| 64 | DSpark, variable length | +16.9% | +30.1% | +67.4% (1,294 → 2,157) | 1.28 → 1.21 | 1.17 → 1.15 | −5.3% / −1.6% |
 
-Values are medians over 5 seeds (`G = Q_steady(on) ÷ Q_steady(off) − 1`, `ρ = R(on) ÷ R(off)` paired by seed).
+Values are 5-seed medians of steady-state throughput gain (`Q_steady(on) ÷ Q_steady(off) − 1`) and paired speedup change (`R(on) ÷ R(off) − 1`, off → on). Every `(C, line, P)` cell improves across all 5 seeds; at `C = 32–64` and `P ≥ 1024`, `R` narrows on all 5 seeds in 11 of the 12 cells (at `C = 64, P = 2048`, variable-length DSpark spans `−3.4%` to `+0.3%` across seeds; per-seed ranges are in each panel's `report.md` in release [`results-prefix-cache`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-prefix-cache)).
 
-- **Absolute throughput and TTFT improve on every line.** Enabling prefix caching raises `Q_steady` by `13–70%` across all concurrencies and lines (`dspark_var` reaches `2,642 / 2,466 / 2,157 tok/s` at `C = 64` for `P = 512 / 1024 / 2048`), while steady-state TTFT p50 drops from `70 / 96 / 148 ms` to `51 / 53 / 59 ms` because arriving requests skip prefill on the `2 / 4 / 8` shared blocks after the first wave.
-- **Why speculative decoding's relative lead (`R`) narrows at `C ≥ 32, P ≥ 1024`.** Both plain and speculative decoding save the exact same fraction of prefill time (`29% / 44% / 61%` at `P = 512 / 1024 / 2048`), and tokens accepted per round change by less than `0.5%`. The shift comes from full-batch decode steps: when all `C` active requests point to the same physical KV block IDs for the shared prefix, those blocks remain resident in the GPU's L2 cache (`96 MB` on RTX PRO 6000) across sequences within a step. That shortens 1-query plain decode steps by `3–26%` (`21.38 → 18.88 ms` at `C = 32, P = 2048`, and `31.11 → 23.02 ms` at `C = 64, P = 2048`), whereas 8-query verification steps shorten by `< 2%` at `C ≤ 32` (`32.72 → 32.16 ms`) and `13–18%` at `C = 64` (`62.08 → 52.89 ms`). Single-layer attention benchmarks (archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention)) confirm the asymmetry: sharing prefix KV blocks speeds up `q_len = 1` attention by `42–55%` at `C = 32–64, P = 2048`, compared with `5–23%` at `q_len = 4–8`.
+- **Absolute throughput and TTFT improve on every line.** Enabling prefix caching raises `Q_steady` by `4–28%` at `C = 8` and `12–70%` at `C = 32–64` (`dspark_var` reaches `2,642 / 2,466 / 2,157 tok/s` at `C = 64` for `P = 512 / 1024 / 2048`). Steady-state TTFT p50 drops from `70–74 / 93–97 / 135–148 ms` to `51–59 ms` because arriving requests skip prefill on the `2 / 4 / 8` shared blocks after the first wave.
+- **Why speculative speedup `R` narrows at `C ≥ 32, P ≥ 1024`.** Plain and speculative decoding save the same fraction of prefill time (`28–30% / 43–45% / 60–62%` at `P = 512 / 1024 / 2048`), and accepted tokens per round stay within `±2%` at `P = 2048` (`±4%` at `P = 1024`). The shift comes from full-batch decode steps: when all `C` active requests read the same physical KV block IDs for the shared prefix, 1-query plain decode steps shorten by `7–26%` at `C = 32–64` (`23.05 → 17.18 ms` at `C = 32, P = 2048`, and `33.41 → 24.78 ms` at `C = 64, P = 2048`), whereas 8-query verification steps shorten by `≤ 2%` at `C ≤ 32` (`31.02 → 30.37 ms` on fixed-length DSpark at `C = 32, P = 2048`) and `19–21%` at `C = 64, P = 2048` (`65.36 → 53.15 ms`). Single-layer attention benchmarks (archived in release [`results-verify-attention`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-verify-attention)) confirm the asymmetry: sharing prefix KV blocks speeds up `q_len = 1` attention by `42–55%` at `C = 32–64, P = 2048`, compared with `5–23%` at `q_len = 4–8`.
 
 Run JSONs, summary reports, and git bundle (`exp/m6-prefix-cache` at `2dea7f7`, engine `061244b`) are archived in release [`results-prefix-cache`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/releases/tag/results-prefix-cache).
 
