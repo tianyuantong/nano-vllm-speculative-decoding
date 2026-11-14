@@ -6,7 +6,7 @@
 
 **单请求 1.54× · 8 并发 1.21× · 32 并发 0.96× · 64 并发 0.82×**
 
-[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
+[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg?branch=baseline%2Fqwen3-0.6b-draft)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml?query=branch%3Abaseline%2Fqwen3-0.6b-draft)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
@@ -15,7 +15,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-06b-k128-dark.svg">
-  <img alt="Qwen3-0.6B 独立小模型（k=3）相对普通解码的稳态吞吐倍数。左图（128 题留出测试集，3 个 seed 中位数）：1/8/32/64 并发下为 1.54×、1.21×、0.96×、0.82×；右图（48 题开发集细粒度拐点曲线，5 个 seed 中位数）：1/2/4/8/16/32/64 并发下为 1.47×、1.42×、1.32×、1.17×、1.03×、0.94×、0.79×。" src="docs/assets/speedup-06b-k128-light.svg" width="760">
+  <img alt="Qwen3-0.6B 独立小模型（k=3）相对普通解码的稳态吞吐倍数。左图（第一批 128 题留出测试集，3 个 seed 中位数）：1/8/32/64 并发下为 1.54×、1.21×、0.96×、0.82×；右图（48 题开发集细粒度拐点曲线，5 个 seed 中位数）：1/2/4/8/16/32/64 并发下为 1.47×、1.42×、1.32×、1.17×、1.03×、0.94×、0.79×。" src="docs/assets/speedup-06b-k128-light.svg" width="760">
 </picture>
 
 </div>
@@ -31,13 +31,13 @@
 | 32 | 0.96× | 2.53 | 被验证成本反超 |
 | 64 | 0.82× | 2.53 | 被验证成本反超 |
 
-表中为基于 NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)（约 1,000 token 长输入，涵盖大海捞针检索、代码补全、古典小说续写与创意写作）分层抽样的 128 题留出测试集（对应左图）上，同一作业内相对普通解码的稳态吞吐倍数（3 个 seed 中位数）。右图展示了同源 48 题开发集（5 个 seed 中位数）在 1 / 2 / 4 / 8 / 16 / 32 / 64 并发下的完整衰减曲线（**1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**），盈亏拐点清晰落在 16 至 32 并发之间。各 seed 波动区间与阶段耗时见 [完整对照结果 →](docs/v2/RESULTS.md) · [初版评测报告 →](docs/v1/RESULTS.md)
+表中为基于 NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)（约 1,000 token 长输入，涵盖大海捞针检索、代码补全、古典小说续写与创意写作）分层抽样的第一批 128 题留出测试集（对应左图）上，同一作业内相对普通解码的稳态吞吐倍数（3 个 seed 中位数；[`main` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)采用互不重叠的第二批 128 题留出测试集）。右图展示了同源 48 题开发集（5 个 seed 中位数）在 1 / 2 / 4 / 8 / 16 / 32 / 64 并发下的完整衰减曲线（**1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**），盈亏拐点清晰落在 16 至 32 并发之间。各 seed 波动区间与阶段耗时见 [完整对照结果 →](docs/v2/RESULTS.md) · [初版评测报告 →](docs/v1/RESULTS.md)
 
 ## 性能拆解与瓶颈分析（为什么演进到块式草稿）
 
 - **串行自回归起草占去整轮三分之一耗时。** Qwen3-0.6B（28 层）单步前向仅需读取 1.2 GB 权重（带宽理论下限 0.7 ms），但每步约 300 个算子的启动开销使单步实测耗时达 2.1–3.6 ms。每轮串行跑 k=3 步加上追赶步共耗时 6–13 ms（占整轮 19–31 ms 的三分之一以上），继续增大 k 得不偿失。
 - **高并发下验证步算力成本反超。** Target 一次前向同时验证整批请求的 k+1 个候选位置；并发升至 16 时加速比收窄至 1.03×，32 并发起跌破 1×（0.94–0.96×）。
-- **推动第二代块式草稿（`main` 分支）。** 为消除多步自回归起草与双模型独立 KV 开销，`main` 分支改用 5 层非因果块式草稿（DFlash / DSpark），一次前向并行提出 7 个候选 token 并与 target 共用块表，在同一批 128 题留出测试集上将加速比提升至 **2.19× / 1.80× / 1.40× / 1.08×**（为本分支 0.6B 基线的 1.31–1.48 倍）。
+- **推动第二代块式草稿（[`main` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)）。** 为消除多步自回归起草与双模型独立 KV 开销，第二代改用 5 层非因果块式草稿（DFlash），一次前向并行提出 7 个候选 token 并与 target 共用块表，在同一第一批 128 题留出测试集上将加速比提升至 **2.19× / 1.80× / 1.40× / 1.08×**（为本分支 0.6B 基线的 1.31–1.48 倍，见 [docs/v2/RESULTS.md](docs/v2/RESULTS.md)）；后续 DSpark 与变长验证结果位于 [`main` 分支](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)。
 
 ## 核心实现
 
@@ -48,7 +48,7 @@
 - **GPU 向量化拒绝采样**：候选概率、目标概率比对及残差分布重采样全部由 GPU 向量化算子（`SpecSampler`）整批处理，每轮仅做一次设备到主机（D2H）同步拷贝，采样阶段耗时压至 0.03–0.5 ms（[`nanovllm/layers/spec_sampler.py`](nanovllm/layers/spec_sampler.py)）。
 
 ```mermaid
-flowchart LR
+flowchart TB
     D["0.6B 串行起草 k 步"] --> V["8B 一次前向验证 k+1 位"]
     V --> A["GPU 批量拒绝采样"]
     A --> C["同步回滚双模型 KV 状态"]
@@ -104,7 +104,7 @@ finally:
 
 ## 复现
 
-先从 NVIDIA SPEED-Bench 拉取并构建 128 题留出测试集（`--panel K128`，48 题开发集为 `D48`），再在同一目录下跑完普通解码（`k0`）与 0.6B 投机解码（`model_k3`）的各并发及 seed：
+先从 NVIDIA SPEED-Bench 拉取并构建第一批 128 题留出测试集（`--panel K128`，48 题开发集为 `D48`），再在同一目录下跑完普通解码（`k0`）与 0.6B 投机解码（`model_k3`）的各并发及 seed：
 
 ```bash
 python -m pytest -q    # CPU 测试

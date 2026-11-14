@@ -6,7 +6,7 @@ Batched speculative decoding with a standalone draft model (Qwen3-0.6B) for [nan
 
 **Single-request 1.54× · 8 concurrent 1.21× · 32 concurrent 0.96× · 64 concurrent 0.82×**
 
-[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml)
+[![cpu-tests](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml/badge.svg?branch=baseline%2Fqwen3-0.6b-draft)](https://github.com/tianyuantong/nano-vllm-speculative-decoding/actions/workflows/cpu-tests.yml?query=branch%3Abaseline%2Fqwen3-0.6b-draft)
 ![Python 3.10–3.12](https://img.shields.io/badge/python-3.10--3.12-blue)
 ![CUDA Graph](https://img.shields.io/badge/CUDA_Graph-enabled-76b900)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
@@ -15,7 +15,7 @@ Batched speculative decoding with a standalone draft model (Qwen3-0.6B) for [nan
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/speedup-06b-k128-dark.svg">
-  <img alt="Steady-state throughput speedup of the Qwen3-0.6B standalone draft (k=3) over plain decoding. Left (128-prompt held-out test set, 3-seed medians): 1.54×, 1.21×, 0.96×, 0.82× at 1, 8, 32, 64 concurrent requests. Right (48-prompt crossover curve, 5-seed medians): 1.47×, 1.42×, 1.32×, 1.17×, 1.03×, 0.94×, 0.79× at 1, 2, 4, 8, 16, 32, 64 concurrent requests." src="docs/assets/speedup-06b-k128-light.svg" width="760">
+  <img alt="Steady-state throughput speedup of the Qwen3-0.6B standalone draft (k=3) over plain decoding. Left (initial 128-prompt held-out test set, 3-seed medians): 1.54×, 1.21×, 0.96×, 0.82× at 1, 8, 32, 64 concurrent requests. Right (48-prompt crossover curve, 5-seed medians): 1.47×, 1.42×, 1.32×, 1.17×, 1.03×, 0.94×, 0.79× at 1, 2, 4, 8, 16, 32, 64 concurrent requests." src="docs/assets/speedup-06b-k128-light.svg" width="760">
 </picture>
 
 </div>
@@ -31,13 +31,13 @@ Measured on Qwen3-8B (target) + Qwen3-0.6B (draft, k=3) on a single RTX PRO 6000
 | 32 | 0.96× | 2.53 | Overtaken by verification cost |
 | 64 | 0.82× | 2.53 | Overtaken by verification cost |
 
-Values are steady-state throughput multiples over plain decoding in the same job on the 128-prompt held-out test set stratified from NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) (~1,000-token prompts spanning needle-in-a-haystack retrieval, code completion, book continuation, and creative writing; left panel, medians over 3 seeds). The right panel shows the full decay curve across 1 / 2 / 4 / 8 / 16 / 32 / 64 concurrent requests on the 48-prompt SPEED-Bench development set (medians over 5 seeds: **1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**), placing the break-even point between 16 and 32 concurrent requests. Per-seed ranges and phase timings are in [Full comparison details →](docs/v2/RESULTS.md) · [Initial v1 report →](docs/v1/RESULTS.md)
+Values are steady-state throughput multiples over plain decoding in the same job on the initial 128-prompt held-out test set stratified from NVIDIA [SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) (~1,000-token prompts spanning needle-in-a-haystack retrieval, code completion, book continuation, and creative writing; left panel, medians over 3 seeds; [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main) evaluates on a second disjoint 128-prompt held-out set). The right panel shows the full decay curve across 1 / 2 / 4 / 8 / 16 / 32 / 64 concurrent requests on the 48-prompt SPEED-Bench development set (medians over 5 seeds: **1.47× → 1.42× → 1.32× → 1.17× → 1.03× → 0.94× → 0.79×**), placing the break-even point between 16 and 32 concurrent requests. Per-seed ranges and phase timings are in [Full comparison details →](docs/v2/RESULTS.md) · [Initial v1 report →](docs/v1/RESULTS.md)
 
 ## Performance breakdown and bottlenecks (why we moved to block drafting)
 
 - **Serial autoregressive drafting takes over a third of each round.** Although reading Qwen3-0.6B's 1.2 GB of weights takes only 0.7 ms at peak bandwidth, launching ~300 kernels across its 28 layers costs 2.1–3.6 ms per step. Running k=3 serial draft steps plus the catch-up step takes 6–13 ms out of a 19–31 ms round, making larger k unprofitable.
 - **Verification compute overtakes draft savings at high concurrency.** The target model scores k+1 positions per request in one forward pass; as concurrency rises, verification cost grows linearly, reaching break-even near 16 concurrent requests (1.03×) and falling below 1× from 32 concurrent requests onward (0.94–0.96×).
-- **Motivation for Stage 2 block drafting (`main` branch).** Eliminating serial draft steps and dual KV caches with a 5-layer non-causal block draft (DFlash / DSpark) proposes 7 tokens in a single forward pass and raises speedups on the same 128-prompt test set to **2.19× / 1.80× / 1.40× / 1.08×** (1.31–1.48× faster than this 0.6B baseline).
+- **Motivation for Stage 2 block drafting ([`main` branch](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main)).** Eliminating serial draft steps and dual KV caches with a 5-layer non-causal block draft (DFlash) proposes 7 tokens in a single forward pass and raises speedups on this initial 128-prompt test set to **2.19× / 1.80× / 1.40× / 1.08×** (1.31–1.48× faster than this 0.6B baseline; see [docs/v2/RESULTS.md](docs/v2/RESULTS.md)). Subsequent DSpark and variable-length results are on [`main`](https://github.com/tianyuantong/nano-vllm-speculative-decoding/tree/main).
 
 ## Core implementation
 
@@ -48,7 +48,7 @@ This branch integrates standalone-model drafting, single-pass target verificatio
 - **Vectorized GPU rejection sampling**: proposal probabilities, target ratios, and residual resampling stay entirely on the GPU via `SpecSampler`, copying results to the CPU once per round in 0.03–0.5 ms ([`nanovllm/layers/spec_sampler.py`](nanovllm/layers/spec_sampler.py)).
 
 ```mermaid
-flowchart LR
+flowchart TB
     D["0.6B serial draft (k steps)"] --> V["8B single-pass verify (k+1 pos)"]
     V --> A["Batched GPU rejection sampling"]
     A --> C["Sync & rollback dual KV states"]
@@ -104,7 +104,7 @@ Omit `draft_model` and `num_speculative_tokens` for plain decoding.
 
 ## Reproduce
 
-Fetch NVIDIA SPEED-Bench and build the 128-prompt held-out test set (`--panel K128`; the 48-prompt dev set is `D48`), then run plain decoding (`k0`) and the 0.6B speculative line (`model_k3`) across concurrencies and seeds in one directory:
+Fetch NVIDIA SPEED-Bench and build the initial 128-prompt held-out test set (`--panel K128`; the 48-prompt dev set is `D48`), then run plain decoding (`k0`) and the 0.6B speculative line (`model_k3`) across concurrencies and seeds in one directory:
 
 ```bash
 python -m pytest -q    # CPU tests
