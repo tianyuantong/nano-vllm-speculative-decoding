@@ -51,7 +51,7 @@
 ```mermaid
 flowchart TB
     P["GPU 0 · Prefill 线程 (LLMEngine, eager)"] --> Pack["64 位 index_select 连续打包缓冲 _p_pack"]
-    Pack --> DMA["单次 cudaMemcpyPeerAsync 跨卡推送 target + 5 层 draft KV"]
+    Pack --> DMA["单次跨设备 copy_(non_blocking=True) 异步推送 target + 5 层 draft KV"]
     DMA --> Ring["GPU 1 · 96 块连续环形缓冲 (_d_stage, dma_done 事件)"]
     Ring --> D["GPU 1 · Decode 线程：本地 index_copy_ 解包并解码"]
 ```
@@ -69,7 +69,7 @@ flowchart TB
 
 ## 踩过的坑
 
-- **64 并发下跨线程设备等待与 `> 2 GiB` KV 逐块拷贝拆核**：早期由 decode 线程跨卡拉取离散 KV 块时，64 并发下 `3/3` 次运行在起步前 3.6 s 内无法启动首轮解码，稳态普通解码偶发 891–1,035 ms 停顿，8–64 并发下 DSpark 全程 ITL p99 停在 59.7–168.0 ms（0.58–0.64×）。源码路径与步时间线指向两处交互：① prefill 线程步末 `.tolist()` 同步拷贝结果期间（64 并发一批约 900 ms）持有 `cuda:0` 运行时上下文锁（`CUcontext`），每批仅开头约 9.5–12.6 ms 尚未进入 `.tolist()`，decode 线程跨卡拉取块或析构 `cuda:0` 事件即会被阻塞；② 64 并发下 KV 池达 25.5 GiB（`> 2³¹` 字节），单块跨层切片偏移超出 32 位有符号整数上限，触发 PyTorch `TensorIterator` 将**每块** `copy_` 拆成 16 个 kernel（一批 14 条请求约 68 块共发射约 1,088 次 kernel，越过发射窗口）。改为在 prefill 线程做 `int64` 连续打包与单次 `cudaMemcpyPeerAsync` 推送、decode 线程不碰 `cuda:0` 后，64 并发起步等待降为 `0/3`，普通解码轮间最长间隔从 891–1,035 ms 降至 25 ms，8–64 并发下 DSpark 全程 ITL p99 降至 31.6–81.4 ms（0.24–0.31×）。
+- **64 并发下跨线程设备等待与 `> 2 GiB` KV 逐块拷贝拆核**：早期由 decode 线程跨卡拉取离散 KV 块时，64 并发下 `3/3` 次运行在起步前 3.6 s 内无法启动首轮解码，稳态普通解码偶发 891–1,035 ms 停顿，8–64 并发下 DSpark 全程 ITL p99 停在 59.7–168.0 ms（0.58–0.64×）。源码路径与步时间线指向两处交互：① prefill 线程步末 `.tolist()` 同步拷贝结果期间（64 并发一批约 900 ms）持有 `cuda:0` 运行时上下文锁（`CUcontext`），每批仅开头约 9.5–12.6 ms 尚未进入 `.tolist()`，decode 线程跨卡拉取块或析构 `cuda:0` 事件即会被阻塞；② 64 并发下 KV 池达 25.5 GiB（`> 2³¹` 字节），单块跨层切片偏移超出 32 位有符号整数上限，触发 PyTorch `TensorIterator` 将**每块** `copy_` 拆成 16 个 kernel（一批 14 条请求约 68 块共发射约 1,088 次 kernel，越过发射窗口）。改为在 prefill 线程做 `int64` 连续打包与单次跨设备 `copy_(non_blocking=True)` 异步推送（PyTorch 2.9.1 在 P2P 启用时走 `cudaMemcpyAsync` 分支）、decode 线程不碰 `cuda:0` 后，64 并发起步等待降为 `0/3`，普通解码轮间最长间隔从 891–1,035 ms 降至 25 ms，8–64 并发下 DSpark 全程 ITL p99 降至 31.6–81.4 ms（0.24–0.31×）。
 - **同进程双卡捕获 CUDA Graph 与全局缓存串卡**：PyTorch `torch.cuda.graph` 的默认捕获流在整个进程只有一条，不在第二张卡显式传入 `cuda:1` 专属 `capture_stream` 会触发 Triton 设备指针报错；同时 `get_rope` 的 `@lru_cache` 会把 `cuda:0` 上的旋转位置编码张量复用到 `cuda:1`。
 - **解码流直接等待跨卡拷贝事件会拖慢整批请求**：早期让 `d_stream` 直接 `wait_event(copy_done)`，导致每次交接时整批在跑请求一起等待 PCIe 传输；改为在主机端轮询 `dma_done.query()` 就绪后再接纳解包，解耦传输与解码步。
 

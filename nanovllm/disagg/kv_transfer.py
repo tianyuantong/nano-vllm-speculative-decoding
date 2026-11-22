@@ -45,7 +45,7 @@ class KVCacheTransfer:
     1. `begin_handoff` runs on P's thread right after `prefill_step`:
        - `transfer_stream.wait_event(prefill_done_event)` waits on GPU 0 for P's prefill writes.
        - One `torch.index_select` per cache packs scattered `p_blocks` into a contiguous buffer on P (`_p_pack`),
-         followed by a single contiguous `copy_(non_blocking=True)` (`cudaMemcpyPeerAsync` DMA) into D's staging ring
+         followed by a single contiguous `copy_(non_blocking=True)` (`cudaMemcpyAsync` under P2P in PyTorch 2.9.1) into D's staging ring
          (`_d_stage`). When P and D share a device, `index_select` writes directly into `_d_stage`.
        - `p_done` is recorded on `transfer_stream` (`p_device`) so P reclaims `p_blocks` on its own device without
          waiting for D to admit the sequence; `dma_done` is recorded on `d_transfer_stream` (`d_device`) so D queries
